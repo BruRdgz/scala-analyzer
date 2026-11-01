@@ -5,9 +5,9 @@ import scalapsihost.language.{QuickDoc}
 /** The plugin's documentation HTML as Markdown: fragments shaped like the generator's output, and the Markdown expected of them. */
 class QuickDocTest extends munit.FunSuite {
   private def doc(content: String = "", sections: String = ""): String =
-    s"<html><head><style>p { margin: 0; }</style></head><body><div class=\"bottom\">spike</div>\n" +
-      s"<div class='definition'><pre>def signature</pre></div><div class='content'>$content</div>" +
-      s"<table class='sections'>$sections</table></body></html>"
+    s"""<html><head><style>p { margin: 0; }</style></head><body><div class="bottom"></div>
+       |<div class='definition'><pre>def signature</pre></div><div class='content'>$content</div>
+       |<table class='sections'>$sections</table></body></html>""".stripMargin
 
   private val box = """<html><head><style>p { margin: 0; }</style></head><body><div class="bottom"><icon src="AllIcons.Nodes.Package"/>&nbsp;<a href="psi_element://spike"><code>spike</code></a></div>
 <div class='definition'><pre><span style="">class</span> <span style="">Box</span>[<span style="">A</span>](<span style="">val </span>v: <span style="">A</span>)</pre></div><div class='content'>A box holding one value.
@@ -29,7 +29,9 @@ b.map(_ + 1)</code></pre>
 
   private val conversions = Seq(
     "a class's doc" -> (box,
-      """A box holding one value.
+      """**Defined in:** `spike`
+        |
+        |A box holding one value.
         |
         |Use `Box.map` to transform it, or see `scala.Option`. Some `inline code`, **bold**, *italic*.
         |
@@ -41,29 +43,45 @@ b.map(_ + 1)</code></pre>
         |- first item
         |- second item
         |
-        |**Params:** `v` – the value
+        |### Parameters
         |
-        |**Type parameters:** `A` – the value's type
+        |- `v` – the value
         |
-        |**See also:** [the docs](https://example.org)""".stripMargin),
+        |### Type parameters
+        |
+        |- `A` – the value's type
+        |
+        |### See also
+        |
+        |- [the docs](https://example.org)""".stripMargin),
     "a method's doc" -> (map,
-      """Applies `f` to the value.
+      """**Defined in:** `spike.Box`
         |
-        |**Params:** `f` – the function
+        |Applies `f` to the value.
         |
-        |**Returns:** a new box
+        |### Parameters
         |
-        |**Throws:** `IllegalStateException` – never""".stripMargin),
+        |- `f` – the function
+        |
+        |### Returns
+        |
+        |a new box
+        |
+        |### Throws
+        |
+        |- `IllegalStateException` – never""".stripMargin),
     "a section with several entries" -> (two,
       """Two.
         |
-        |**Params:**
+        |### Parameters
+        |
         |- `a` – first
         |- `b` – second `x` too
         |
-        |**See also:** [A](https://a.org)
+        |### See also
         |
-        |**See also:** [B](https://b.org)""".stripMargin),
+        |- [A](https://a.org)
+        |- [B](https://b.org)""".stripMargin),
     "a code span with a backtick" -> (doc("<tt>a`b</tt> and <tt>``</tt>"), "``a`b`` and ``` `` ```"),
     "a code block with indentation and blank lines" ->
       (doc("<pre>if (x) {\n  y\n\n}\n</pre>"), "```scala\nif (x) {\n  y\n\n}\n```"),
@@ -76,9 +94,28 @@ b.map(_ + 1)</code></pre>
     "markdown characters in code" -> (doc("<tt>a_b *c*</tt><pre>[d] #e</pre>"), "`a_b *c*`\n\n```scala\n[d] #e\n```"),
     "whitespace" -> (doc("  a \n\n   b  <p>  c</p><p></p><p>d</p> "), "a b\n\nc\n\nd"),
     "a table inside the content" ->
-      (doc("before<table><tr><td>cell</td></tr></table><div>inner</div><p>after</p>") + "<div>outside</div>", "beforecellinner\n\nafter"),
+      (doc("before<table><tr><td>cell</td></tr></table><div>inner</div><p>after</p>") + "<div>outside</div>", "before\n\n|  |\n| --- |\n| cell |\n\ninner\n\nafter"),
+    "a table with headers and escaped cell separators" ->
+      (doc("<table><tr><th>Name</th><th>Value</th></tr><tr><td><code>a|b</code></td><td>first<br>second</td></tr></table>"),
+        "| Name | Value |\n| --- | --- |\n| `a\\|b` | first<br>second |"),
+    "nested ordered and unordered lists" ->
+      (doc("<ol><li>one<ul><li>inner</li></ul></li><li>two</li></ol>"), "1. one\n   - inner\n2. two"),
+    "a literal code fence" ->
+      (doc("<pre>```md\nexample\n```</pre>"), "````scala\n```md\nexample\n```\n````"),
+    "a table within a documentation section" ->
+      (doc(sections = "<tr><td class='section'>Returns:</td><td>Values:<table><tr><th>Key</th><th>Value</th></tr><tr><td>a</td><td>1</td></tr></table>After.</td></tr>"),
+        "### Returns\n\nValues:\n\n| Key | Value |\n| --- | --- |\n| a | 1 |\n\nAfter."),
+    "paragraphs and code inside a list item" ->
+      (doc("<ul><li>Start<p><b>More.</b></p><p><code>value</code> here.</p><pre>x\ny</pre></li><li>Next</li></ul>"),
+        "- Start\n\n  **More.**\n\n  `value` here.\n\n  ```scala\n  x\n  y\n  ```\n\n- Next"),
+    "paragraphs within a return section" ->
+      (doc(sections = "<tr><td class='section'>Returns:</td><td><p>A result.</p><p>May be empty.</p></td></tr>"),
+        "### Returns\n\nA result.\n\nMay be empty."),
+    "external link destinations with Markdown delimiters" ->
+      (doc("<a href='https://example.org/f(a)'>reference</a> and <a href='psi_element://A'>A</a>"),
+        "[reference](https://example.org/f%28a%29) and A"),
     "an unknown tag" -> (doc("<span style=\"x\">text</span> <icon src=\"y\"/>more"), "text more"),
-    "a section without content" -> (doc(sections = "<tr><td class='section'><p>Returns:</td><td>x</td>"), "**Returns:** x"),
+    "a section without content" -> (doc(sections = "<tr><td class='section'><p>Returns:</td><td>x</td>"), "### Returns\n\nx"),
   )
 
   conversions.foreach { case (name, (html, markdown)) =>

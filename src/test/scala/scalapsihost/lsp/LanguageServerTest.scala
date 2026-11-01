@@ -367,7 +367,7 @@ class LanguageServerTest extends munit.FunSuite {
     val markdown = hover.getContents.getRight.getValue
     assert(markdown.contains("Greets `name` **warmly**."), markdown)
     assert(markdown.contains("```scala\nGreet3.hello(\"you\")\n```"), markdown)
-    assert(markdown.contains("**Params:** `name` – who to greet"), markdown)
+    assert(markdown.contains("### Parameters\n\n- `name` – who to greet"), markdown)
   }
 
   // Inside the literal "Hello, $name": text, not a symbol.
@@ -492,7 +492,7 @@ class LanguageServerTest extends munit.FunSuite {
     val javaFile = fixture.resolve("core/src/main/java/core/Shout.java")
     val original = Files.readString(javaFile)
     val text = original.replace("    public static String loud",
-      "    /** Returns uppercase text. <pre>String example;</pre> */ public static String loud")
+      "    /** Returns uppercase text. <pre>String example;</pre>\n     * @param text text to convert\n     * @return uppercase text\n     */ public static String loud")
     val service = implementation.getTextDocumentService
     service.didOpen(new DidOpenTextDocumentParams(new TextDocumentItem(javaFile.toUri.toString, "java", 100, text)))
     try {
@@ -505,6 +505,8 @@ class LanguageServerTest extends munit.FunSuite {
       assert(rendered.contains("loud") && rendered.contains("String"), rendered)
       assert(rendered.contains("Returns uppercase text."), rendered + "\n" + Client.logged.asScala.filter(_.getMessage.contains("no documentation")).mkString("\n"))
       assert(rendered.contains("```java\nString example;\n```"), rendered)
+      assert(rendered.contains("### Parameters\n\n- `text`"), rendered)
+      assert(rendered.contains("### Returns\n\nuppercase text"), rendered)
       val scalaLine = Files.readString(main).replace("val text: String", "val text: Int").split("\n")(6)
       val scalaHover = service.hover(new HoverParams(document(main), new Position(6, scalaLine.indexOf("loud") + 1)))
         .get(30, TimeUnit.SECONDS)
