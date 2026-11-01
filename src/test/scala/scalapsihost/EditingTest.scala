@@ -10,7 +10,7 @@ import org.jetbrains.plugins.scala.lang.psi.api.statements.ScFunction
 
 import scalapsihost.TestHost.{applyEdits, choose}
 import scalapsihost.language.{ChangeEngine, Completion, ProjectSearch}
-import scalapsihost.platform.{CallLog, HostLock, RequestEditor}
+import scalapsihost.platform.{CallLog, HostDispatchThread, HostLock, HostLog, RequestEditor}
 
 import java.nio.file.Path
 import java.util.concurrent.{CompletableFuture, CountDownLatch, Executors, TimeUnit}
@@ -721,6 +721,87 @@ class EditingTest extends munit.FunSuite {
       host.closeSource(file)
       host.closeSource(target)
     }
+  }
+
+
+  test("PSI gists follow committed buffers while virtual gists retain VFS contents") {
+    val host = TestHost.host
+    val errorsBefore = HostLog.count(HostLog.Level.Error)
+    val unsupportedBefore = CallLog.snapshot.filter(_._1.startsWith("UNSUPPORTED "))
+    val manager = com.intellij.util.gist.GistManager.getInstance()
+    val serializer = com.intellij.util.io.EnumeratorStringDescriptor.INSTANCE
+    val original = "object GistBuffer { val value = 1 }"
+    val changed = "object GistBuffer { val value = 2 }"
+    val file = host.openFile(Path.of("/editing/GistBuffer.scala"), original, module)
+    val virtual = file.getViewProvider.getVirtualFile
+    var computations = 0
+    val psiGist = manager.newPsiFileGist[String]("host-test.psi-buffer", 1, serializer, source => {
+      computations += 1
+      source.getText
+    })
+    val vfsGist = manager.newVirtualFileGist[String]("host-test.vfs-buffer", 1, serializer,
+      (_, source) => new String(source.contentsToByteArray(), java.nio.charset.StandardCharsets.UTF_8))
+    try {
+      assertEquals(psiGist.getFileData(file), original)
+      assertEquals(vfsGist.getFileData(host.project, virtual), original)
+      val documents = com.intellij.psi.PsiDocumentManager.getInstance(host.project)
+      val document = documents.getDocument(file)
+      HostLock.write(document.setText(changed))
+      assertEquals(psiGist.getFileData(file), original)
+      HostLock.write(documents.commitDocument(document))
+      assertEquals(psiGist.getFileData(file), changed)
+      assertEquals(vfsGist.getFileData(host.project, virtual), original)
+      val beforeFileInvalidation = computations
+      manager.invalidateData(virtual)
+      HostDispatchThread.drain()
+      assertEquals(psiGist.getFileData(file), changed)
+      assert(computations > beforeFileInvalidation)
+      val beforeGlobalInvalidation = computations
+      manager.invalidateData()
+      HostDispatchThread.drain()
+      assertEquals(psiGist.getFileData(file), changed)
+      assert(computations > beforeGlobalInvalidation)
+      assertEquals(HostLog.count(HostLog.Level.Error), errorsBefore)
+      assertEquals(CallLog.snapshot.filter(_._1.startsWith("UNSUPPORTED ")), unsupportedBefore)
+    } finally host.closeSource(file)
+  }
+
+  test("virtual gists distinguish cached nulls and contexts and invalidate by content, file and manager") {
+    val host = TestHost.host
+    val errorsBefore = HostLog.count(HostLog.Level.Error)
+    val unsupportedBefore = CallLog.snapshot.filter(_._1.startsWith("UNSUPPORTED "))
+    val manager = com.intellij.util.gist.GistManager.getInstance()
+    val serializer = com.intellij.util.io.EnumeratorStringDescriptor.INSTANCE
+    val first = new com.intellij.testFramework.LightVirtualFile("first.txt", "one")
+    val second = new com.intellij.testFramework.LightVirtualFile("second.txt", "two")
+    val gist = manager.newVirtualFileGist[String]("host-test.virtual-invalidation", 1, serializer,
+      (project, file) => if (project == null) null else new String(file.contentsToByteArray(), java.nio.charset.StandardCharsets.UTF_8))
+    assertEquals(gist.getUpToDateOrNull(host.project, first), null)
+    assertEquals(gist.getFileData(null, first), null)
+    val cachedNull = gist.getUpToDateOrNull(null, first)
+    assert(cachedNull != null)
+    assertEquals(cachedNull.get(), null)
+    assertEquals(gist.getUpToDateOrNull(host.project, first), null)
+    assertEquals(gist.getFileData(host.project, first), "one")
+    assertEquals(gist.getUpToDateOrNull(host.project, first).get(), "one")
+    assertEquals(gist.getFileData(host.project, second), "two")
+    HostLock.write(first.setContent(null, "changed", false))
+    assertEquals(gist.getUpToDateOrNull(host.project, first), null)
+    assertEquals(gist.getFileData(host.project, first), "changed")
+    manager.invalidateData(first)
+    HostDispatchThread.drain()
+    assertEquals(gist.getUpToDateOrNull(host.project, first), null)
+    assertEquals(gist.getUpToDateOrNull(host.project, second).get(), "two")
+    assertEquals(gist.getFileData(host.project, first), "changed")
+    manager.invalidateData()
+    HostDispatchThread.drain()
+    assertEquals(gist.getUpToDateOrNull(host.project, first), null)
+    assertEquals(gist.getUpToDateOrNull(host.project, second), null)
+    intercept[IllegalArgumentException] {
+      manager.newPsiFileGist[String]("host-test.virtual-invalidation", 2, serializer, _.getText)
+    }
+    assertEquals(HostLog.count(HostLog.Level.Error), errorsBefore)
+    assertEquals(CallLog.snapshot.filter(_._1.startsWith("UNSUPPORTED ")), unsupportedBefore)
   }
 
 }

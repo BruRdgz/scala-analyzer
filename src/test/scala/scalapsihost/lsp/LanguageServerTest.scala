@@ -517,6 +517,39 @@ class LanguageServerTest extends munit.FunSuite {
     }
   }
 
+  test("Java getter documentation uses field gists and refreshes after an unsaved edit") {
+    val javaFile = fixture.resolve("core/src/main/java/core/Shout.java")
+    val original = Files.readString(javaFile)
+    val service = server.getTextDocumentService
+    val text = "package core; class Shout { /** Current field documentation. */ private int length; /** Updated field documentation. */ private int changedLength; public int getNewLength() { return length; } }"
+    def change(value: String, version: Int): Unit = service.didChange(new DidChangeTextDocumentParams(
+      new VersionedTextDocumentIdentifier(javaFile.toUri.toString, version), JavaList.of(new TextDocumentContentChangeEvent(value))))
+    def hover(value: String): String = {
+      val result = service.hover(new HoverParams(document(javaFile), new Position(0, value.indexOf("getNewLength"))))
+        .get(30, TimeUnit.SECONDS)
+      assert(result != null)
+      result.getContents.getRight.getValue
+    }
+    try {
+      service.didOpen(new DidOpenTextDocumentParams(new TextDocumentItem(javaFile.toUri.toString, "java", 160, text)))
+      assert(hover(text).contains("Current field documentation."))
+      val changed = text.replace("return length;", "return changedLength;")
+      change(changed, 161)
+      val updated = hover(changed)
+      assert(updated.contains("Updated field documentation."), updated)
+      assert(!updated.contains("Current field documentation."), updated)
+      val abstractGetter = "package core; abstract class Shout { public abstract int getNewLength(); }"
+      change(abstractGetter, 162)
+      assert(hover(abstractGetter).contains("getNewLength"))
+      val failures = Client.logged.asScala.filter(p => p.getMessage.contains("no documentation for") &&
+        p.getMessage.contains("getNewLength")).toSeq
+      assertEquals(failures, Seq.empty)
+    } finally {
+      change(original, 163)
+      service.documentSymbol(new DocumentSymbolParams(document(javaFile))).get(30, TimeUnit.SECONDS)
+    }
+  }
+
   test("Java type definitions resolve array components and highlights distinguish writes") {
     val javaFile = fixture.resolve("core/src/main/java/core/Shout.java")
     val text = "package core; class Shout {} class Use { Shout[] values; void set(Shout value) { values = new Shout[]{value}; Shout[] copy = values; } }"

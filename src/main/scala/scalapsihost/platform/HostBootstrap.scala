@@ -131,6 +131,9 @@ private[scalapsihost] object HostBootstrap {
       // UI dispatch and access ownership are supplied by the host's threads and lock.
       case ("isDispatchThread", _) => java.lang.Boolean.valueOf(HostDispatchThread.isCurrent)
       case ("isWriteIntentLockAcquired", _) => java.lang.Boolean.valueOf(HostLock.hasWriteIntent)
+      case ("assertWriteIntentLockAcquired", _) =>
+        if (!HostLock.hasWriteIntent) throw new IllegalStateException("write intent is required")
+        null
       case ("runWriteIntentReadAction", Array(c: com.intellij.openapi.util.ThrowableComputable[?, ?])) =>
         HostLock.writeIntent(c.compute()).asInstanceOf[AnyRef]
       case ("addReadActionListener", Array(listener: com.intellij.openapi.application.ReadActionListener, parent: Disposable)) =>
@@ -407,6 +410,8 @@ private[scalapsihost] object HostBootstrap {
           override def incUseCount(info: com.intellij.psi.statistics.StatisticsInfo): Unit = CallLog.hit("Completion.usageSkipped")
         })
       appServices.register(classOf[com.intellij.util.Queries])(new com.intellij.util.QueriesImpl)
+      appServices.register(classOf[com.intellij.util.gist.GistManager])(
+        new HostGistManager(() => HostDispatchThread.invokeLater(() => psiChanged())))
       appServices.register(classOf[com.intellij.codeInsight.completion.InternalCompletionSettings])(
         new com.intellij.codeInsight.completion.InternalCompletionSettings)
       appServices.register(classOf[com.intellij.codeInsight.TailTypeFactory])(
@@ -1368,17 +1373,15 @@ private[scalapsihost] object HostBootstrap {
       finders.registerExtension(new org.jetbrains.plugins.scala.lang.psi.impl.toplevel.synthetic.SyntheticClassElementFinder(project), root)
     }
 
+    /** Invalidates source/library PSI caches and the platform's project modification counter. */
+    private def psiChanged(): Unit = HostLock.write {
+      ScalaPsiHost.notifyPsiChanged(project)
+      psiModTracker.incCounter()
+      org.jetbrains.plugins.scala.lang.psi.impl.ScalaPsiManager.instance(project).clearOnNonScalaChange()
+    }
+
     /** Runs the plugin's project startup activity after all services and element finders are registered. */
     private def startProject(): ScalaPsiHost = {
-      // A source file was added or removed, or a library mounted: what the IDE's PsiModificationTrackerImpl and the
-      // plugin's ScalaPsiChangeListener do for a change under a directory (not a Scala element).
-      /** Invalidates source/library PSI caches and the platform's project modification counter. */
-      def psiChanged(): Unit = HostLock.write {
-        ScalaPsiHost.notifyPsiChanged(project)
-        psiModTracker.incCounter()
-        org.jetbrains.plugins.scala.lang.psi.impl.ScalaPsiManager.instance(project).clearOnNonScalaChange()
-      }
-
       // ---- 4. Project startup the PSI depends on -------------------------------------------------
       // The plugin's own activity registers the synthetic classes (Any, Int, ...) through DumbService.queueTask.
       new org.jetbrains.plugins.scala.lang.psi.impl.toplevel.synthetic.RegisterSyntheticClassesProjectActivity().execute(project)
