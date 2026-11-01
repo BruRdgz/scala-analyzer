@@ -1,17 +1,30 @@
 # Changelog
 
-## Unreleased — beta 1 changes
+## 0.1.0 — 2026-11-01
+
+First stable release for the documented Scala 2/3 and mixed Java workspace scope.
+
+- Native Java completion, resolution/type diagnostics, outlines and source Javadoc hover.
+- Selected Scala inspections for deprecated symbols, redundancies, explicit unused imports and local/private
+  unused declarations, with suppression comments and previewed native quick fixes.
+- Structured Markdown hover: declaration context, parameters/return/throws sections, grouped references,
+  tables, lists and fenced examples.
+- Safer attached-source handling for unsupported file types, plus in-memory file gists for Java documentation.
+- Cancellable reads, coalesced background diagnostics and version guards for editor changes.
+- CI validates the packaged server and installed VSIX on Linux x64 and macOS Intel/Apple Silicon. Numeric
+  tags publish checked archives, VSIX, SHA-256 checksums and build metadata to GitHub Releases.
+
+## Development changes before 0.1.0
 
 The changes milestone: rename, previewable code actions, organize imports and configured scalafmt formatting.
-The implementation is complete within the documented preview and search limits; no release tag has been created.
+The implementation is bounded by the documented preview and search limits.
 
 - Rename through the plugin's processors, including companions and related Scala members. Source text and indexes
   are restored before versioned edits return to the editor. Invalid names and conflicts fail the request. File moves
   and optional automatic renames remain outside this operation; Java inheritor search remains a known gap.
 - Code actions from plugin intentions, annotation quick fixes and Scala 2/3 surrounders. Preview and mod-command
   copies share the change engine's document commits and cleanup. Type-import fixes offer each qualified candidate
-  separately; actions requiring dialogs, other files or unsupported previews are unavailable. Inspection fixes and
-  global-member/conversion imports remain unimplemented.
+  separately; actions requiring dialogs, other files or unsupported previews are unavailable. Global-member/conversion imports remain outside that milestone.
 - `source.organizeImports` runs the plugin optimizer on a preview copy and returns versioned edits. Source actions
   are computed only when requested and can be combined with contextual quick fixes.
 - Whole-file formatting honors the nearest workspace `.scalafmt.conf` and its declared version, including exclusion

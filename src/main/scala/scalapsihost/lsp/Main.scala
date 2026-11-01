@@ -24,6 +24,9 @@ import scala.util.control.NonFatal
  * client.
  */
 object Main {
+  /** The packaged release version, or a development marker when launched from loose classes. */
+  val version: String = Option(getClass.getPackage.getImplementationVersion).getOrElse("development")
+
   // Logs of earlier runs kept next to the current one.
   private val KeptLogs = 10
   // Child-process hooks only send kill signals; a stuck platform hook must not keep the JVM alive after cleanup.
@@ -53,7 +56,7 @@ object Main {
     val buffering = HostLog.addSink(entry => startup.add(entry))
 
     val heap = Runtime.getRuntime.maxMemory / (1024 * 1024)
-    HostLog.info(s"scala-psi-host 0.1 starting: JDK ${System.getProperty("java.version")}, heap max $heap MB, state $stateDir, log $logFile")
+    HostLog.info(s"scala-psi-host $version starting: JDK ${System.getProperty("java.version")}, heap max $heap MB, state $stateDir, log $logFile")
     val host = try HostLog.timed("host started")(ScalaPsiHost.start(HostConfig(
       stateDir = stateDir,
       scalaPluginJars = property("scalapsihost.scalaPluginJars").split(File.pathSeparator).toSeq.map(Path.of(_)),

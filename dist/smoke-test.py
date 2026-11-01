@@ -1,96 +1,153 @@
 #!/usr/bin/env python3
-"""Smoke test of a built distribution: starts the language server as an editor would and talks LSP to it.
-
-Usage: smoke-test.py <bin/scala-psi-host> <project dir> <source file> <line> <column>
-
-Initializes on the project, opens the source file, waits for its diagnostics, asks for hover and definition at
-<line>:<column> (0-based), shuts the server down, and prints what it got. Exits non-zero when the server does not
-answer, answers with an error, or exits with an error.
-"""
+"""Exercise an extracted server over stdio: initialize, diagnostics, hover, definition, and shutdown."""
+import argparse
 import json
 import pathlib
 import subprocess
 import sys
 import threading
 import time
+from urllib.parse import unquote, urlparse
 
-TIMEOUT_SECONDS = 600  # opening a build over BSP starts the build server and can take minutes the first time
+# A first BSP import can download and launch the build server.
+TIMEOUT_SECONDS = 600
+
+
+def exercise(process, args):
+    stdin, stdout = process.stdin, process.stdout
+    messages = []
+    failures = []
+    closed = False
+    condition = threading.Condition()
+
+    def read():
+        nonlocal closed
+        try:
+            while True:
+                headers = {}
+                while True:
+                    header = stdout.readline()
+                    if not header:
+                        return
+                    if header in (b'\r\n', b'\n'):
+                        break
+                    name, value = header.decode().split(':', 1)
+                    headers[name.lower()] = value.strip()
+                length = int(headers['content-length'])
+                body = stdout.read(length)
+                if len(body) != length:
+                    raise RuntimeError('truncated LSP response')
+                message = json.loads(body)
+                with condition:
+                    messages.append(message)
+                    condition.notify_all()
+        except Exception as failure:
+            with condition:
+                failures.append(failure)
+        finally:
+            with condition:
+                closed = True
+                condition.notify_all()
+
+    reader = threading.Thread(target=read, daemon=True)
+    reader.start()
+    next_id = 0
+
+    def send(method, params, request=True):
+        nonlocal next_id
+        message = dict(jsonrpc='2.0', method=method, params=params)
+        if request:
+            next_id += 1
+            message['id'] = next_id
+        data = json.dumps(message).encode()
+        stdin.write(b'Content-Length: %d\r\n\r\n' % len(data) + data)
+        stdin.flush()
+        return message.get('id')
+
+    def wait_for(matches, description):
+        deadline = time.monotonic() + TIMEOUT_SECONDS
+        with condition:
+            while True:
+                for index, message in enumerate(messages):
+                    if matches(message):
+                        return messages.pop(index)
+                if failures:
+                    raise RuntimeError('invalid server transport') from failures[0]
+                if closed or process.poll() is not None or time.monotonic() >= deadline:
+                    raise RuntimeError(f'no {description}; server exit code: {process.poll()}')
+                condition.wait(timeout=1)
+
+    def request(method, params):
+        request_id = send(method, params)
+        response = wait_for(lambda message: message.get('id') == request_id, method)
+        if 'error' in response:
+            raise RuntimeError(f'{method} failed: {response["error"]}')
+        return response['result']
+
+    project = args.project.resolve()
+    source = args.source.resolve()
+    uri = source.as_uri()
+    document = dict(uri=uri)
+    position = dict(line=args.line, character=args.column)
+    initialized = request('initialize', dict(processId=None, rootUri=project.as_uri(), capabilities={},
+        workspaceFolders=[dict(uri=project.as_uri(), name=project.name)]))
+    for capability in ('hoverProvider', 'definitionProvider'):
+        if not initialized['capabilities'].get(capability):
+            raise RuntimeError(f'missing capability: {capability}')
+    if args.expected_version and initialized['serverInfo']['version'] != args.expected_version:
+        raise RuntimeError(f'wrong packaged version: {initialized["serverInfo"]}')
+    send('initialized', {}, request=False)
+    send('textDocument/didOpen', dict(textDocument=dict(uri=uri, languageId='scala', version=1, text=source.read_text())), request=False)
+    published = wait_for(lambda message: message.get('method') == 'textDocument/publishDiagnostics'
+                         and message['params']['uri'] == uri, 'diagnostics')
+    diagnostics = published['params']['diagnostics']
+    errors = [problem for problem in diagnostics if problem.get('severity') == 1]
+    if errors:
+        raise RuntimeError(f'correct fixture has errors: {errors}')
+    hover = request('textDocument/hover', dict(textDocument=document, position=position))
+    if not hover or not hover.get('contents') or not hover['contents'].get('value', '').strip():
+        raise RuntimeError(f'empty hover at {position}')
+    definitions = request('textDocument/definition', dict(textDocument=document, position=position))
+    if not definitions:
+        raise RuntimeError(f'empty definition at {position}')
+    for definition in definitions:
+        location = urlparse(definition['uri'])
+        if location.scheme != 'file' or not pathlib.Path(unquote(location.path)).is_file():
+            raise RuntimeError(f'definition target does not exist: {definition}')
+    print(json.dumps(dict(server=initialized['serverInfo'], diagnostics=diagnostics,
+                          hover=hover, definitions=definitions), indent=2))
+    request('shutdown', None)
+    send('exit', None, request=False)
+    stdin.close()
+    if process.wait(timeout=60) != 0:
+        raise RuntimeError(f'server exited with {process.returncode}')
+    reader.join(timeout=5)
 
 
 def main():
-    server, project, source, line, column = sys.argv[1], pathlib.Path(sys.argv[2]).resolve(), pathlib.Path(sys.argv[3]).resolve(), int(sys.argv[4]), int(sys.argv[5])
-    process = subprocess.Popen([server], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
-    stdin, stdout = process.stdin, process.stdout
-    assert stdin is not None and stdout is not None
-    messages, lock = [], threading.Condition()
-
-    def read():
-        while True:
-            headers = {}
-            while True:
-                header = stdout.readline()
-                if not header:
-                    return
-                header = header.decode().strip()
-                if not header:
-                    break
-                name, value = header.split(":", 1)
-                headers[name.strip().lower()] = value.strip()
-            body = json.loads(stdout.read(int(headers["content-length"])))
-            with lock:
-                messages.append(body)
-                lock.notify_all()
-
-    threading.Thread(target=read, daemon=True).start()
-    next_id = [0]
-
-    def send(method, params, request=True):
-        message = {"jsonrpc": "2.0", "method": method, "params": params}
-        if request:
-            next_id[0] += 1
-            message["id"] = next_id[0]
-        data = json.dumps(message).encode()
-        stdin.write(b"Content-Length: %d\r\n\r\n" % len(data) + data)
-        stdin.flush()
-        return message.get("id")
-
-    def wait_for(matches, what):
-        deadline = time.time() + TIMEOUT_SECONDS
-        with lock:
-            while True:
-                found = next((m for m in messages if matches(m)), None)
-                if found:
-                    return found
-                if time.time() > deadline or process.poll() is not None:
-                    sys.exit(f"no {what} (server exit code: {process.poll()})")
-                lock.wait(timeout=1)
-
-    def request(method, params):
-        id = send(method, params)
-        response = wait_for(lambda m: m.get("id") == id, f"answer to {method}")
-        if "error" in response:
-            sys.exit(f"{method} failed: {response['error']}")
-        return response["result"]
-
-    uri, document = source.as_uri(), {"uri": source.as_uri()}
-    position = {"line": line, "character": column}
-    request("initialize", {"processId": None, "rootUri": project.as_uri(), "capabilities": {},
-                           "workspaceFolders": [{"uri": project.as_uri(), "name": project.name}]})
-    send("initialized", {}, request=False)
-    started = time.time()
-    send("textDocument/didOpen", {"textDocument": {"uri": uri, "languageId": "scala", "version": 1, "text": source.read_text()}}, request=False)
-    diagnostics = wait_for(lambda m: m.get("method") == "textDocument/publishDiagnostics" and m["params"]["uri"] == uri, "diagnostics")
-    print(f"diagnostics after {time.time() - started:.1f} s (including opening the project):")
-    for d in diagnostics["params"]["diagnostics"]:
-        print(f"  {d['range']['start']['line']}:{d['range']['start']['character']} [{d.get('source')}] {d['message']}")
-    print("hover:", json.dumps(request("textDocument/hover", {"textDocument": document, "position": position})))
-    print("definition:", json.dumps(request("textDocument/definition", {"textDocument": document, "position": position})))
-    request("shutdown", None)
-    send("exit", None, request=False)
-    stdin.close()
-    if process.wait(timeout=60) != 0:
-        sys.exit(f"the server exited with code {process.returncode}")
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('server')
+    parser.add_argument('project', type=pathlib.Path)
+    parser.add_argument('source', type=pathlib.Path)
+    parser.add_argument('line', type=int)
+    parser.add_argument('column', type=int)
+    parser.add_argument('--expected-version')
+    args = parser.parse_args()
+    process = subprocess.Popen([str(pathlib.Path(args.server).resolve())], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+    try:
+        exercise(process, args)
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+        if not process.stdin.closed:
+            process.stdin.close()
+        process.stdout.close()
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

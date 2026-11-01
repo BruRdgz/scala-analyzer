@@ -30,6 +30,7 @@ lazy val root = (project in file("."))
   .configs(Fixtures, Fixtures212, InlayPlatform)
   .settings(
     name := "scala-psi-host",
+    Compile / packageOptions += Package.ManifestAttributes("Implementation-Version" -> version.value),
     initialize := {
       val _ = initialize.value
       val running = java.lang.Runtime.version()
@@ -186,7 +187,7 @@ lazy val root = (project in file("."))
         entry
       }
       IO.writeLines(out / "lib" / "classpath", entries)
-      for (legal <- Seq("LICENSE", "NOTICE")) IO.copyFile(baseDirectory.value / legal, out / legal)
+      for (resource <- Seq("LICENSE", "NOTICE", "README.md")) IO.copyFile(baseDirectory.value / resource, out / resource)
       IO.copyFile(baseDirectory.value / "dist" / "scala-psi-host", out / "bin" / "scala-psi-host")
       (out / "bin" / "scala-psi-host").setExecutable(true)
       out

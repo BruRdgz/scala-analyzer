@@ -1,0 +1,162 @@
+name: Build and validate release artifacts
+
+on:
+  workflow_call:
+    outputs:
+      version:
+        value: ${{ jobs.build.outputs.version }}
+        description: Validated release version
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    defaults:
+      run:
+        working-directory: host
+    outputs:
+      version: ${{ steps.config.outputs.version }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          path: host
+          persist-credentials: false
+      - id: config
+        run: python3 dist/release.py config >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: JetBrains/intellij-scala
+          ref: ${{ steps.config.outputs.plugin }}
+          path: intellij-scala
+          persist-credentials: false
+      - uses: actions/setup-java@c5195efecf7bdfc987ee8bae7a71cb8b11521c00 # v4.7.1
+        with:
+          distribution: temurin
+          java-version: '25.0.5+8'
+          cache: sbt
+          cache-dependency-path: |
+            host/build.sbt
+            host/project/build.properties
+            intellij-scala/build.sbt
+            intellij-scala/project/**
+      - uses: sbt/setup-sbt@247f524f19dd809a32363bd37583a8ea7a9e4cae # v1.1.13
+      - uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        id: plugin-cache
+        with:
+          path: intellij-scala/target/plugin/Scala/lib
+          key: scala-plugin-v1-${{ runner.os }}-${{ runner.arch }}-25.0.5+8-${{ steps.config.outputs.platform }}-${{ steps.config.outputs.plugin }}
+      - name: Build the pinned Scala plugin from source
+        if: steps.plugin-cache.outputs.cache-hit != 'true'
+        working-directory: intellij-scala
+        run: sbt --java-home "$JAVA_HOME" packageArtifactZip
+      - name: Configure the BSP fixture
+        working-directory: host/fixtures/bsp-project
+        run: sbt --java-home "$JAVA_HOME" bspConfig
+      - name: Test, document and build the host distribution
+        run: sbt --java-home "$JAVA_HOME" test 'Compile/doc' dist
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24.18.0'
+          cache: npm
+          cache-dependency-path: host/editors/vscode/package-lock.json
+      - name: Package the VSIX
+        working-directory: host/editors/vscode
+        env:
+          VERSION: ${{ steps.config.outputs.version }}
+        run: |
+          npm ci
+          npm run check
+          mkdir -p ../../target/release
+          npm run package -- --out "../../target/release/scala-psi-host-${VERSION}.vsix"
+      - name: Archive and record the built artifacts
+        run: python3 dist/release.py package
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-bundle
+          path: host/target/release/*
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: failure()
+        with:
+          name: build-failure-reports
+          path: |
+            host/target/test-reports/**
+            host/target/host-state/**.txt
+            host/target/host-state/logs/**
+            /tmp/scala-psi-host-bsp*.log
+          retention-days: 7
+
+  installed:
+    needs: build
+    name: Installed package (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, macos-15-intel]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: host
+    env:
+      VERSION: ${{ needs.build.outputs.version }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          path: host
+          persist-credentials: false
+      - uses: actions/setup-java@c5195efecf7bdfc987ee8bae7a71cb8b11521c00 # v4.7.1
+        with:
+          distribution: temurin
+          java-version: '25.0.5+8'
+          cache: sbt
+          cache-dependency-path: host/fixtures/bsp-project/**/build.*
+      - uses: sbt/setup-sbt@247f524f19dd809a32363bd37583a8ea7a9e4cae # v1.1.13
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24.18.0'
+          cache: npm
+          cache-dependency-path: host/editors/vscode/package-lock.json
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-bundle
+          path: host/target/release
+      - name: Verify checksums and extract the release
+        run: |
+          (cd target/release && shasum -a 256 -c SHA256SUMS)
+          mkdir -p "$RUNNER_TEMP/server"
+          tar -xzf "target/release/scala-psi-host-${VERSION}.tar.gz" -C "$RUNNER_TEMP/server"
+          test -x "$RUNNER_TEMP/server/scala-psi-host-${VERSION}/bin/scala-psi-host"
+          echo "SCALA_PSI_HOST_STATE=$RUNNER_TEMP/scala-psi-host-state" >> "$GITHUB_ENV"
+      - name: Configure the BSP fixture on this machine
+        working-directory: host/fixtures/bsp-project
+        run: sbt --java-home "$JAVA_HOME" bspConfig
+      - name: Exercise the extracted server over stdio
+        run: >-
+          python3 dist/smoke-test.py
+          "$RUNNER_TEMP/server/scala-psi-host-${VERSION}/bin/scala-psi-host"
+          fixtures/bsp-project fixtures/bsp-project/app/src/main/scala/app/Main.scala 6 53
+          --expected-version "$VERSION"
+      - name: Exercise the installed VSIX
+        working-directory: host/editors/vscode
+        run: |
+          npm ci
+          if [ "$RUNNER_OS" = Linux ]; then
+            xvfb-run -a npm run test:installed -- "../../target/release/scala-psi-host-${VERSION}.vsix" "$RUNNER_TEMP/server/scala-psi-host-${VERSION}/bin/scala-psi-host" ../../fixtures/bsp-project
+          else
+            npm run test:installed -- "../../target/release/scala-psi-host-${VERSION}.vsix" "$RUNNER_TEMP/server/scala-psi-host-${VERSION}/bin/scala-psi-host" ../../fixtures/bsp-project
+          fi
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: failure()
+        with:
+          name: installed-failure-${{ matrix.os }}
+          path: |
+            ${{ runner.temp }}/scala-psi-host-state/logs/**
+            host/target/vscode-test-logs/**
+            /tmp/scala-psi-host-bsp*.log
+          retention-days: 7

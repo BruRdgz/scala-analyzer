@@ -1,0 +1,9 @@
+{
+  "name": "scala-psi-host-release-test",
+  "version": "0.0.0",
+  "publisher": "brurdgz",
+  "engines": {
+    "vscode": "^1.91.0"
+  },
+  "main": "./extension.js"
+}

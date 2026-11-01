@@ -5,11 +5,22 @@
   "version": "0.1.0",
   "publisher": "brurdgz",
   "license": "Apache-2.0",
-  "repository": { "type": "git", "url": "https://github.com/BruRdgz/scala-psi-host" },
-  "engines": { "vscode": "^1.91.0" },
-  "categories": ["Programming Languages"],
-  "extensionDependencies": ["scala-lang.scala"],
-  "activationEvents": ["onLanguage:scala"],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/BruRdgz/scala-psi-host"
+  },
+  "engines": {
+    "vscode": "^1.91.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "extensionDependencies": [
+    "scala-lang.scala"
+  ],
+  "activationEvents": [
+    "onLanguage:scala"
+  ],
   "main": "./extension.js",
   "contributes": {
     "configuration": {
@@ -33,14 +44,36 @@
       }
     },
     "configurationDefaults": {
-      "[scala]": { "editor.defaultFormatter": "brurdgz.scala-psi-host" }
+      "[scala]": {
+        "editor.defaultFormatter": "brurdgz.scala-psi-host"
+      }
     },
     "commands": [
-      { "command": "scalaPsiHost.showStatus", "title": "Show Status", "category": "scala-psi-host" },
-      { "command": "scalaPsiHost.showLog", "title": "Show Log File", "category": "scala-psi-host" }
+      {
+        "command": "scalaPsiHost.showStatus",
+        "title": "Show Status",
+        "category": "scala-psi-host"
+      },
+      {
+        "command": "scalaPsiHost.showLog",
+        "title": "Show Log File",
+        "category": "scala-psi-host"
+      }
     ]
   },
   "dependencies": {
     "vscode-languageclient": "11.0.0"
+  },
+  "devDependencies": {
+    "@vscode/test-electron": "3.1.0",
+    "@vscode/vsce": "4.1.0"
+  },
+  "scripts": {
+    "check": "node --check extension.js",
+    "package": "vsce package",
+    "test:installed": "node test/run.js"
+  },
+  "overrides": {
+    "minimatch": "11.0.3"
   }
 }

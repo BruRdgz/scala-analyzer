@@ -278,7 +278,7 @@ final class ScalaLanguageServer(
         else HostLog.info(s"client process $pid is not visible; the server ends when its input ends")
       } catch { case NonFatal(e) => HostLog.warn(s"could not watch client process $pid", e) }
     }
-    CompletableFuture.completedFuture(new InitializeResult(capabilities, new ServerInfo("scala-psi-host", "0.1")))
+    CompletableFuture.completedFuture(new InitializeResult(capabilities, new ServerInfo("scala-psi-host", Main.version)))
   }
 
   /**

@@ -4,7 +4,8 @@ A Scala language server powered by the IntelliJ Scala plugin, running in a stand
 application container. It provides editor features through the Language Server Protocol (LSP) and imports Scala 2
 and Scala 3 projects through the Build Server Protocol (BSP).
 
-The project is in beta. Integration tests use sbt builds; mixed Scala/Java projects have partial Java support.
+Release 0.1.0 supports Linux x64 and macOS Intel/Apple Silicon with JDK 25. Integration tests use sbt builds;
+mixed Scala/Java projects have partial Java support.
 
 ## Features
 
@@ -16,6 +17,14 @@ The project is in beta. Integration tests use sbt builds; mixed Scala/Java proje
 - Document highlights, outlines, folding, selection ranges and semantic tokens.
 - Workspace symbol search and module-aware resolution.
 - Navigation into library sources or decompiled class files.
+
+## Install
+
+Download the server archive and VSIX from [GitHub Releases](https://github.com/BruRdgz/scala-psi-host/releases).
+Verify `SHA256SUMS`, extract the archive, and keep its `bin/` and `lib/` directories together. Install JDK 25
+and configure the editor as described below. The archive is shared by Linux and macOS; releases are tested on
+Linux x64, macOS Intel and macOS Apple Silicon. The VSIX is installed separately; it does not bundle a JDK
+or download a server automatically.
 
 ## Build
 
@@ -94,10 +103,12 @@ trigger a reimport. Unsaved source text is preserved.
 
 - References and implementations use text-based searches without compiler indexes. Implicit/SAM usages and Java
   inheritors can be missed. Rename can leave Java overrides unchanged.
-- Java binary short-name lookup is incomplete, workspace symbols list Scala declarations only, and JDK symbols come
+- Java binary short-name lookup is incomplete, and JDK symbols come
   from the JDK running the server.
-- Inspections, dialog-dependent actions, file/package moves and optional automatic renames are unsupported.
-  Code actions are limited to current-file text previews.
+- Native inspections cover deprecation, selected redundancies, explicit unused imports and unannotated
+  declarations confined to the file. Wildcard/given import warnings and whole-project dead-code analysis are
+  outside this scope. Dialog-dependent actions, file/package moves and optional automatic renames are unavailable;
+  code actions are limited to current-file previews.
 - Some completion contributors require IDE services that are unavailable. Live templates have no snippet tab stops;
   completion followed by handler edits takes two undo steps.
 - Inlay hints are text labels without the IDE's interactive presentation or range hints. Project IDE code-style
@@ -136,6 +147,12 @@ python3 dist/smoke-test.py \
 ```
 
 This checks initialization, document opening, diagnostics, hover, definition and shutdown. Positions are zero-based.
+
+CI builds the pinned upstream plugin, runs the suite and Scaladoc checks, packages the server/VSIX, and exercises
+both the extracted server and installed extension on the supported platforms. Numeric version tags (for example,
+`0.1.0`) publish the exact checked artifacts to GitHub Releases. `version.sbt` and the VSIX manifest must agree.
+`build-info.json` records the source/dependency coordinates and packaged-file hashes. No Marketplace publication
+is performed by this workflow.
 
 See [ROADMAP.md](ROADMAP.md) for planned work and [CHANGELOG.md](CHANGELOG.md) for release history.
 
