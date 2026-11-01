@@ -102,11 +102,17 @@ final class CodeActions(intentionClasses: Seq[String], descriptorClasses: Seq[St
               previewEditor.getCaretModel.moveToOffset(range.getStartOffset)
               previewEditor.getSelectionModel.setSelection(range.getStartOffset, range.getEndOffset)
               val commandAction = action.asModCommandAction()
-              if (commandAction == null) action.generatePreview(project, previewEditor, copy)
-              else {
-                val command = commandAction.perform(ActionContext.from(editor, file))
-                ModCommandExecutor.getInstance.executeForFileCopy(command, copy)
+              // The desktop import fix delegates to a UI processor and supplies no preview; reuse our optimizer path.
+              if (action.isInstanceOf[org.jetbrains.plugins.scala.codeInspection.declarationRedundancy.ScalaOptimizeImportsFix]) {
+                new ScalaImportOptimizer().processFile(copy).run()
                 IntentionPreviewInfo.DIFF
+              } else Inspections.previewFix(action, copy).getOrElse {
+                if (commandAction == null) action.generatePreview(project, previewEditor, copy)
+                else {
+                  val command = commandAction.perform(ActionContext.from(editor, file))
+                  ModCommandExecutor.getInstance.executeForFileCopy(command, copy)
+                  IntentionPreviewInfo.DIFF
+                }
               }
             }
             val supported = info == IntentionPreviewInfo.DIFF || info == IntentionPreviewInfo.DIFF_NO_TRIM

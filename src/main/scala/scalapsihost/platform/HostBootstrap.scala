@@ -58,7 +58,7 @@ import org.jetbrains.plugins.scalaDoc.highlighter.ScalaDocSyntaxHighlighter
 import org.jetbrains.plugins.scalaDirective.ScalaDirectiveLanguage
 import org.jetbrains.plugins.scalaDirective.highlighter.ScalaDirectiveSyntaxHighlighter
 import scalapsihost.{HostConfig, ModuleModel, ScalaPsiHost}
-import scalapsihost.language.{ChangeEngine, CodeActions, Completion, InlayHints, Rename}
+import scalapsihost.language.{ChangeEngine, CodeActions, Completion, InlayHints, Inspections, Rename}
 import scalapsihost.platform.{Descriptors, ExtensionBean, dispatch, tableProxy}
 import scalapsihost.ScalaPsiHost.{CompletionWeighers, SemanticExtensionPoints, scalaCompletionContributors}
 
@@ -345,6 +345,13 @@ private[scalapsihost] object HostBootstrap {
         classOf[com.intellij.java.codeserver.highlighting.JavaErrorFilter])
       declare("com.intellij.implicitClassSearch").asInstanceOf[ExtensionPointImpl[AnyRef]]
         .registerExtension(new com.intellij.psi.impl.search.ImplicitClassesSearcher, root)
+      declare("com.intellij.testSourcesFilter").asInstanceOf[ExtensionPointImpl[com.intellij.openapi.roots.TestSourcesFilter]]
+        .registerExtension(newPrivate(Class.forName("com.intellij.openapi.roots.ProjectRootTestSourcesFilter")
+          .asSubclass(classOf[com.intellij.openapi.roots.TestSourcesFilter])), root)
+      declare("com.intellij.inspectionElementsMerger")
+      declare("com.intellij.globalInspection")
+      declare("com.intellij.deadCode")
+      declare("com.intellij.implicitUsageProvider")
       appServices.register(classOf[com.intellij.codeInspection.SuppressManager])(
         newPrivate(Class.forName("com.intellij.codeInspection.SuppressManagerImpl")
           .asSubclass(classOf[com.intellij.codeInspection.SuppressManager])))
@@ -534,6 +541,15 @@ private[scalapsihost] object HostBootstrap {
         new com.intellij.openapi.vfs.transformer.TextPresentationTransformers)
       // PSI writes check command state; the core processor tracks it without UI or undo.
       appServices.register(classOf[com.intellij.openapi.command.CommandProcessor])(new com.intellij.openapi.command.impl.CoreCommandProcessor)
+      // Legacy inspection fixes may prepare writable files only inside their isolated preview session.
+      appServices.register(classOf[com.intellij.codeInsight.FileModificationService])(new com.intellij.codeInsight.FileModificationService {
+        override def prepareFileForWrite(file: PsiFile): Boolean =
+          file != null && IntentionPreviewUtils.isIntentionPreviewActive && IntentionPreviewUtils.isPreviewElement(file)
+        override def preparePsiElementsForWrite(elements: java.util.Collection[? <: PsiElement]): Boolean =
+          elements.asScala.forall(element => prepareFileForWrite(element.getContainingFile))
+        override def prepareVirtualFilesForWrite(project: Project, files: java.util.Collection[? <: VirtualFile]): Boolean =
+          CallLog.unsupported("FileModificationService.prepareVirtualFilesForWrite")
+      })
       // PSI versioning (MVCC): the platform's service, which with persistent syntax trees off (the registry default)
       // creates plain PSI elements during reparses.
       appServices.register(classOf[com.intellij.psi.util.PsiVersioningService])(new com.intellij.psi.impl.source.tree.mvcc.PsiVersioningServiceImpl)
@@ -1087,6 +1103,24 @@ private[scalapsihost] object HostBootstrap {
         documents
       }
       // Platform library implementations, constructed by the host (no container wiring).
+      // Local unused-symbol analysis asks the profile only for the native entry-point policy.
+      // Keep that policy at platform defaults; this host does not import or persist desktop profiles.
+      val entryPoints = new com.intellij.codeInspection.ex.EntryPointsManagerBase(project) {
+        override def configureAnnotations(): Unit = CallLog.unsupported("EntryPointsManager.configureAnnotations")
+      }
+      Disposer.register(root, entryPoints)
+      projectServices.register(classOf[com.intellij.codeInspection.ex.EntryPointsManager])(entryPoints)
+      projectServices.register(classOf[com.intellij.profile.codeInspection.InspectionProjectProfileManager]) {
+        val profiles = new HostInspectionProfileManager(projectBus)
+        Disposer.register(root, profiles)
+        profiles
+      }
+      // The plugin's unused-declaration inspection owns the local reference-search pipeline and its PSI caches.
+      locally {
+        val cls = Class.forName("org.jetbrains.plugins.scala.codeInspection.declarationRedundancy.cheapRefSearch.SearchMethodsWithProjectBoundCache")
+          .asInstanceOf[Class[AnyRef]]
+        projectServices.register(cls)(newPrivate(cls, project))
+      }
       projectServices.register(classOf[com.intellij.psi.util.CachedValuesManager])(
         new com.intellij.util.CachedValuesManagerImpl(project, new com.intellij.psi.impl.PsiCachedValuesFactory(project)))
       projectServices.register(classOf[com.intellij.psi.PsiFileFactory])(new com.intellij.psi.impl.PsiFileFactoryImpl(psiManager))
@@ -1238,6 +1272,22 @@ private[scalapsihost] object HostBootstrap {
           (scalaShortNames.getClassesByName(name, scope).toSeq ++
             StubIndex.getElements(JavaStubIndexKeys.CLASS_SHORT_NAMES,
               name, project, scope, classOf[PsiClass]).asScala ++ binaries).distinct.toArray
+        // Inherited main/suite discovery passes the finite set of superclass files, including Java binaries.
+        case ("PsiShortNamesCache.getMethodsByName", Array(name: String, scope: GlobalSearchScope)) =>
+          val files = if (scope == GlobalSearchScope.EMPTY_SCOPE) Seq.empty
+          else {
+            val enumeration = com.intellij.psi.search.impl.VirtualFileEnumeration.extract(scope)
+            Option(enumeration).flatMap(value => Option(value.getFilesIfCollection)).map(_.asScala.toSeq)
+              .getOrElse(CallLog.unsupported("PsiShortNamesCache.getMethodsByName requires a finite file scope"))
+          }
+          def methods(owner: PsiClass): Seq[com.intellij.psi.PsiMethod] =
+            owner.getMethods.toSeq.filter(_.getName == name) ++ owner.getInnerClasses.toSeq.flatMap(methods)
+          files.flatMap { source =>
+            com.intellij.openapi.progress.ProgressManager.checkCanceled()
+            Option(psiManagerRef.findFile(source)).toSeq.collect {
+              case file: com.intellij.psi.PsiJavaFile => file.getClasses.toSeq.flatMap(methods)
+            }.flatten
+          }.distinct.toArray
         case ("PsiShortNamesCache.getAllClassNames", _) =>
           (scalaShortNames.getAllClassNames.toSeq ++ StubIndex.getInstance
             .getAllKeys(JavaStubIndexKeys.CLASS_SHORT_NAMES, project).asScala ++ libraryFiles.classFileNames).distinct.sorted.toArray
@@ -1388,7 +1438,8 @@ private[scalapsihost] object HostBootstrap {
 
       new ScalaPsiHost(config.stateDir, project, symbolIndex, wordIndex, importIndex, libraryFiles, librarySources, moduleModel, () => psiChanged(),
         new CodeActions(Descriptors.scalaExtensions(config.scalaPluginJars, "com.intellij.intentionAction"),
-          Descriptors.scalaExtensions(config.scalaPluginJars, "com.intellij.lang.surroundDescriptor")))
+          Descriptors.scalaExtensions(config.scalaPluginJars, "com.intellij.lang.surroundDescriptor")),
+        new Inspections(Descriptors.scalaExtensionBeans(config.scalaPluginJars, "com.intellij.localInspection")))
     }
   }
 

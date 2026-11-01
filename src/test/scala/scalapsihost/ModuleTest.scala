@@ -127,7 +127,7 @@ class ModuleTest extends munit.FunSuite {
 
     val first = host.addModule(ModuleSpec("java-lookup-first", "2.13.18", Seq.empty, Seq(library213)))
     val second = host.addModule(ModuleSpec("java-lookup-second", "2.13.18", Seq.empty, Seq(library213)))
-    val text = "package hostjava.deep; public class Widget { public static class Nested {} }"
+    val text = "package hostjava.deep; public class Widget { public void ping() {} public static class Nested { public void ping() {} } }"
     val a = host.openFile(Path.of("/java-lookup-first/Widget.java"), text, first)
     val b = host.openFile(Path.of("/java-lookup-second/Widget.java"), text, second)
     val use = host.openFile(Path.of("/java-lookup-first/Use.java"),
@@ -146,6 +146,13 @@ class ModuleTest extends munit.FunSuite {
         assertEquals(sourceFiles(cache.getClassesByName("Widget", scope)), Set(a))
         assertEquals(sourceFiles(cache.getClassesByName("Widget", host.modules.resolveScope(second))), Set(b))
         assert(cache.getAllClassNames.contains("Widget"))
+        val objectClass = facade.findClass("java.lang.Object", scope)
+        val methodScope = com.intellij.psi.search.GlobalSearchScope.filesScope(host.project,
+          java.util.List.of(a.getVirtualFile, objectClass.getContainingFile.getVirtualFile))
+        assertEquals(cache.getMethodsByName("ping", methodScope).map(_.getContainingClass.getQualifiedName).toSet,
+          Set("hostjava.deep.Widget", "hostjava.deep.Widget.Nested"))
+        assertEquals(cache.getMethodsByName("toString", methodScope).map(_.getContainingClass.getQualifiedName).toSet,
+          Set("java.lang.Object"))
         assertEquals(facade.findClass("hostjava.deep.Widget.Nested", scope).getContainingFile, a)
         val field = use.asInstanceOf[com.intellij.psi.PsiJavaFile].getClasses.head.getFields.head
         val referenced = field.getType.asInstanceOf[com.intellij.psi.PsiClassType].resolve()
@@ -160,6 +167,8 @@ class ModuleTest extends munit.FunSuite {
         assertEquals(facade.findClass("hostjava.deep.Widget", scope), null)
         assertEquals(sourceFiles(cache.getClassesByName("Widget", scope)), Set.empty)
         assertEquals(sourceFiles(cache.getClassesByName("Renamed", scope)), Set(a))
+        assertEquals(cache.getMethodsByName("ping", com.intellij.psi.search.GlobalSearchScope.fileScope(a)).toSeq,
+          Seq.empty)
         assertEquals(facade.findPackage("hostjava").getSubPackages(scope).map(_.getQualifiedName).toSet,
           Set("hostjava.moved", "hostjava.info"))
       }

@@ -17,7 +17,7 @@ import org.jetbrains.plugins.scala.lang.psi.api.ScalaFile
 import org.jetbrains.plugins.scala.lang.psi.impl.ScalaPsiElementFactory
 import org.jetbrains.plugins.scala.project.{ProjectContext, ScalaFeatures}
 
-import scalapsihost.language.{ChangeEngine, CodeActions, Completion, InlayHints, ParameterInfo, Rename, SelectionRanges}
+import scalapsihost.language.{ChangeEngine, CodeActions, Completion, InlayHints, Inspections, ParameterInfo, Rename, SelectionRanges}
 import scalapsihost.platform.{CallLog, Descriptors, ExtensionBean, HostBootstrap, HostDispatchThread, HostLock, Host_OrderEnumerator, Host_ModuleRootManager, HostPsiDocumentManager, ImportIndex, LibraryFileSystem, SourceFile, SymbolIndex, WordIndex, dispatch, tableProxy}
 
 import java.nio.file.{Files, Path}
@@ -60,6 +60,7 @@ final class ScalaPsiHost private[scalapsihost] (
   val modules: ModuleModel,
   psiChanged: () => Unit,
   private val actions: CodeActions,
+  private val inspections: Inspections,
 ) {
   // Library jars by real path: a jar on the classpath of several modules is mounted and indexed once.
   private val libraryRoots = new ConcurrentHashMap[Path, VirtualFile]()
@@ -389,9 +390,13 @@ final class ScalaPsiHost private[scalapsihost] (
   }
 
   /**
-   * The problems the IDE's highlighting pass reports for `file`: syntax errors, and the plugin's `ScalaAnnotator`
-   * run over every element through the platform's annotation session. Presentation-only annotations (no message)
-   * are left out.
+   * Collects syntax errors, annotator problems and the host's selected native inspections.
+   *
+   * Presentation-only annotations are omitted. Inspections require a physical source buffer and preserve native
+   * suppression comments; unused-symbol analysis is restricted to unannotated declarations local to the file.
+   *
+   * @param file Scala source to analyze under cancellable read access
+   * @return current problems and available plugin fixes with UTF-16 source ranges
    */
   def diagnostics(file: ScalaFile): Seq[Diagnostic] = HostLock.query {
     val syntax = syntaxErrors(file)
@@ -401,11 +406,12 @@ final class ScalaPsiHost private[scalapsihost] (
       SyntaxTraverser.psiTraverser(file).forEach(e => impl.runAnnotatorWithContext(e))
       impl.asScala.toSeq
     })
-    syntax ++ annotations.collect {
+    val annotated = annotations.collect {
       case a if a.getMessage != null =>
         Diagnostic(a.getSeverity, new TextRange(a.getStartOffset, a.getEndOffset), a.getMessage,
           Option(a.getQuickFixes).toSeq.flatMap(_.asScala).map(f => f.textRange -> f.quickFix))
     }
+    syntax ++ annotated ++ inspections.diagnostics(file)
   }
 
   /**
@@ -432,9 +438,26 @@ final class ScalaPsiHost private[scalapsihost] (
   }
 }
 
-/** A PSI diagnostic and the plugin quick fixes available for its source range. */
-final case class Diagnostic(severity: HighlightSeverity, range: TextRange, message: String,
-                            fixes: Seq[(TextRange, com.intellij.codeInsight.intention.IntentionAction)] = Seq.empty)
+/**
+ * A PSI diagnostic with the plugin's quick fixes and optional inspection metadata.
+ *
+ * @param severity highlighting level selected by the producer
+ * @param range UTF-16 range in the current source buffer
+ * @param message user-facing problem description
+ * @param fixes source ranges paired with native plugin actions
+ * @param inspectionId stable inspection code, when available
+ * @param deprecated whether the highlighted symbol is deprecated
+ * @param unnecessary whether the highlighted code is unnecessary
+ */
+final case class Diagnostic(
+  severity: HighlightSeverity,
+  range: TextRange,
+  message: String,
+  fixes: Seq[(TextRange, com.intellij.codeInsight.intention.IntentionAction)] = Seq.empty,
+  inspectionId: Option[String] = None,
+  deprecated: Boolean = false,
+  unnecessary: Boolean = false,
+)
 
 /** Process-wide host lifecycle and metadata needed to install the Scala plugin's language services. */
 object ScalaPsiHost {

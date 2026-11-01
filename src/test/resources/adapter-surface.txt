@@ -170,6 +170,7 @@ Project.service com.intellij.codeInsight.ExternalAnnotationsManager
 Project.service com.intellij.codeInsight.InferredAnnotationsManager
 Project.service com.intellij.codeInsight.JavaProjectCodeInsightSettings
 Project.service com.intellij.codeInsight.daemon.impl.analysis.HighlightingLevelManager
+Project.service com.intellij.codeInspection.ex.EntryPointsManager
 Project.service com.intellij.ide.util.PropertiesComponent
 Project.service com.intellij.lang.injection.InjectedLanguageManager
 Project.service com.intellij.lang.jvm.facade.JvmFacade
@@ -181,6 +182,7 @@ Project.service com.intellij.openapi.roots.ProjectFileIndex
 Project.service com.intellij.openapi.roots.ProjectRootManager
 Project.service com.intellij.pom.PomModel
 Project.service com.intellij.pom.tree.TreeAspect
+Project.service com.intellij.profile.codeInspection.InspectionProjectProfileManager
 Project.service com.intellij.psi.JavaPsiFacade
 Project.service com.intellij.psi.JvmPsiConversionHelper
 Project.service com.intellij.psi.PsiDocumentManager
@@ -202,6 +204,7 @@ Project.service com.intellij.psi.search.PsiShortNamesCache
 Project.service com.intellij.psi.util.CachedValuesManager
 Project.service com.intellij.psi.util.PsiModificationTracker
 Project.service org.jetbrains.plugins.scala.caches.ScalaShortNamesCacheManager
+Project.service org.jetbrains.plugins.scala.codeInspection.declarationRedundancy.cheapRefSearch.SearchMethodsWithProjectBoundCache
 Project.service org.jetbrains.plugins.scala.components.libextensions.LibraryExtensionsManager
 Project.service org.jetbrains.plugins.scala.lang.macros.evaluator.ScalaMacroEvaluator
 Project.service org.jetbrains.plugins.scala.lang.psi.impl.ScalaPsiManager
