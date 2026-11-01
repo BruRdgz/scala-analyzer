@@ -7,7 +7,7 @@ import com.intellij.openapi.editor.Document
 import com.intellij.openapi.editor.colors.TextAttributesKey
 import com.intellij.openapi.util.TextRange
 import com.intellij.openapi.util.text.StringUtil
-import com.intellij.psi.{PsiDocumentManager, PsiElement, PsiFile, PsiNameIdentifierOwner, PsiNamedElement, SyntaxTraverser}
+import com.intellij.psi.{PsiClass, PsiDocumentManager, PsiElement, PsiEnumConstant, PsiField, PsiFile, PsiJavaFile, PsiMethod, PsiNameIdentifierOwner, PsiNamedElement, PsiRecordComponent, SyntaxTraverser}
 import org.jetbrains.plugins.scala.extensions.PsiNamedElementExt
 import org.jetbrains.plugins.scala.editor.documentationProvider.{ScalaDocQuickInfoGenerator, ScalaDocumentationProvider}
 import org.jetbrains.plugins.scala.highlighter.DefaultHighlighter as H
@@ -388,7 +388,7 @@ private[scalapsihost] final class ProjectLanguageOperations(
     }.distinct
   }
 
-  /** The file's outline, as the IDE's structure view shows it (Scala files; Java sources have none). */
+  /** The file's declarations from its language's structure view, without inherited members. */
   def outline(path: Path): Seq[OutlineSymbol] = host.read {
     file(path) match {
       case scalaFile: ScalaFile =>
@@ -423,6 +423,26 @@ private[scalapsihost] final class ProjectLanguageOperations(
           case _ => Seq.empty
         }
         Element(() => scalaFile).getChildren.toSeq.flatMap(symbols)
+      case javaFile: PsiJavaFile =>
+        val sourceDocument = document(javaFile)
+        def span(range: TextRange): (LineColumn, LineColumn) =
+          position(sourceDocument, range.getStartOffset) -> position(sourceDocument, range.getEndOffset)
+        def symbols(psi: PsiNameIdentifierOwner): Seq[OutlineSymbol] = {
+          val members = psi match {
+            case clazz: PsiClass =>
+              (clazz.getChildren.toSeq.collect {
+                case member: PsiClass => member
+                case member: PsiMethod => member
+                case member: PsiField => member
+              } ++ clazz.getRecordComponents).sortBy(_.getTextOffset)
+            case _ => Seq.empty
+          }
+          val children = members.flatMap(symbols)
+          if (psi.getName == null || psi.getNameIdentifier == null) children
+          else Seq(OutlineSymbol(psi.getName, "", workspaceSymbolKind(psi), span(psi.getTextRange),
+            span(psi.getNameIdentifier.getTextRange), children))
+        }
+        javaFile.getClasses.toSeq.flatMap(symbols)
       case _ => Seq.empty
     }
   }
@@ -490,6 +510,14 @@ private[scalapsihost] final class ProjectLanguageOperations(
       case _: ScVariable => WorkspaceSymbolKind.Variable
       case _ => WorkspaceSymbolKind.Constant
     }
+    case _: PsiEnumConstant => WorkspaceSymbolKind.EnumMember
+    case clazz: PsiClass if clazz.isEnum => WorkspaceSymbolKind.Enum
+    case clazz: PsiClass if clazz.isInterface => WorkspaceSymbolKind.Interface
+    case _: PsiClass => WorkspaceSymbolKind.Class
+    case method: PsiMethod if method.isConstructor => WorkspaceSymbolKind.Constructor
+    case _: PsiMethod => WorkspaceSymbolKind.Method
+    case _: PsiRecordComponent => WorkspaceSymbolKind.Property
+    case _: PsiField => WorkspaceSymbolKind.Field
     case _ => WorkspaceSymbolKind.Object
   }
 

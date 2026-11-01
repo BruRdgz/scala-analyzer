@@ -417,6 +417,21 @@ class LanguageServerTest extends munit.FunSuite {
     ))
   }
 
+  test("Java outline and qualified workspace symbols use Java declarations") {
+    val java = fixture.resolve("core/src/main/java/core/Shout.java")
+    val service = implementation.getTextDocumentService
+    val symbols = service.documentSymbol(new DocumentSymbolParams(document(java))).get(30, TimeUnit.SECONDS).asScala.map(_.getRight)
+    assertEquals(symbols.map(_.getName).toSeq, Seq("Shout"))
+    assertEquals(symbols.head.getKind, SymbolKind.Class)
+    assertEquals(symbols.head.getChildren.asScala.map(s => s.getName -> s.getKind).toSet,
+      Set("Shout" -> SymbolKind.Constructor, "loud" -> SymbolKind.Method))
+    val found = server.getWorkspaceService.symbol(new WorkspaceSymbolParams("core.Shout")).get(30, TimeUnit.SECONDS)
+      .getRight.asScala
+    assertEquals(found.map(s => (s.getName, s.getContainerName, s.getKind)).toSeq,
+      Seq(("Shout", "core", SymbolKind.Class)))
+    assertEquals(found.head.getLocation.getLeft.getUri, java.toUri.toString)
+  }
+
   test("outlines a file as the structure view shows it") {
     val symbols = server.getTextDocumentService.documentSymbol(new DocumentSymbolParams(document(counter)))
       .get(1, TimeUnit.MINUTES).asScala.toSeq.map(_.getRight)

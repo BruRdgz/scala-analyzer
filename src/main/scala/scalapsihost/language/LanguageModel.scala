@@ -9,7 +9,7 @@ enum ProblemSeverity { case Error, Warning, Information }
 
 /** Symbol categories returned by workspace navigation operations. */
 enum WorkspaceSymbolKind {
-  case EnumMember, Enum, Interface, Module, Class, Constructor, Function, Method, Property, Namespace, Variable, Constant, Object
+  case EnumMember, Enum, Interface, Module, Class, Constructor, Function, Method, Field, Property, Namespace, Variable, Constant, Object
 }
 
 /**

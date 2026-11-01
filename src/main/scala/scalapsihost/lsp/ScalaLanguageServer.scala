@@ -778,6 +778,7 @@ final class ScalaLanguageServer(
     case WorkspaceSymbolKind.Enum => SymbolKind.Enum
     case WorkspaceSymbolKind.Interface => SymbolKind.Interface
     case WorkspaceSymbolKind.Module => SymbolKind.Module
+    case WorkspaceSymbolKind.Field => SymbolKind.Field
     case WorkspaceSymbolKind.Class => SymbolKind.Class
     case WorkspaceSymbolKind.Constructor => SymbolKind.Constructor
     case WorkspaceSymbolKind.Function => SymbolKind.Function

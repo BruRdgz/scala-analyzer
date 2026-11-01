@@ -5,10 +5,11 @@ import com.intellij.openapi.project.Project
 import com.intellij.psi.codeStyle.NameUtil
 import com.intellij.psi.search.{GlobalSearchScope, PsiShortNamesCache}
 import com.intellij.psi.search.searches.DefinitionsScopedSearch
-import com.intellij.psi.{PsiElement, PsiFile, PsiNamedElement}
+import com.intellij.psi.{PsiClass, PsiElement, PsiFile, PsiNamedElement}
 import com.intellij.usageView.UsageInfo
 import com.intellij.util.CommonProcessors
 import org.jetbrains.plugins.scala.extensions.PsiNamedElementExt
+import org.jetbrains.plugins.scala.lang.psi.api.toplevel.ScNamedElement
 import org.jetbrains.plugins.scala.findUsages.factory.ScalaFindUsagesHandlerFactory
 import org.jetbrains.plugins.scala.gotoclass.{ScalaGoToClassContributor, ScalaGoToSymbolContributor}
 
@@ -125,7 +126,13 @@ object ProjectSearch {
       names.iterator
         .flatMap(name => contributors.flatMap(_.getItemsByName(name, query, project, false)) ++ shortNames.getClassesByName(name, scope))
         .collect { case named: PsiNamedElement => named }.distinct
-        .map(named => named -> symbolContributor.getQualifiedName(named))
+        .map { named =>
+          val qualified = named match {
+            case clazz: PsiClass if !clazz.isInstanceOf[ScNamedElement] => clazz.getQualifiedName
+            case _ => symbolContributor.getQualifiedName(named)
+          }
+          named -> qualified
+        }
         .filter((_, qualified) => !query.contains('.') || qualified != null && qualifiedMatcher.matches(qualified))
         .take(MaxSymbols)
         .map((named, qualified) => FoundSymbol(named, container(qualified, named.name)))
