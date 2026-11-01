@@ -22,7 +22,8 @@ async function main() {
       'update.mode': 'none',
       'telemetry.telemetryLevel': 'off',
     }));
-    const executable = await downloadAndUnzipVSCode('1.106.0');
+    // Older builds can crash during CLI installation: microsoft/vscode#256031.
+    const executable = await downloadAndUnzipVSCode('1.144.0');
     // The explicit profile below must be shared by installation and the test host.
     const [cli, ...args] = resolveCliArgsFromVSCodeExecutablePath(executable, { reuseMachineInstall: true });
     const isolation = ['--user-data-dir', userData, '--extensions-dir', extensions, '--no-sandbox'];
