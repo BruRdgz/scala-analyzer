@@ -1,5 +1,5 @@
-// Starts the scala-psi-host language server for Scala files. The server opens the workspace's build over BSP:
-// the workspace needs a BSP connection file (.bsp/, e.g. from `sbt bspConfig`).
+// Starts the scala-psi-host language server for Scala workspaces, including their Java sources.
+// The workspace needs a BSP connection file (.bsp/, e.g. from `sbt bspConfig`).
 //
 // The server logs to its output channel (and to a log file), reports opening the project as progress, and its state
 // as `scalaPsiHost/state` notifications, shown in the status bar; `scalaPsiHost/status` answers what it is doing.
@@ -27,7 +27,7 @@ async function activate(context) {
     'scalaPsiHost',
     'scala-psi-host',
     { command: serverPath, options: { env } },
-    { documentSelector: [{ scheme: 'file', language: 'scala' }] },
+    { documentSelector: [{ scheme: 'file', language: 'scala' }, { scheme: 'file', language: 'java' }] },
   );
 
   const status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 0);

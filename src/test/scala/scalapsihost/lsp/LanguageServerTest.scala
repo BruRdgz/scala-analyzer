@@ -36,6 +36,11 @@ class LanguageServerTest extends munit.FunSuite {
 
   /** Records what the server sends. */
   private final class RecordingClient extends ClientBase {
+    val registrations = new LinkedBlockingQueue[RegistrationParams]()
+    override def registerCapability(params: RegistrationParams): CompletableFuture[Void] = {
+      registrations.add(params)
+      CompletableFuture.completedFuture(null)
+    }
     val published = new LinkedBlockingQueue[PublishDiagnosticsParams]()
     val states = new LinkedBlockingQueue[HostProtocol.ServerState]()
     val logged = new LinkedBlockingQueue[MessageParams]()
@@ -86,7 +91,7 @@ class LanguageServerTest extends munit.FunSuite {
   override def afterAll(): Unit = closedServer
 
   /** Initializes `server` as an editor that, when `appliesEdits`, applies the server's edits and shows its documents. */
-  private def initialize(server: HostProtocol.LanguageServerWithStatus, root: Path, appliesEdits: Boolean = true): InitializeResult = {
+  private def initialize(server: HostProtocol.LanguageServerWithStatus, root: Path, appliesEdits: Boolean = true, scoped: Boolean = false): InitializeResult = {
     val params = new InitializeParams
     params.setWorkspaceFolders(java.util.List.of(new WorkspaceFolder(root.toUri.toString, root.getFileName.toString)))
     val workspace = new WorkspaceClientCapabilities
@@ -96,6 +101,24 @@ class LanguageServerTest extends munit.FunSuite {
     val capabilities = new ClientCapabilities
     capabilities.setWorkspace(workspace)
     capabilities.setWindow(window)
+    if (scoped) {
+      val text = new TextDocumentClientCapabilities
+      val completion = new CompletionCapabilities
+      val signatures = new SignatureHelpCapabilities
+      val formatting = new FormattingCapabilities
+      val rangeFormatting = new RangeFormattingCapabilities
+      val references = new ReferencesCapabilities
+      val actions = new CodeActionCapabilities
+      Seq[DynamicRegistrationCapabilities](completion, signatures, formatting, rangeFormatting, references, actions)
+        .foreach(_.setDynamicRegistration(true))
+      text.setCompletion(completion)
+      text.setSignatureHelp(signatures)
+      text.setFormatting(formatting)
+      text.setRangeFormatting(rangeFormatting)
+      text.setReferences(references)
+      text.setCodeAction(actions)
+      capabilities.setTextDocument(text)
+    }
     params.setCapabilities(capabilities)
     val result = server.initialize(params).get(1, TimeUnit.MINUTES)
     server.initialized(new InitializedParams)
@@ -208,8 +231,11 @@ class LanguageServerTest extends munit.FunSuite {
     }
   }
 
-  test("initializes on the workspace's build and announces its features") {
-    val capabilities = initialize(server, fixture).getCapabilities
+  test("preserves static Scala capabilities for clients without dynamic registrations") {
+    val implementation = new ScalaLanguageServer(TestHost.host)
+    val params = new InitializeParams
+    params.setRootUri(fixture.toUri.toString)
+    val capabilities = implementation.initialize(params).get().getCapabilities
     assertEquals(capabilities.getTextDocumentSync.getLeft, TextDocumentSyncKind.Incremental)
     assert(capabilities.getHoverProvider.getLeft)
     assert(capabilities.getInlayHintProvider.getLeft)
@@ -228,6 +254,52 @@ class LanguageServerTest extends munit.FunSuite {
     assert(capabilities.getDocumentSymbolProvider.getLeft)
     assert(capabilities.getFoldingRangeProvider.getLeft)
     assert(capabilities.getSemanticTokensProvider.getFull.getLeft)
+    implementation.shutdown().get(30, TimeUnit.SECONDS)
+    implementation.exit()
+  }
+
+  test("scopes Scala providers while sharing supported features with Java") {
+    val capabilities = initialize(server, fixture, scoped = true).getCapabilities
+    val gson = new com.google.gson.Gson
+    def scalaSelector(options: AnyRef): Unit = {
+      val selector = gson.toJsonTree(options).getAsJsonObject.getAsJsonArray("documentSelector")
+      assertEquals(selector.size(), 1)
+      assertEquals(selector.get(0).getAsJsonObject.get("language").getAsString, "scala")
+      assertEquals(selector.get(0).getAsJsonObject.get("scheme").getAsString, "file")
+    }
+    scalaSelector(capabilities.getInlayHintProvider.getRight)
+    scalaSelector(capabilities.getSelectionRangeProvider.getRight)
+    scalaSelector(capabilities.getImplementationProvider.getRight)
+    scalaSelector(capabilities.getRenameProvider.getRight)
+    scalaSelector(capabilities.getSemanticTokensProvider)
+    assertEquals(capabilities.getCompletionProvider, null)
+    assertEquals(capabilities.getSignatureHelpProvider, null)
+    assertEquals(capabilities.getDocumentFormattingProvider, null)
+    assertEquals(capabilities.getDocumentRangeFormattingProvider, null)
+    assertEquals(capabilities.getReferencesProvider, null)
+    assertEquals(capabilities.getCodeActionProvider, null)
+    assert(capabilities.getHoverProvider.getLeft)
+    assert(capabilities.getDefinitionProvider.getLeft)
+    assert(capabilities.getTypeDefinitionProvider.getLeft)
+    assert(capabilities.getDocumentHighlightProvider.getLeft)
+    assert(capabilities.getDocumentSymbolProvider.getLeft)
+    assert(capabilities.getFoldingRangeProvider.getLeft)
+    val registered = Client.registrations.poll(30, TimeUnit.SECONDS)
+    assert(registered != null)
+    val methods = registered.getRegistrations.asScala.map { registration =>
+      scalaSelector(registration.getRegisterOptions)
+      registration.getMethod -> gson.toJsonTree(registration.getRegisterOptions).getAsJsonObject
+    }.toMap
+    assertEquals(methods.keySet, Set("textDocument/completion", "textDocument/signatureHelp",
+      "textDocument/formatting", "textDocument/rangeFormatting", "textDocument/references", "textDocument/codeAction"))
+    assertEquals(methods("textDocument/completion").getAsJsonArray("triggerCharacters").toString, "[\".\"]")
+    assertEquals(methods("textDocument/completion").get("resolveProvider").getAsBoolean, false)
+    assertEquals(methods("textDocument/signatureHelp").getAsJsonArray("triggerCharacters").asScala.map(_.getAsString).toSeq,
+      Seq("(", "[", ","))
+    assertEquals(methods("textDocument/signatureHelp").getAsJsonArray("retriggerCharacters").asScala.map(_.getAsString).toSeq,
+      Seq(","))
+    assertEquals(methods("textDocument/codeAction").getAsJsonArray("codeActionKinds").asScala.map(_.getAsString).toSeq,
+      Seq(CodeActionKind.QuickFix, CodeActionKind.RefactorRewrite, CodeActionKind.SourceOrganizeImports))
   }
 
   test("publishes a document's problems, and new ones after a change") {

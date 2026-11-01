@@ -67,6 +67,7 @@ final class ScalaLanguageServer(
   // The project to open once the client says it is ready (`initialized`).
   @volatile private var workspace = Option.empty[Path]
   @volatile private var watchesFiles = false
+  @volatile private var languageRegistrations = Seq.empty[Registration]
   @volatile private var reportsProgress = false
   @volatile private var state = new HostProtocol.ServerState("starting", "waiting for the client")
   private val startedAt = System.nanoTime()
@@ -183,7 +184,9 @@ final class ScalaLanguageServer(
    * Negotiates client features and advertises the server's LSP capabilities.
    *
    * Uses the first workspace folder, falling back to the root URI. Build import begins only after `initialized`,
-   * so this response does not wait for the project to open.
+   * so this response does not wait for the project to open. Clients supporting all required dynamic registrations
+   * receive Scala-only providers alongside shared Java features; other clients retain static Scala capabilities
+   * and should select only Scala documents.
    *
    * @param params client capabilities, workspace root and optional client process information
    * @return an already completed future containing server capabilities and identity
@@ -193,6 +196,17 @@ final class ScalaLanguageServer(
     val offered = Option(params.getCapabilities)
     val workspaceCapabilities = offered.flatMap(c => Option(c.getWorkspace))
     val windowCapabilities = offered.flatMap(c => Option(c.getWindow))
+    val textCapabilities = offered.flatMap(c => Option(c.getTextDocument))
+    val scopesScalaFeatures = textCapabilities.exists { c =>
+      Seq[DynamicRegistrationCapabilities](c.getCompletion, c.getSignatureHelp, c.getFormatting,
+        c.getRangeFormatting, c.getReferences, c.getCodeAction).forall { feature =>
+        Option(feature).flatMap(f => Option(f.getDynamicRegistration)).exists(_.booleanValue)
+      }
+    }
+    def scalaOnly[T <: AbstractTextDocumentRegistrationAndWorkDoneProgressOptions](options: T): T = {
+      options.setDocumentSelector(java.util.List.of(new DocumentFilter("scala", "file", null)))
+      options
+    }
 
     watchesFiles = workspaceCapabilities.flatMap(w => Option(w.getDidChangeWatchedFiles))
       .flatMap(w => Option(w.getDynamicRegistration)).exists(_.booleanValue)
@@ -209,26 +223,53 @@ final class ScalaLanguageServer(
     val capabilities = new ServerCapabilities
     capabilities.setTextDocumentSync(TextDocumentSyncKind.Incremental)
     capabilities.setHoverProvider(true)
-    capabilities.setInlayHintProvider(true)
-    capabilities.setSelectionRangeProvider(true)
-    capabilities.setCompletionProvider(new CompletionOptions(/* resolveProvider = */ false, java.util.List.of(".")))
-    // A call's opening parenthesis or bracket shows the signatures; a comma moves to the next parameter.
-    capabilities.setSignatureHelpProvider(new SignatureHelpOptions(java.util.List.of("(", "[", ","), java.util.List.of(",")))
     capabilities.setExecuteCommandProvider(new ExecuteCommandOptions(java.util.List.of(CompleteInsertion)))
-    capabilities.setDocumentFormattingProvider(true)
-    capabilities.setDocumentRangeFormattingProvider(true)
     capabilities.setDefinitionProvider(true)
     capabilities.setTypeDefinitionProvider(true)
-    capabilities.setReferencesProvider(true)
-    capabilities.setImplementationProvider(true)
-    capabilities.setCodeActionProvider(new CodeActionOptions(java.util.List.of(
-      CodeActionKind.QuickFix, CodeActionKind.RefactorRewrite, CodeActionKind.SourceOrganizeImports)))
-    capabilities.setRenameProvider(new RenameOptions(/* prepareProvider = */ true))
     capabilities.setWorkspaceSymbolProvider(true)
     capabilities.setDocumentHighlightProvider(true)
     capabilities.setDocumentSymbolProvider(true)
     capabilities.setFoldingRangeProvider(true)
-    capabilities.setSemanticTokensProvider(new SemanticTokensWithRegistrationOptions(SemanticColoring.legend, /* full = */ true))
+    val rename = new RenameOptions(/* prepareProvider = */ true)
+    val tokens = new SemanticTokensWithRegistrationOptions(SemanticColoring.legend, /* full = */ true)
+    val completionTriggers = java.util.List.of(".")
+    // A call's opening parenthesis or bracket shows the signatures; a comma moves to the next parameter.
+    val signatureTriggers = java.util.List.of("(", "[", ",")
+    val signatureRetriggers = java.util.List.of(",")
+    val actionKinds = java.util.List.of(CodeActionKind.QuickFix, CodeActionKind.RefactorRewrite,
+      CodeActionKind.SourceOrganizeImports)
+    if (scopesScalaFeatures) {
+      capabilities.setInlayHintProvider(scalaOnly(new InlayHintRegistrationOptions))
+      capabilities.setSelectionRangeProvider(scalaOnly(new SelectionRangeRegistrationOptions))
+      capabilities.setImplementationProvider(scalaOnly(new ImplementationRegistrationOptions))
+      scalaOnly(rename)
+      scalaOnly(tokens)
+      val completion = scalaOnly(new CompletionRegistrationOptions(completionTriggers, false))
+      val signatures = scalaOnly(new SignatureHelpRegistrationOptions)
+      signatures.setTriggerCharacters(signatureTriggers)
+      signatures.setRetriggerCharacters(signatureRetriggers)
+      val actions = scalaOnly(new CodeActionRegistrationOptions)
+      actions.setCodeActionKinds(actionKinds)
+      languageRegistrations = Seq(
+        "completion" -> completion, "signatureHelp" -> signatures,
+        "formatting" -> scalaOnly(new DocumentFormattingRegistrationOptions),
+        "rangeFormatting" -> scalaOnly(new DocumentRangeFormattingRegistrationOptions),
+        "references" -> scalaOnly(new ReferenceRegistrationOptions), "codeAction" -> actions,
+      ).map { (method, options) => new Registration(s"scala-psi-host-$method", s"textDocument/$method", options) }
+    } else {
+      capabilities.setInlayHintProvider(true)
+      capabilities.setSelectionRangeProvider(true)
+      capabilities.setCompletionProvider(new CompletionOptions(/* resolveProvider = */ false, completionTriggers))
+      capabilities.setSignatureHelpProvider(new SignatureHelpOptions(signatureTriggers, signatureRetriggers))
+      capabilities.setDocumentFormattingProvider(true)
+      capabilities.setDocumentRangeFormattingProvider(true)
+      capabilities.setReferencesProvider(true)
+      capabilities.setImplementationProvider(true)
+      capabilities.setCodeActionProvider(new CodeActionOptions(actionKinds))
+      languageRegistrations = Seq.empty
+    }
+    capabilities.setRenameProvider(rename)
+    capabilities.setSemanticTokensProvider(tokens)
     Option(params.getProcessId).foreach { pid =>
       try {
         val process = ProcessHandle.of(pid.longValue())
@@ -242,7 +283,7 @@ final class ScalaLanguageServer(
   }
 
   /**
-   * Queues the initial build import and registers supported file watchers.
+   * Queues the initial build import and registers negotiated language providers and file watchers.
    *
    * Build-definition changes and source creation/deletion trigger reimports. Watchers are registered only when
    * the client advertises dynamic registration support.
@@ -251,6 +292,12 @@ final class ScalaLanguageServer(
    */
   override def initialized(params: InitializedParams): Unit = {
     workspace.foreach(openProject)
+    if (languageRegistrations.nonEmpty) {
+      client.registerCapability(new RegistrationParams(languageRegistrations.asJava)).exceptionally { error =>
+        HostLog.warn("could not register Scala language features", error)
+        null
+      }
+    }
     if (watchesFiles) {
       val changes = WatchKind.Create | WatchKind.Change | WatchKind.Delete
       val watchers = Seq(

@@ -216,14 +216,15 @@ final class ProjectSession private (
     language.change(path, range, replacement)
 
   /**
-   * Collects plugin and compiler diagnostics for a source.
+   * Collects diagnostics for the current source.
    *
    * This may run concurrently with session operations and waits for import application. Scala 3 compiler
    * diagnostics use the current buffer when compile settings are available; other compiler diagnostics come
-   * from the last build compile. Java sources return no diagnostics.
+   * from the last build compile. Java sources report parser errors from the current buffer, without semantic
+   * compiler diagnostics.
    *
    * @param path registered project-source path
-   * @return `Seq[FileProblem]` combining the enabled plugin and compiler diagnostics
+   * @return source problems from the diagnostics available for its language
    */
   def problems(path: Path): Seq[FileProblem] = {
     val readLock = importSnapshotLock.readLock()
