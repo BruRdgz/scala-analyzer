@@ -315,6 +315,8 @@ final class ScalaPsiHost private[scalapsihost] (
     lazy val rootManager: com.intellij.openapi.roots.ModuleRootManager = new Host_ModuleRootManager(dispatch {
       case ("ModuleRootManager.orderEntries", _) => orderEntries
       case ("ModuleRootManager.getModule", _) => module
+      // JDK roots belong to ModuleModel; no IntelliJ SDK entity is assigned to this module.
+      case ("ModuleRootManager.getSdk", _) => null
       // Host modules declare source membership, but no content entries or inherited package prefixes.
       case ("ModuleRootManager.getContentEntries", _) => Array.empty[com.intellij.openapi.roots.ContentEntry]
       // The modules this one depends on; the plugin looks among them for sbt's shared-source modules, which the host has none of.

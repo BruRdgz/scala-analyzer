@@ -87,6 +87,13 @@ b.map(_ + 1)</code></pre>
     }
   }
 
+  test("Java documentation defaults code blocks to Java while retaining explicit languages") {
+    assertEquals(QuickDoc.toMarkdown(doc("<pre>int value = 1;</pre>"), "java"),
+      Some("```java\nint value = 1;\n```"))
+    assertEquals(QuickDoc.toMarkdown(doc("<pre><code class=\"language-scala\">val value = 1</code></pre>"), "java"),
+      Some("```scala\nval value = 1\n```"))
+  }
+
   test("has no Markdown for an empty doc") {
     assertEquals(QuickDoc.toMarkdown(doc()), None)
     assertEquals(QuickDoc.toMarkdown(doc(content = "\n", sections = "")), None)

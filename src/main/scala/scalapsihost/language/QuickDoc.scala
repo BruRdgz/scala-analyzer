@@ -22,10 +22,11 @@ object QuickDoc {
    * remain; HTTP and HTTPS links are retained.
    *
    * @param html quick-documentation HTML produced by the plugin
+   * @param codeLanguage default language of code blocks without an explicit language attribute
    * @return Markdown content, or none when the selected fragments contain no text
    */
-  def toMarkdown(html: String): Option[String] = {
-    val converter = new Converter
+  def toMarkdown(html: String, codeLanguage: String = "scala"): Option[String] = {
+    val converter = new Converter(codeLanguage)
     new ParserDelegator().parse(new StringReader(html), converter, true)
     converter.markdown
   }
@@ -46,7 +47,7 @@ object QuickDoc {
   }
 
   /** Converts the documentation generator's HTML fragments to Markdown as the parser visits them. */
-  private final class Converter extends HTMLEditorKit.ParserCallback {
+  private final class Converter(codeLanguage: String) extends HTMLEditorKit.ParserCallback {
     private val content = new StringBuilder
     private val sections = ArrayBuffer.empty[String]
     private var region = Region.Outside
@@ -58,7 +59,7 @@ object QuickDoc {
     private var lists = List.empty[ListLevel]
     private var pre = Option.empty[StringBuilder]
     // A Markdown code block names its language (`<code class="language-java">`); a wiki one ({{{ }}}) is Scala.
-    private var preLanguage = "scala"
+    private var preLanguage = codeLanguage
     private var code = Option.empty[StringBuilder]
     private var linkTargets = List.empty[Option[String]]
 
@@ -86,7 +87,7 @@ object QuickDoc {
       case HTML.Tag.PRE =>
         endParagraph()
         pre = Some(new StringBuilder)
-        preLanguage = "scala"
+        preLanguage = codeLanguage
       case HTML.Tag.UL | HTML.Tag.OL =>
         if (lists.isEmpty) endParagraph() else endLine()
         lists = new ListLevel(tag == HTML.Tag.OL) :: lists

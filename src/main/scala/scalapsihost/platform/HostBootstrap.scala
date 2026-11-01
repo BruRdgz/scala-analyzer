@@ -1,5 +1,6 @@
 package scalapsihost.platform
 
+import com.intellij.codeInsight.javadoc.{DocumentationDelegateProvider, JavaDocInfoGeneratorFactory}
 import com.intellij.codeInsight.daemon.impl.{AnnotationHolderImpl, AnnotationSessionImpl}
 import com.intellij.codeInsight.hints.settings.ParameterNameHintsSettings
 import com.intellij.codeInsight.hints.{InlayParameterHintsExtension, InlayParameterHintsProvider}
@@ -376,6 +377,9 @@ private[scalapsihost] object HostBootstrap {
       InlayHints.setImplicitHintsEnabled(true)
       appServices.register(classOf[ParameterNameHintsSettings])(new ParameterNameHintsSettings)
       // Quick documentation becomes Markdown, which the editor highlights itself: the HTML carries no colors.
+      CoreApplicationEnvironment.registerExtensionPoint(area, DocumentationDelegateProvider.EP_NAME.getName,
+        classOf[DocumentationDelegateProvider])
+      appServices.register(classOf[JavaDocInfoGeneratorFactory])(new JavaDocInfoGeneratorFactory)
       appServices.register(classOf[ClientDocumentationSettings])(new ClientDocumentationSettings {
         override def isHighlightingOfQuickDocSignaturesEnabled: Boolean = false
         override def isHighlightingOfCodeBlocksEnabled: Boolean = false
@@ -971,6 +975,8 @@ private[scalapsihost] object HostBootstrap {
       projectServices.register(classOf[com.intellij.psi.PsiFileFactory])(new com.intellij.psi.impl.PsiFileFactoryImpl(psiManager))
       projectServices.register(classOf[com.intellij.openapi.roots.ProjectRootManager])(new Host_ProjectRootManager(dispatch {
         case ("ProjectRootManager.getFileIndex", _) => fileIndex
+        // JDK roots are mounted directly; the host has no configured IntelliJ SDK entity.
+        case ("ProjectRootManager.getProjectSdk", _) => null
         // Each host module carries its root manager (see ScalaPsiHost.newModule).
         case ("ProjectRootManager.getModuleRootManager", Array(m: Module)) =>
           m.getService(classOf[com.intellij.openapi.roots.ModuleRootManager])

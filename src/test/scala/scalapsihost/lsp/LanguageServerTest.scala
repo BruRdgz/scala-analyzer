@@ -417,6 +417,56 @@ class LanguageServerTest extends munit.FunSuite {
     ))
   }
 
+  test("hover renders Java declarations and Java targets referenced from Scala") {
+    val javaFile = fixture.resolve("core/src/main/java/core/Shout.java")
+    val original = Files.readString(javaFile)
+    val text = original.replace("    public static String loud",
+      "    /** Returns uppercase text. <pre>String example;</pre> */ public static String loud")
+    val service = implementation.getTextDocumentService
+    service.didOpen(new DidOpenTextDocumentParams(new TextDocumentItem(javaFile.toUri.toString, "java", 100, text)))
+    try {
+      val declaration = text.split("\n").zipWithIndex.find(_._1.contains("String loud")).get
+      val javaHover = service.hover(new HoverParams(document(javaFile),
+        new Position(declaration._2, declaration._1.indexOf("loud")))).get(30, TimeUnit.SECONDS)
+      assert(javaHover != null)
+      val rendered = javaHover.getContents.getRight.getValue
+      assert(rendered.startsWith("```java\n"), rendered)
+      assert(rendered.contains("loud") && rendered.contains("String"), rendered)
+      assert(rendered.contains("Returns uppercase text."), rendered + "\n" + Client.logged.asScala.filter(_.getMessage.contains("no documentation")).mkString("\n"))
+      assert(rendered.contains("```java\nString example;\n```"), rendered)
+      val scalaLine = Files.readString(main).replace("val text: String", "val text: Int").split("\n")(6)
+      val scalaHover = service.hover(new HoverParams(document(main), new Position(6, scalaLine.indexOf("loud") + 1)))
+        .get(30, TimeUnit.SECONDS)
+      assert(scalaHover != null)
+      assert(scalaHover.getContents.getRight.getValue.startsWith("```java\n"), scalaHover.toString)
+    } finally {
+      service.didChange(new DidChangeTextDocumentParams(new VersionedTextDocumentIdentifier(javaFile.toUri.toString, 101),
+        JavaList.of(new TextDocumentContentChangeEvent(original))))
+      service.documentSymbol(new DocumentSymbolParams(document(javaFile))).get(30, TimeUnit.SECONDS)
+    }
+  }
+
+  test("Java outline keeps record components and enum constants without synthetic members") {
+    val javaFile = fixture.resolve("core/src/main/java/core/Shout.java")
+    val service = implementation.getTextDocumentService
+    val text = "package core; record JavaRecord(int count) { enum State { READY } int value() { return count; } }"
+    service.didOpen(new DidOpenTextDocumentParams(new TextDocumentItem(javaFile.toUri.toString, "java", 110, text)))
+    try {
+      val symbols = service.documentSymbol(new DocumentSymbolParams(document(javaFile))).get(30, TimeUnit.SECONDS)
+        .asScala.map(_.getRight)
+      assertEquals(symbols.map(_.getName).toSeq, Seq("JavaRecord"))
+      val members = symbols.head.getChildren.asScala
+      assertEquals(members.map(s => s.getName -> s.getKind).toSet,
+        Set("count" -> SymbolKind.Property, "State" -> SymbolKind.Enum, "value" -> SymbolKind.Method))
+      assertEquals(members.find(_.getName == "State").get.getChildren.asScala.map(s => s.getName -> s.getKind).toSeq,
+        Seq("READY" -> SymbolKind.EnumMember))
+    } finally {
+      service.didChange(new DidChangeTextDocumentParams(new VersionedTextDocumentIdentifier(javaFile.toUri.toString, 111),
+        JavaList.of(new TextDocumentContentChangeEvent(Files.readString(javaFile)))))
+      service.documentSymbol(new DocumentSymbolParams(document(javaFile))).get(30, TimeUnit.SECONDS)
+    }
+  }
+
   test("Java syntax diagnostics follow unsaved buffers and clear after correction") {
     val java = fixture.resolve("core/src/main/java/core/Shout.java")
     val service = implementation.getTextDocumentService

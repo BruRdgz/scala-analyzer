@@ -3,6 +3,7 @@ package scalapsihost.language
 import com.intellij.codeInsight.highlighting.ReadWriteAccessDetector
 import com.intellij.ide.util.treeView.smartTree.TreeElement
 import com.intellij.lang.annotation.HighlightSeverity
+import com.intellij.lang.java.JavaDocumentationProvider
 import com.intellij.openapi.editor.Document
 import com.intellij.openapi.editor.colors.TextAttributesKey
 import com.intellij.openapi.util.TextRange
@@ -26,6 +27,7 @@ import scalapsihost.build.{CompileSpec, CompilerDiagnostic, DocumentCompiler, Sc
 import scalapsihost.platform.{HostLog, LibraryFile, SourceFile}
 
 import java.nio.file.{Files, Path}
+import java.util.{List as JavaList}
 
 import scala.jdk.CollectionConverters.*
 import scala.util.control.NonFatal
@@ -186,7 +188,7 @@ private[scalapsihost] final class ProjectLanguageOperations(
       case _ => Seq.empty
     }
 
-  /** Renders a referenced or declared symbol's quick-info signature and available ScalaDoc as Markdown. */
+  /** Renders a referenced or declared symbol with its language's signature and documentation. */
   def hover(path: Path, at: LineColumn): Option[String] = host.read {
     val sourceFile = file(path)
     val atOffset = offset(document(sourceFile), at)
@@ -197,16 +199,26 @@ private[scalapsihost] final class ProjectLanguageOperations(
     }
     for {
       (target, original) <- subject
-      html <- ScalaDocQuickInfoGenerator.getQuickNavigateInfo(target, original)
+      java = target.getNavigationElement.getContainingFile.isInstanceOf[PsiJavaFile]
+      html <- if (java) Option(JavaDocumentationProvider.getQuickNavigationInfoInner(target, original))
+              else ScalaDocQuickInfoGenerator.getQuickNavigateInfo(target, original)
     } yield {
       val signature = StringUtil.unescapeXmlEntities(StringUtil.removeHtmlTags(html, true)).trim
-      (s"```scala\n$signature\n```" +: documentation(target, original).toSeq).mkString("\n\n")
+      val language = if (java) "java" else "scala"
+      (s"```$language\n$signature\n```" +: documentation(target, original).toSeq).mkString("\n\n")
     }
   }
 
-  /** Reads ScalaDoc through navigation to attached sources, logging failures while retaining the hover signature. */
+  /** Reads documentation through navigation to attached sources, retaining the signature if documentation fails. */
   private def documentation(target: PsiElement, original: PsiElement): Option[String] =
-    try Option(new ScalaDocumentationProvider().generateDoc(target.getNavigationElement, original)).flatMap(QuickDoc.toMarkdown)
+    try {
+      val declaration = target.getNavigationElement
+      val java = declaration.getContainingFile.isInstanceOf[PsiJavaFile]
+      // The host supplies source attachments, not external Javadoc locations from IDE module extensions.
+      val html = if (java) JavaDocumentationProvider.generateExternalJavadoc(declaration, null: JavaList[String])
+                 else new ScalaDocumentationProvider().generateDoc(declaration, original)
+      Option(html).flatMap(text => QuickDoc.toMarkdown(text, if (java) "java" else "scala"))
+    }
     catch {
       // A linkage error: the generator reached an IDE class the host does not ship; the signature is still worth showing.
       case e @ (NonFatal(_) | _: LinkageError) =>
