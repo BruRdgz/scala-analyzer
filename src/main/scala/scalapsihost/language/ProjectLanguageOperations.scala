@@ -1,15 +1,16 @@
 package scalapsihost.language
 
-import com.intellij.codeInsight.highlighting.ReadWriteAccessDetector
+import com.intellij.codeInsight.highlighting.{JavaReadWriteAccessDetector, ReadWriteAccessDetector}
 import com.intellij.ide.util.treeView.smartTree.TreeElement
 import com.intellij.lang.annotation.HighlightSeverity
 import com.intellij.lang.java.JavaDocumentationProvider
 import com.intellij.openapi.progress.ProgressManager
 import com.intellij.openapi.editor.Document
 import com.intellij.openapi.editor.colors.TextAttributesKey
+import com.intellij.psi.util.PsiTypesUtil
 import com.intellij.openapi.util.TextRange
 import com.intellij.openapi.util.text.StringUtil
-import com.intellij.psi.{PsiClass, PsiCodeBlock, PsiComment, PsiImportList, PsiDocumentManager, PsiElement, PsiEnumConstant, PsiField, PsiFile, PsiJavaFile, PsiMethod, PsiNameIdentifierOwner, PsiNamedElement, PsiRecordComponent, SyntaxTraverser}
+import com.intellij.psi.{PsiClass, PsiCodeBlock, PsiComment, PsiImportList, PsiDocumentManager, PsiElement, PsiEnumConstant, PsiField, PsiFile, PsiJavaFile, PsiMethod, PsiNameIdentifierOwner, PsiNamedElement, PsiRecordComponent, PsiVariable, SyntaxTraverser}
 import org.jetbrains.plugins.scala.extensions.PsiNamedElementExt
 import org.jetbrains.plugins.scala.editor.documentationProvider.{ScalaDocQuickInfoGenerator, ScalaDocumentationProvider}
 import org.jetbrains.plugins.scala.highlighter.DefaultHighlighter as H
@@ -249,8 +250,16 @@ private[scalapsihost] final class ProjectLanguageOperations(
     val sourceFile = file(path)
     val atOffset = offset(document(sourceFile), at)
     val symbol = Option(sourceFile.findReferenceAt(atOffset)).flatMap(r => Option(r.resolve())).orElse(declarationNamedAt(sourceFile, atOffset))
-    val types = symbol.flatMap(s => Option(new org.jetbrains.plugins.scala.annotator.gutter.ScalaGotoTypeDeclarationProvider().getSymbolTypeDeclarations(s)))
-    types.toSeq.flatten.flatMap(sourceLocation)
+    val types = if (sourceFile.isInstanceOf[PsiJavaFile]) symbol.toSeq.flatMap {
+      case clazz: PsiClass => Seq(clazz)
+      case variable: PsiVariable => Option(PsiTypesUtil.getPsiClass(variable.getType.getDeepComponentType)).toSeq
+      case method: PsiMethod if method.isConstructor => Option(method.getContainingClass).toSeq
+      case method: PsiMethod =>
+        Option(method.getReturnType).flatMap(t => Option(PsiTypesUtil.getPsiClass(t.getDeepComponentType))).toSeq
+      case _ => Seq.empty
+    } else symbol.flatMap(s => Option(new org.jetbrains.plugins.scala.annotator.gutter.ScalaGotoTypeDeclarationProvider()
+      .getSymbolTypeDeclarations(s))).toSeq.flatten
+    types.flatMap(sourceLocation).distinct
   }
 
   /** Where a declaration's name is in its file; an empty range at its start for one without a name identifier. */
@@ -386,7 +395,10 @@ private[scalapsihost] final class ProjectLanguageOperations(
       case None => declarationNamedAt(sourceFile, atOffset)
     }
     target.collect { case named: PsiNamedElement if named.getName != null => named }.toSeq.flatMap { named =>
-      val access = new org.jetbrains.plugins.scala.highlighter.readWriteAccess.ScalaReadWriteAccessDetector
+      val access: ReadWriteAccessDetector = sourceFile match {
+        case _: PsiJavaFile => new JavaReadWriteAccessDetector
+        case _ => new org.jetbrains.plugins.scala.highlighter.readWriteAccess.ScalaReadWriteAccessDetector
+      }
       /** Converts a PSI range within this document to workspace coordinates. */
       def span(range: TextRange): (LineColumn, LineColumn) =
         position(sourceDocument, range.getStartOffset) -> position(sourceDocument, range.getEndOffset)

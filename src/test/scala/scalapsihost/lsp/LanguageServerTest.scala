@@ -446,6 +446,29 @@ class LanguageServerTest extends munit.FunSuite {
     }
   }
 
+  test("Java type definitions resolve array components and highlights distinguish writes") {
+    val javaFile = fixture.resolve("core/src/main/java/core/Shout.java")
+    val text = "package core; class Shout {} class Use { Shout[] values; void set(Shout value) { values = new Shout[]{value}; Shout[] copy = values; } }"
+    val service = implementation.getTextDocumentService
+    service.didOpen(new DidOpenTextDocumentParams(new TextDocumentItem(javaFile.toUri.toString, "java", 130, text)))
+    try {
+      val assignment = text.indexOf("values =")
+      val types = service.typeDefinition(new TypeDefinitionParams(document(javaFile), new Position(0, assignment)))
+        .get(30, TimeUnit.SECONDS).getLeft.asScala
+      assertEquals(types.map(_.getUri).toSeq, Seq(javaFile.toUri.toString))
+      assertEquals(types.head.getRange.getStart, new Position(0, text.indexOf("Shout")))
+      val highlights = service.documentHighlight(new DocumentHighlightParams(document(javaFile), new Position(0, assignment)))
+        .get(30, TimeUnit.SECONDS).asScala
+      val kinds = highlights.map(h => h.getRange.getStart.getCharacter.intValue -> h.getKind).toMap
+      assertEquals(kinds(assignment), DocumentHighlightKind.Write)
+      assertEquals(kinds(text.lastIndexOf("values")), DocumentHighlightKind.Read)
+    } finally {
+      service.didChange(new DidChangeTextDocumentParams(new VersionedTextDocumentIdentifier(javaFile.toUri.toString, 131),
+        JavaList.of(new TextDocumentContentChangeEvent(Files.readString(javaFile)))))
+      service.documentSymbol(new DocumentSymbolParams(document(javaFile))).get(30, TimeUnit.SECONDS)
+    }
+  }
+
   test("Java folding follows PSI blocks, comments and imports") {
     val javaFile = fixture.resolve("core/src/main/java/core/Shout.java")
     val text = """package core;
