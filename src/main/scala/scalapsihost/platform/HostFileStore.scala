@@ -43,22 +43,21 @@ private[scalapsihost] final class HostFileStore(project: Project, psiManager: ()
 
   /** Creates and attaches a nonphysical provider for a temporary file first opened by a plugin query. */
   private def newTemporaryViewProvider(f: VirtualFile): FileViewProvider = {
-    val provider = f.getFileType match {
-      case _: com.intellij.openapi.fileTypes.LanguageFileType => sourceViewProvider(f, physical = false)
-      case _ => new com.intellij.psi.SingleRootFileViewProvider(psiManager(), f, false)
-    }
+    val provider = sourceViewProvider(f, physical = false)
     f.putUserData(temporaryViewProvider, provider)
     provider
   }
 
-  /** Creates a provider for the file type's substituted language, including per-module Scala versions. */
-  private def sourceViewProvider(source: VirtualFile, physical: Boolean): FileViewProvider = {
-    // The supplier breaks the construction cycle with HostPsiManager; providers are created only after registration.
-    val language = com.intellij.psi.LanguageSubstitutors.getInstance.substituteLanguage(
-      source.getFileType.asInstanceOf[com.intellij.openapi.fileTypes.LanguageFileType].getLanguage, source, project)
-    Option(LanguageFileViewProviders.INSTANCE.forLanguage(language))
-      .map(_.createFileViewProvider(source, language, psiManager(), physical))
-      .getOrElse(new com.intellij.psi.SingleRootFileViewProvider(psiManager(), source, physical))
+  /** Uses the substituted language when available, otherwise the platform's default provider. */
+  private def sourceViewProvider(source: VirtualFile, physical: Boolean): FileViewProvider = source.getFileType match {
+    case fileType: com.intellij.openapi.fileTypes.LanguageFileType =>
+      // The supplier breaks the construction cycle with HostPsiManager; providers are created only after registration.
+      val language = com.intellij.psi.LanguageSubstitutors.getInstance.substituteLanguage(
+        fileType.getLanguage, source, project)
+      Option(LanguageFileViewProviders.INSTANCE.forLanguage(language))
+        .map(_.createFileViewProvider(source, language, psiManager(), physical))
+        .getOrElse(new com.intellij.psi.SingleRootFileViewProvider(psiManager(), source, physical))
+    case _ => new com.intellij.psi.SingleRootFileViewProvider(psiManager(), source, physical)
   }
 
   /** Answers file-manager lookups using the host's physical and temporary provider policies. */

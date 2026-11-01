@@ -8,6 +8,9 @@ import scalapsihost.platform.{LibraryFile, LibraryFileSystem}
 
 import java.net.URI
 import java.nio.file.{ClosedFileSystemException, FileSystems, Files, Path}
+import java.util.zip.{ZipEntry, ZipOutputStream}
+
+import scala.util.Using
 
 /** Library binaries reach the plugin's symbol lookups through its own decompiler, stub builder and indexers. */
 class LibraryIndexTest extends munit.FunSuite {
@@ -39,6 +42,30 @@ class LibraryIndexTest extends munit.FunSuite {
       val target = list.getNavigationElement
       val text = target.getContainingFile.getText
       assert(text.startsWith("ArrayList", target.getTextOffset), text.substring(target.getTextOffset, target.getTextOffset + 40))
+    }
+  }
+
+  test("attached sources with unknown file types use the default provider") {
+    val archive = Files.createTempFile("unknown-library-sources", ".jar")
+    val libraryFiles = new LibraryFileSystem
+    try {
+      Using.resource(new ZipOutputStream(Files.newOutputStream(archive))) { zip =>
+        zip.putNextEntry(new ZipEntry("example/Library.kt"))
+        zip.write("package example\nclass Library".getBytes(java.nio.charset.StandardCharsets.UTF_8))
+        zip.closeEntry()
+      }
+      val source = libraryFiles.mountSources(archive).findFileByRelativePath("example/Library.kt")
+      val host = TestHost.host
+      host.read {
+        assertEquals(source.getFileType, com.intellij.openapi.fileTypes.UnknownFileType.INSTANCE)
+        val file = com.intellij.psi.PsiManager.getInstance(host.project).findFile(source)
+        assert(file != null)
+        assertEquals(file.getVirtualFile, source)
+        assert(file.getViewProvider.isPhysical)
+      }
+    } finally {
+      libraryFiles.close()
+      Files.deleteIfExists(archive)
     }
   }
 
