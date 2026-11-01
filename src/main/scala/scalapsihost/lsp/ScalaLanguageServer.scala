@@ -797,6 +797,12 @@ final class ScalaLanguageServer(
       case ProblemSeverity.Information => DiagnosticSeverity.Information
     })
     converted.setSource(problem.source)
+    problem.inspectionId.foreach(converted.setCode)
+    val tags = Seq(
+      Option.when(problem.deprecated)(org.eclipse.lsp4j.DiagnosticTag.Deprecated),
+      Option.when(problem.unnecessary)(org.eclipse.lsp4j.DiagnosticTag.Unnecessary),
+    ).flatten
+    if (tags.nonEmpty) converted.setTags(tags.asJava)
     converted
   }
 

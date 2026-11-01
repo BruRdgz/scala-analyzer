@@ -165,7 +165,7 @@ private[scalapsihost] final class ProjectLanguageOperations(
           val sourceDocument = document(scalaFile)
           val plugin = host.diagnostics(scalaFile).filter(_.severity.compareTo(HighlightSeverity.WEAK_WARNING) >= 0).map { p =>
             FileProblem(problemSeverity(p.severity), position(sourceDocument, p.range.getStartOffset),
-              position(sourceDocument, p.range.getEndOffset), p.message, "scala-plugin")
+              position(sourceDocument, p.range.getEndOffset), p.message, "scala-plugin", p.inspectionId, p.deprecated, p.unnecessary)
           }
           (plugin, host.isCompilerHighlighted(scalaFile), sourceDocument.getText)
         }

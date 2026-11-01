@@ -922,6 +922,46 @@ class LanguageServerTest extends munit.FunSuite {
     } finally change(original, 29)
   }
 
+  test("inspection diagnostics preserve IDs and tags and fixes return versioned edits") {
+    val original = Files.readString(main).replace("val text: String", "val text: Int")
+    val text = "package app\nobject InspectionActions { @deprecated(\"Use replacement\", \"1\") def old: Int = 1; val value = old; private val dead = 2; def f(b: Boolean): Boolean = b == true }"
+    val service = server.getTextDocumentService
+    def change(value: String, version: Int): Unit = service.didChange(new DidChangeTextDocumentParams(
+      new VersionedTextDocumentIdentifier(main.toUri.toString, version),
+      java.util.List.of(new TextDocumentContentChangeEvent(value))))
+    try {
+      change(text, 170)
+      val problems = diagnosticsOf(main, 170)
+      def named(id: String): Diagnostic = problems.find(p => p.getCode != null && p.getCode.getLeft == id)
+        .getOrElse(fail(problems.toString))
+      assert(named("ScalaDeprecation").getTags.contains(DiagnosticTag.Deprecated))
+      assert(named("ScalaUnusedSymbol").getTags.contains(DiagnosticTag.Unnecessary))
+      val simplification = named("SimplifyBoolean")
+      assertEquals(simplification.getSeverity, DiagnosticSeverity.Warning)
+      val context = new CodeActionContext(java.util.List.of(simplification))
+      context.setOnly(java.util.List.of(CodeActionKind.QuickFix))
+      val actions = service.codeAction(new CodeActionParams(document(main), simplification.getRange, context))
+        .get(1, TimeUnit.MINUTES).asScala.map(_.getRight)
+      val action = actions.find(a => a.getDisabled == null && a.getTitle.startsWith("Simplify"))
+        .getOrElse(fail(actions.toString))
+      val edit = action.getEdit.getDocumentChanges.get(0).getLeft
+      assertEquals(edit.getTextDocument.getVersion, Integer.valueOf(170))
+      val lineStart = text.indexOf('\n') + 1
+      val changes = edit.getEdits.asScala.toSeq.map { change =>
+        val range = change.getRange
+        ChangeEngine.Edit(new com.intellij.openapi.util.TextRange(
+          lineStart + range.getStart.getCharacter, lineStart + range.getEnd.getCharacter), change.getNewText)
+      }
+      val corrected = TestHost.applyEdits(text, changes)
+      assert(!corrected.contains("b == true"), corrected)
+      change(corrected, 171)
+      assert(!diagnosticsOf(main, 171).exists(p => p.getCode != null && p.getCode.getLeft == "SimplifyBoolean"))
+    } finally {
+      change(original, 172)
+      service.documentSymbol(new DocumentSymbolParams(document(main))).get(1, TimeUnit.MINUTES)
+    }
+  }
+
   test("completion answers for its position while the user types on, as editors expect") {
     val original = Files.readString(main).replace("val text: String", "val text: Int")
     // The next keystroke arrives before the completion has run.

@@ -20,6 +20,9 @@ enum WorkspaceSymbolKind {
  * @param end exclusive end line and UTF-16 column
  * @param message diagnostic text
  * @param source producer label, such as `scala-plugin` or `scalac`
+ * @param inspectionId stable inspection code, when supplied by the producer
+ * @param deprecated whether the highlighted symbol is deprecated
+ * @param unnecessary whether the producer marks the highlighted code as unnecessary
  */
 final case class FileProblem(
   severity: ProblemSeverity,
@@ -27,6 +30,9 @@ final case class FileProblem(
   end: LineColumn,
   message: String,
   source: String,
+  inspectionId: Option[String] = None,
+  deprecated: Boolean = false,
+  unnecessary: Boolean = false,
 )
 
 /**
