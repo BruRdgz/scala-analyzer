@@ -103,6 +103,8 @@ trigger a reimport. Unsaved source text is preserved.
 
 - References and implementations use text-based searches without compiler indexes. Implicit/SAM usages and Java
   inheritors can be missed. Rename can leave Java overrides unchanged.
+- Definition navigation can be absent on case-class construction calls; CI exercises ordinary source-member
+  navigation through the packaged server and installed extension.
 - Java binary short-name lookup is incomplete, and JDK symbols come
   from the JDK running the server.
 - Native inspections cover deprecation, selected redundancies, explicit unused imports and unannotated

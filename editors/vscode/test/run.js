@@ -23,7 +23,8 @@ async function main() {
       'telemetry.telemetryLevel': 'off',
     }));
     const executable = await downloadAndUnzipVSCode('1.106.0');
-    const [cli, ...args] = resolveCliArgsFromVSCodeExecutablePath(executable);
+    // The explicit profile below must be shared by installation and the test host.
+    const [cli, ...args] = resolveCliArgsFromVSCodeExecutablePath(executable, { reuseMachineInstall: true });
     const isolation = ['--user-data-dir', userData, '--extensions-dir', extensions, '--no-sandbox'];
     for (const extension of ['scala-lang.scala', vsix]) {
       const result = spawnSync(cli, [...args, ...isolation, '--install-extension', extension, '--force'], { stdio: 'inherit' });
