@@ -4,11 +4,12 @@ import com.intellij.codeInsight.highlighting.ReadWriteAccessDetector
 import com.intellij.ide.util.treeView.smartTree.TreeElement
 import com.intellij.lang.annotation.HighlightSeverity
 import com.intellij.lang.java.JavaDocumentationProvider
+import com.intellij.openapi.progress.ProgressManager
 import com.intellij.openapi.editor.Document
 import com.intellij.openapi.editor.colors.TextAttributesKey
 import com.intellij.openapi.util.TextRange
 import com.intellij.openapi.util.text.StringUtil
-import com.intellij.psi.{PsiClass, PsiDocumentManager, PsiElement, PsiEnumConstant, PsiField, PsiFile, PsiJavaFile, PsiMethod, PsiNameIdentifierOwner, PsiNamedElement, PsiRecordComponent, SyntaxTraverser}
+import com.intellij.psi.{PsiClass, PsiCodeBlock, PsiComment, PsiImportList, PsiDocumentManager, PsiElement, PsiEnumConstant, PsiField, PsiFile, PsiJavaFile, PsiMethod, PsiNameIdentifierOwner, PsiNamedElement, PsiRecordComponent, SyntaxTraverser}
 import org.jetbrains.plugins.scala.extensions.PsiNamedElementExt
 import org.jetbrains.plugins.scala.editor.documentationProvider.{ScalaDocQuickInfoGenerator, ScalaDocumentationProvider}
 import org.jetbrains.plugins.scala.highlighter.DefaultHighlighter as H
@@ -466,7 +467,7 @@ private[scalapsihost] final class ProjectLanguageOperations(
     }
   }
 
-  /** Computes plugin folding regions while leaving a trailing closing-bracket line visible. */
+  /** Computes language folding regions while leaving a closing-brace line visible. */
   def foldingRanges(path: Path): Seq[Fold] = host.read {
     file(path) match {
       case scalaFile: ScalaFile =>
@@ -487,6 +488,28 @@ private[scalapsihost] final class ProjectLanguageOperations(
             case _ => Fold.Code
           }
           Option.when(endLine > startLine)(Fold(startLine, endLine, kind))
+        }.distinct
+      case javaFile: PsiJavaFile =>
+        val sourceDocument = document(javaFile)
+        SyntaxTraverser.psiTraverser(javaFile).asScala.toSeq.flatMap { element =>
+          ProgressManager.checkCanceled()
+          val region = element match {
+            case clazz: PsiClass =>
+              for {
+                left <- Option(clazz.getLBrace)
+                right <- Option(clazz.getRBrace)
+              } yield (new TextRange(left.getTextRange.getStartOffset, right.getTextRange.getEndOffset), Fold.Code)
+            case block: PsiCodeBlock => Some(block.getTextRange -> Fold.Code)
+            case comment: PsiComment => Some(comment.getTextRange -> Fold.Comment)
+            case imports: PsiImportList => Some(imports.getTextRange -> Fold.Imports)
+            case _ => None
+          }
+          region.flatMap { (range, kind) =>
+            val startLine = sourceDocument.getLineNumber(range.getStartOffset)
+            val lastLine = sourceDocument.getLineNumber(range.getEndOffset)
+            val endLine = if (kind == Fold.Code && lastLine > startLine) lastLine - 1 else lastLine
+            Option.when(endLine > startLine)(Fold(startLine, endLine, kind))
+          }
         }.distinct
       case _ => Seq.empty
     }

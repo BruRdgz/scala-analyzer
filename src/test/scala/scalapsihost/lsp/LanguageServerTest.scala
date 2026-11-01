@@ -446,6 +446,37 @@ class LanguageServerTest extends munit.FunSuite {
     }
   }
 
+  test("Java folding follows PSI blocks, comments and imports") {
+    val javaFile = fixture.resolve("core/src/main/java/core/Shout.java")
+    val text = """package core;
+                 |import java.util.List;
+                 |import java.util.Map;
+                 |/** A comment
+                 | * with a closing brace } inside.
+                 | */
+                 |class Shout {
+                 |  void method() {
+                 |    String value = "}";
+                 |    if (true) {
+                 |      value.length();
+                 |    }
+                 |  }
+                 |}
+                 |""".stripMargin
+    val service = implementation.getTextDocumentService
+    service.didOpen(new DidOpenTextDocumentParams(new TextDocumentItem(javaFile.toUri.toString, "java", 120, text)))
+    try {
+      val ranges = service.foldingRange(new FoldingRangeRequestParams(document(javaFile))).get(30, TimeUnit.SECONDS).asScala
+      assertEquals(ranges.map(r => (r.getStartLine.intValue, r.getEndLine.intValue, Option(r.getKind))).toSet,
+        Set[(Int, Int, Option[String])]((1, 2, Some(FoldingRangeKind.Imports)), (3, 5, Some(FoldingRangeKind.Comment)),
+          (6, 12, None), (7, 11, None), (9, 10, None)))
+    } finally {
+      service.didChange(new DidChangeTextDocumentParams(new VersionedTextDocumentIdentifier(javaFile.toUri.toString, 121),
+        JavaList.of(new TextDocumentContentChangeEvent(Files.readString(javaFile)))))
+      service.documentSymbol(new DocumentSymbolParams(document(javaFile))).get(30, TimeUnit.SECONDS)
+    }
+  }
+
   test("Java outline keeps record components and enum constants without synthetic members") {
     val javaFile = fixture.resolve("core/src/main/java/core/Shout.java")
     val service = implementation.getTextDocumentService
