@@ -119,4 +119,56 @@ class ModuleTest extends munit.FunSuite {
       Seq(clientId, secondId, firstId).foreach(id => if (host.modules.byId(id).nonEmpty) host.removeModule(id))
     }
   }
+
+  test("Java-only source packages and short names follow edits and module scopes") {
+    val first = host.addModule(ModuleSpec("java-lookup-first", "2.13.18", Seq.empty, Seq(library213)))
+    val second = host.addModule(ModuleSpec("java-lookup-second", "2.13.18", Seq.empty, Seq(library213)))
+    val text = "package hostjava.deep; public class Widget { public static class Nested {} }"
+    val a = host.openFile(Path.of("/java-lookup-first/Widget.java"), text, first)
+    val b = host.openFile(Path.of("/java-lookup-second/Widget.java"), text, second)
+    val use = host.openFile(Path.of("/java-lookup-first/Use.java"),
+      "package hostclient; import hostjava.deep.*; class Use { Widget value; }", first)
+    val info = host.openFile(Path.of("/java-lookup-first/package-info.java"), "package hostjava.info;", first)
+    try {
+      host.read {
+        val facade = com.intellij.psi.JavaPsiFacade.getInstance(host.project)
+        val cache = com.intellij.psi.search.PsiShortNamesCache.getInstance(host.project)
+        val scope = host.modules.resolveScope(first)
+        val parent = facade.findPackage("hostjava")
+        assert(parent != null)
+        assertEquals(parent.getSubPackages(scope).map(_.getQualifiedName).toSet, Set("hostjava.deep", "hostjava.info"))
+        assertEquals(facade.findPackage("hostjava.deep").getClasses(scope).map(_.getContainingFile).toSet, Set(a))
+        assert(facade.findPackage("hostjava.info") != null)
+        assertEquals(cache.getClassesByName("Widget", scope).map(_.getContainingFile).toSet, Set(a))
+        assertEquals(cache.getClassesByName("Widget", host.modules.resolveScope(second)).map(_.getContainingFile).toSet, Set(b))
+        assert(cache.getAllClassNames.contains("Widget"))
+        assertEquals(facade.findClass("hostjava.deep.Widget.Nested", scope).getContainingFile, a)
+        val field = use.asInstanceOf[com.intellij.psi.PsiJavaFile].getClasses.head.getFields.head
+        val referenced = field.getType.asInstanceOf[com.intellij.psi.PsiClassType].resolve()
+        assert(referenced != null, "Java wildcard imports must resolve source-only packages")
+        assertEquals(referenced.getContainingFile, a)
+      }
+      host.edit(a, 0, text.length, "package hostjava.moved; public class Renamed {}")
+      host.read {
+        val facade = com.intellij.psi.JavaPsiFacade.getInstance(host.project)
+        val cache = com.intellij.psi.search.PsiShortNamesCache.getInstance(host.project)
+        val scope = host.modules.resolveScope(first)
+        assertEquals(facade.findClass("hostjava.deep.Widget", scope), null)
+        assertEquals(cache.getClassesByName("Widget", scope).toSeq, Seq.empty)
+        assertEquals(cache.getClassesByName("Renamed", scope).map(_.getContainingFile).toSet, Set(a))
+        assertEquals(facade.findPackage("hostjava").getSubPackages(scope).map(_.getQualifiedName).toSet,
+          Set("hostjava.moved", "hostjava.info"))
+      }
+    } finally {
+      Seq(a, b, use, info).foreach(host.closeSource)
+      host.removeModule(second.spec.stableId)
+      host.removeModule(first.spec.stableId)
+    }
+    host.read {
+      val facade = com.intellij.psi.JavaPsiFacade.getInstance(host.project)
+      assertEquals(facade.findPackage("hostjava"), null)
+      assert(!com.intellij.psi.search.PsiShortNamesCache.getInstance(host.project).getAllClassNames.contains("Renamed"))
+    }
+  }
+
 }

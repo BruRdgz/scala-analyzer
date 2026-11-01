@@ -1,6 +1,7 @@
 package scalapsihost.platform
 
 import com.intellij.openapi.project.Project
+import com.intellij.openapi.progress.ProgressManager
 import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.psi.impl.file.PsiPackageImpl
 import com.intellij.psi.impl.java.stubs.index.JavaStubIndexKeys
@@ -12,19 +13,22 @@ import org.jetbrains.plugins.scala.lang.psi.api.toplevel.ScPackaging
 import org.jetbrains.plugins.scala.lang.psi.api.toplevel.typedef.ScObject
 import org.jetbrains.plugins.scala.lang.psi.stubs.index.{ScPackageObjectFqnIndex, ScPackagingFqnIndex, ScalaIndexKeys}
 
+import scalapsihost.ModuleModel
+
 import scala.jdk.CollectionConverters.*
 
 /**
  * Resolves classes and packages for the platform's Java PSI facade.
  *
  * Scala classes come from [[SymbolIndex]]. Java binaries are resolved by path on demand to avoid indexing
- * the entire JDK; packages combine class-root directories with indexed Scala declarations.
+ * the entire JDK; packages combine class-root directories with Scala and Java source declarations.
  * Callers must hold the host's PSI read or write access.
  *
  * @param project project owning the PSI and stub indexes
  * @param files mounted class roots used for binary and package lookup
+ * @param modules registry of project sources and their owning modules
  */
-final class LibraryClassFinder(project: Project, files: LibraryFileSystem) extends PsiElementFinder {
+final class LibraryClassFinder(project: Project, files: LibraryFileSystem, modules: ModuleModel) extends PsiElementFinder {
   /** Obtains the project manager after bootstrap has registered its services. */
   private def psiManager: PsiManager = PsiManager.getInstance(project)
 
@@ -39,7 +43,7 @@ final class LibraryClassFinder(project: Project, files: LibraryFileSystem) exten
     findClasses(qualifiedName, scope).headOption.orNull
 
   /**
-   * Finds indexed Scala classes and Java binaries with a qualified name.
+   * Finds indexed source classes and Java binaries with a qualified name.
    *
    * @param qualifiedName dotted class name, including nested class names
    * @param scope eligible source and binary files
@@ -49,6 +53,13 @@ final class LibraryClassFinder(project: Project, files: LibraryFileSystem) exten
     val indexed = StubIndex.getElements(JavaStubIndexKeys.CLASS_FQN, qualifiedName, project, scope, classOf[PsiClass]).asScala.toSeq
     (indexed ++ javaClassesByPath(qualifiedName, scope)).distinct.toArray
   }
+
+  /** Reads Java sources from the live module registry within the requested scope. */
+  private def javaSources(scope: GlobalSearchScope): Seq[PsiJavaFile] =
+    modules.all.flatMap(_.sources.asScala).filter(scope.contains).flatMap { source =>
+      ProgressManager.checkCanceled()
+      Option(psiManager.findFile(source)).collect { case file: PsiJavaFile => file }
+    }
 
   /** `java.util.Map.Entry`: directories `java/util`, class file `Map.class`, then inner class `Entry`. */
   private def javaClassesByPath(qualifiedName: String, scope: GlobalSearchScope): Seq[PsiClass] = {
@@ -85,7 +96,7 @@ final class LibraryClassFinder(project: Project, files: LibraryFileSystem) exten
    * Finds a directory-backed or source-declared package.
    *
    * @param qualifiedName dotted package name, or empty for the root package
-   * @return the package, or null if no directory or Scala declaration backs it
+   * @return the package, or null if no directory or source declaration backs it
    */
   override def findPackage(qualifiedName: String): PsiPackage =
     if (directoriesOf(qualifiedName).isEmpty && !isDeclaredPackage(qualifiedName)) null
@@ -95,7 +106,11 @@ final class LibraryClassFinder(project: Project, files: LibraryFileSystem) exten
   private def isDeclaredPackage(qualifiedName: String): Boolean = {
     val everywhere = GlobalSearchScope.allScope(project)
     ScPackagingFqnIndex.instance.hasElement(qualifiedName, project, everywhere, classOf[ScPackaging]) ||
-      ScPackageObjectFqnIndex.instance.hasElement(qualifiedName, project, everywhere, classOf[PsiClass])
+      ScPackageObjectFqnIndex.instance.hasElement(qualifiedName, project, everywhere, classOf[PsiClass]) ||
+      javaSources(everywhere).exists { file =>
+        val name = file.getPackageName
+        name == qualifiedName || qualifiedName.isEmpty || name.startsWith(qualifiedName + ".")
+      }
   }
 
   /**
@@ -110,7 +125,10 @@ final class LibraryClassFinder(project: Project, files: LibraryFileSystem) exten
     val prefix = if (packageName.isEmpty) "" else packageName + "."
     val directories = directoriesOf(packageName).flatMap(_.getChildren)
       .filter(d => d.isDirectory && scope.contains(d)).map(_.getName)
-    (directories ++ declaredSubPackages(packageName, prefix, scope)).distinct.sorted
+    val javaPackages = javaSources(scope).map(_.getPackageName)
+      .filter(name => name.startsWith(prefix) && name != packageName)
+      .map(_.stripPrefix(prefix).takeWhile(_ != '.')).filter(_.nonEmpty)
+    (directories ++ declaredSubPackages(packageName, prefix, scope) ++ javaPackages).distinct.sorted
       .map(name => new PsiPackageImpl(psiManager.asInstanceOf[PsiManagerEx], prefix + name): PsiPackage).toArray
   }
 
@@ -148,22 +166,28 @@ final class LibraryClassFinder(project: Project, files: LibraryFileSystem) exten
     else Seq(name)
     val sources = names.flatMap(ScPackagingFqnIndex.instance.getElements(_, project, scope).asScala)
       .map(_.getContainingFile.getVirtualFile).distinct
-    sources.forall(consumer.process)
+    val javaFiles = javaSources(scope).filter { file =>
+      file.getPackageName == name || includeSubpackages && (name.isEmpty || file.getPackageName.startsWith(prefix))
+    }.map(_.getVirtualFile)
+    (sources ++ javaFiles).distinct.forall(consumer.process)
   }
 
   /**
-   * Lists binary classes directly inside visible package directories.
+   * Lists source and binary classes directly inside a visible package.
    *
    * @param psiPackage package whose directories should be searched
-   * @param scope eligible class files
-   * @return classes exposed by PSI class owners in those directories
+   * @param scope eligible source and class files
+   * @return distinct classes declared in the package
    */
-  override def getClasses(psiPackage: PsiPackage, scope: GlobalSearchScope): Array[PsiClass] =
-    directoriesOf(psiPackage.getQualifiedName).flatMap(_.getChildren)
+  override def getClasses(psiPackage: PsiPackage, scope: GlobalSearchScope): Array[PsiClass] = {
+    val sources = javaSources(scope).filter(_.getPackageName == psiPackage.getQualifiedName).flatMap(_.getClasses)
+    val binaries = directoriesOf(psiPackage.getQualifiedName).flatMap(_.getChildren)
       .filter(f => !f.isDirectory && f.getName.endsWith(".class") && scope.contains(f))
       .flatMap(f => Option(psiManager.findFile(f)))
       .flatMap {
         case owner: PsiClassOwner => owner.getClasses.toSeq
         case _ => Seq.empty
-      }.toArray
+      }
+    (sources ++ binaries).distinct.toArray
+  }
 }

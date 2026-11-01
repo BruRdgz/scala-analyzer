@@ -36,7 +36,8 @@ import com.intellij.lang.parameterInfo.{LanguageParameterInfo, ParameterInfoHand
 import com.intellij.navigation.ItemPresentationProviders
 import com.intellij.psi.{FileViewProvider, LanguageFileViewProviders, PsiClass, PsiElement, PsiField, PsiManager}
 import com.intellij.psi.presentation.java.{ClassPresentationProvider, FieldPresentationProvider}
-import com.intellij.psi.stubs.{LanguageStubDefinition, StubElementRegistryService, StubRegistryExtension}
+import com.intellij.psi.stubs.{LanguageStubDefinition, StubElementRegistryService, StubRegistryExtension, StubIndex}
+import com.intellij.psi.impl.java.stubs.index.JavaStubIndexKeys
 import com.intellij.psi.impl.cache.impl.id.{IdIndex, IdIndexEntry}
 import com.intellij.psi.search.GlobalSearchScope
 import com.intellij.psi.util.PsiModificationTracker
@@ -1095,12 +1096,16 @@ private[scalapsihost] object HostBootstrap {
         // suggestCompiledParameterName takes the first suggestion: none.
         case ("JavaCodeStyleManager.suggestVariableName", _) => com.intellij.psi.codeStyle.SuggestedNameInfo.NULL_INFO
       }))
-      // Scala enumeration uses the existing SymbolIndex through the plugin's cache. Java binaries remain unavailable.
+      // Source classes combine Scala synthetic representations with Java stub entries; Java binaries remain on demand.
       lazy val scalaShortNames = new org.jetbrains.plugins.scala.caches.ScalaShortNamesCache(using project)
       projectServices.register(classOf[com.intellij.psi.search.PsiShortNamesCache])(new Host_PsiShortNamesCache(dispatch {
         case ("PsiShortNamesCache.getClassesByName", Array(name: String, scope: com.intellij.psi.search.GlobalSearchScope)) =>
-          scalaShortNames.getClassesByName(name, scope)
-        case ("PsiShortNamesCache.getAllClassNames", _) => scalaShortNames.getAllClassNames.sorted
+          (scalaShortNames.getClassesByName(name, scope).toSeq ++
+            StubIndex.getElements(JavaStubIndexKeys.CLASS_SHORT_NAMES,
+              name, project, scope, classOf[PsiClass]).asScala).distinct.toArray
+        case ("PsiShortNamesCache.getAllClassNames", _) =>
+          (scalaShortNames.getAllClassNames.toSeq ++ StubIndex.getInstance
+            .getAllKeys(JavaStubIndexKeys.CLASS_SHORT_NAMES, project).asScala).distinct.sorted.toArray
       }))
       // Annotation lookups cache by owner; the host has no mirrored elements (light copies of sources), so an owner is
       // its own cache key.
@@ -1228,7 +1233,7 @@ private[scalapsihost] object HostBootstrap {
       CoreApplicationEnvironment.registerExtensionPoint(area, "com.intellij.java.elementFinder", classOf[com.intellij.psi.PsiElementFinder])
       val finders = area.getExtensionPoint[com.intellij.psi.PsiElementFinder]("com.intellij.java.elementFinder")
         .asInstanceOf[ExtensionPointImpl[com.intellij.psi.PsiElementFinder]]
-      finders.registerExtension(new LibraryClassFinder(project, libraryFiles), root)
+      finders.registerExtension(new LibraryClassFinder(project, libraryFiles, moduleModel), root)
       finders.registerExtension(new org.jetbrains.plugins.scala.finder.ScalaClassFinder(project), root)
       finders.registerExtension(new org.jetbrains.plugins.scala.lang.psi.impl.toplevel.synthetic.SyntheticClassElementFinder(project), root)
     }
