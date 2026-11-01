@@ -317,6 +317,76 @@ class EditingTest extends munit.FunSuite {
     } finally host.closeSource(file)
   }
 
+  test("Java completion preserves overloads, prefix ranges and insertion without changing the source") {
+    val text = "class JavaComplete { String message(int n) { return \"hi\"; } @Deprecated String message(String s) { return s; } void use() { String emoji = \"😀\"; this.mes; boolean flag = tr; } }"
+    val file = host.openFile(Path.of("/editing/JavaComplete.java"), text, module)
+    try {
+      val offset = text.indexOf("this.mes") + "this.mes".length
+      val result = host.completion(file, offset)
+      val methods = result.items.filter(_.lookup == "message")
+      assertEquals(methods.size, 2, result.toString)
+      assert(methods.forall(_.kind == Completion.Kind.Method))
+      assert(methods.forall(_.prefix == new TextRange(offset - 3, offset)))
+      assertEquals(methods.count(_.deprecated), 1)
+      assertEquals(methods.map(_.identity).distinct.size, 2)
+      val keywords = host.completion(file, text.indexOf("= tr") + "= tr".length).items
+      assert(keywords.exists(item => item.lookup == "true" && item.kind == Completion.Kind.Keyword), keywords.toString)
+      val inserted = Completion.choose(file, offset, "message", com.intellij.codeInsight.lookup.Lookup.NORMAL_SELECT_CHAR)
+      assert(inserted.result.text.contains("this.message()"), inserted.toString)
+      assertEquals(inserted.caret, inserted.result.text.indexOf("this.message(") + "this.message(".length)
+      val keyword = Completion.choose(file, text.indexOf("= tr") + "= tr".length, "true",
+        com.intellij.codeInsight.lookup.Lookup.NORMAL_SELECT_CHAR)
+      assert(keyword.result.text.contains("boolean flag = true;"), keyword.toString)
+      assertEquals(keyword.caret, keyword.result.text.indexOf("flag = true") + "flag = true".length)
+      assertEquals(host.read(file.getText), text)
+      // As in LSP replay, the editor has already replaced the prefix when the command arrives.
+      val start = text.indexOf("= tr") + "= ".length
+      val candidate = keywords.find(_.lookup == "true").getOrElse(fail(keywords.toString))
+      host.edit(file, start, start + 2, candidate.lookup)
+      val selected = text.substring(0, start) + candidate.lookup + text.substring(start + 2)
+      val replayed = host.insertCompletion(file, start, candidate.prefixText, candidate.lookup, candidate.identity)
+        .getOrElse(fail("the keyword could not be replayed"))
+      assertEquals(replayed.result.edits, Seq.empty)
+      assertEquals(replayed.caret, start + candidate.lookup.length)
+      assertEquals(host.read(file.getText), selected)
+    } finally host.closeSource(file)
+  }
+
+  test("Java member completion respects inherited access and static qualifiers") {
+    val declarations = "class Parent { public int visible; private int hidden; public static int shared; public <T> T echo(T value) { return value; } } "
+    Seq("this" -> Set("visible", "echo"), "Parent" -> Set("shared")).foreach { (qualifier, expected) =>
+      val text = declarations + s"class Child extends Parent { void use() { $qualifier. } }"
+      val file = host.openFile(Path.of("/editing/Child.java"), text, module)
+      try {
+        val offset = text.indexOf(s"$qualifier. }") + qualifier.length + 1
+        val names = host.completion(file, offset).items.map(_.lookup).toSet
+        assert(expected.subsetOf(names), names.toString)
+        assert(!names.contains("hidden"), names.toString)
+        val excluded = if (qualifier == "this") Set("shared") else Set("visible", "echo")
+        assert(names.intersect(excluded).isEmpty, names.toString)
+      } finally host.closeSource(file)
+    }
+  }
+
+  test("Java class completion imports source and JDK classes without changing the original") {
+    val declaration = host.openFile(Path.of("/editing/models/Model.java"), "package models; public class Model {}", module)
+    try {
+      Seq(("Mod", "Model", "models.Model"), ("ArrayL", "ArrayList", "java.util.ArrayList")).foreach { (prefix, name, qualified) =>
+        val text = s"class JavaClient { Object value = new $prefix; }"
+        val file = host.openFile(Path.of("/editing/JavaClient.java"), text, module)
+        try {
+          val offset = text.indexOf(prefix + ";") + prefix.length
+          val items = host.completion(file, offset).items
+          assert(items.exists(item => item.lookup == name && item.kind == Completion.Kind.Class), items.toString)
+          val inserted = Completion.choose(file, offset, name, com.intellij.codeInsight.lookup.Lookup.NORMAL_SELECT_CHAR)
+          assert(inserted.result.text.contains(s"import $qualified;"), inserted.toString)
+          assert(inserted.result.text.contains(s"new $name") && inserted.result.text.contains("()"), inserted.toString)
+          assertEquals(host.read(file.getText), text)
+        } finally host.closeSource(file)
+      }
+    } finally host.closeSource(declaration)
+  }
+
   test("completion after `new` presents library Java classes") {
     val text = "object AfterNew { val t = new Threa; val l = new java.util.ArrayLi }"
     val file = scalaFile("AfterNew", text)

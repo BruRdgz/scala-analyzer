@@ -58,7 +58,23 @@ object ChangeEngine {
    * @param modify transformation allowed to mutate only the preview copy
    * @return the changed text and edits, paired with the transformation's result
    */
-  def run[A](file: ScalaFile)(modify: ScalaFile => A): (Result, A) = HostLock.query {
+  def run[A](file: ScalaFile)(modify: ScalaFile => A): (Result, A) =
+    run(file: PsiFile) {
+      case scala: ScalaFile => modify(scala)
+      case other => throw new IllegalStateException(s"change copy is not a Scala file: ${other.getClass.getName}")
+    }
+
+  /**
+   * Previews a source transformation using its own language's PSI.
+   *
+   * Uses the same preview session, commit listeners and postponed-operation cleanup as the Scala overload.
+   *
+   * @tparam A transformation result type
+   * @param file original source file to copy
+   * @param modify transformation allowed to mutate only the preview copy
+   * @return changed text and edits, paired with the transformation's result
+   */
+  def run[A](file: PsiFile)(modify: PsiFile => A): (Result, A) = HostLock.query {
     changesInTurn.synchronized {
       ProgressManager.checkCanceled()
       withPreviewCopy(file) { copy =>
@@ -68,7 +84,8 @@ object ChangeEngine {
           copyResources.set(resources)
           try {
             resources(listenTo(copy))
-            val editor = resources(new RequestEditor(document, copy.getProject, 0))
+            // Insert handlers position the caret explicitly; inserting a closing delimiter must leave it before that delimiter.
+            val editor = resources(new RequestEditor(document, copy.getProject, 0, caretRightBiased = false))
             inPreviewSession(editor.editor)(change(file.getText, copy, modify))
           } finally copyResources.set(previous)
         }.get
@@ -78,21 +95,24 @@ object ChangeEngine {
 
   /** ModCommand creates further copies; their documents need the same commit listeners as the preview's file. */
   private[scalapsihost] def copyForModCommand(original: PsiFile): PsiFile = original match {
-    case file: ScalaFile if copyResources.get() != null =>
+    case file if copyResources.get() != null =>
       val resources = copyResources.get()
       val copy = file.copy() match {
-        case f: ScalaFile => f
-        case other => throw new IllegalStateException(s"mod-command copy is not a Scala file: $other")
+        case f: PsiFile => f
+        case other => throw new IllegalStateException(s"mod-command copy is not a PSI file: $other")
       }
       resources((() => release(copy)): AutoCloseable)
-      ScalaFeatures.setAttachedScalaFeatures(copy, ScalaFeatures.forPsiOrDefault(file))
+      file match {
+        case scala: ScalaFile => ScalaFeatures.setAttachedScalaFeatures(copy, ScalaFeatures.forPsiOrDefault(scala))
+        case _ => ()
+      }
       resources(listenTo(copy))
       copy
     case _ => null
   }
 
   /** `modify` on `copy`, its postponed formatting done and its document committed. */
-  private def change[A](original: String, copy: ScalaFile, modify: ScalaFile => A): (Result, A) = {
+  private def change[A](original: String, copy: PsiFile, modify: PsiFile => A): (Result, A) = {
     val document = copy.getViewProvider.getDocument
     val documents = PsiDocumentManager.getInstance(copy.getProject)
     try {
@@ -114,7 +134,7 @@ object ChangeEngine {
   }
 
   /** Attaches the host's commit listener so the copied PSI and document stay synchronized. */
-  private def listenTo(copy: ScalaFile): AutoCloseable = PsiDocumentManager.getInstance(copy.getProject) match {
+  private def listenTo(copy: PsiFile): AutoCloseable = PsiDocumentManager.getInstance(copy.getProject) match {
     case manager: HostPsiDocumentManager => manager.listenTo(copy.getViewProvider.getDocument)
     case other => throw new IllegalStateException(s"unexpected document manager: ${other.getClass.getName}")
   }
@@ -127,14 +147,17 @@ object ChangeEngine {
   }
 
   /** Runs against a feature-aware preview copy and releases its provider on every exit path. */
-  private def withPreviewCopy[A](file: ScalaFile)(body: ScalaFile => A): A = {
+  private def withPreviewCopy[A](file: PsiFile)(body: PsiFile => A): A = {
     val copy = file.copy() match {
-      case f: ScalaFile => f
-      case other => throw new IllegalStateException(s"change copy is not a Scala file: ${other.getClass.getName}")
+      case f: PsiFile => f
+      case other => throw new IllegalStateException(s"change copy is not a PSI file: ${other.getClass.getName}")
     }
     try {
       // Copies keep copyable user data, but Scala features live in ordinary user data.
-      ScalaFeatures.setAttachedScalaFeatures(copy, ScalaFeatures.forPsiOrDefault(file))
+      file match {
+        case scala: ScalaFile => ScalaFeatures.setAttachedScalaFeatures(copy, ScalaFeatures.forPsiOrDefault(scala))
+        case _ => ()
+      }
       IntentionPreviewUtils.markAsPreviewCopy(copy, file)
       body(copy)
     } finally release(copy)
@@ -190,6 +213,6 @@ object ChangeEngine {
   }
 
   /** Drops the copy's view-provider cache entry after preview use. */
-  private def release(copy: ScalaFile): Unit =
+  private def release(copy: PsiFile): Unit =
     PsiManagerEx.getInstanceEx(copy.getProject).getFileManager.setViewProvider(copy.getViewProvider.getVirtualFile, null)
 }

@@ -28,6 +28,7 @@ Application.isWriteIntentLockAcquired
 Application.loadClass
 Application.runReadAction
 Application.service com.intellij.codeInsight.CodeInsightSettings
+Application.service com.intellij.codeInsight.TestFrameworks
 Application.service com.intellij.codeInsight.completion.CompletionService
 Application.service com.intellij.codeInsight.completion.group.GroupedCompletion
 Application.service com.intellij.codeInsight.hints.settings.ParameterNameHintsSettings
@@ -47,16 +48,19 @@ Application.service com.intellij.openapi.fileEditor.FileDocumentManager
 Application.service com.intellij.openapi.fileTypes.BinaryFileTypeDecompilers
 Application.service com.intellij.openapi.options.advanced.AdvancedSettings
 Application.service com.intellij.openapi.progress.ProgressManager
+Application.service com.intellij.openapi.project.DefaultProjectFactory
 Application.service com.intellij.openapi.project.DumbUtil
 Application.service com.intellij.openapi.roots.libraries.LibraryTablesRegistrar
 Application.service com.intellij.openapi.vfs.encoding.EncodingManager
 Application.service com.intellij.openapi.vfs.newvfs.ManagingFS
+Application.service com.intellij.platform.syntax.psi.PsiSyntaxBuilderFactory
 Application.service com.intellij.psi.ExternalChangeActionUtil$PsiExternalChangeService
 Application.service com.intellij.psi.JavaModuleGraphHelper
 Application.service com.intellij.psi.LanguageSubstitutors
 Application.service com.intellij.psi.PsiReferenceService
 Application.service com.intellij.psi.PsiSubstitutorFactory
 Application.service com.intellij.psi.codeStyle.CodeStyleSettingsService
+Application.service com.intellij.psi.codeStyle.JavaFileCodeStyleFacadeFactory
 Application.service com.intellij.psi.compiled.ClassFileDecompilers
 Application.service com.intellij.psi.impl.DocumentCommitProcessor
 Application.service com.intellij.psi.impl.java.stubs.JavaStubElementTypePsiElementMappingRegistry
@@ -91,6 +95,7 @@ CompletionCaret.setSelection
 CompletionCaretModel.getCurrentCaret
 CompletionCaretModel.getOffset
 CompletionCaretModel.moveToOffset
+DefaultProjectFactory.getDefaultProject
 DumbService.isAlternativeResolveEnabled
 DumbService.isDumb
 DumbService.queueTask
@@ -104,7 +109,10 @@ ExternalAnnotationsManager.findExternalAnnotationsFiles
 FileBasedIndex.processFilesContainingAllKeys
 FileBasedIndex.processFilesContainingAnyKey
 FileBasedIndex.processValues
+FileIndexFacade.getModuleForFile
+FileIndexFacade.isInLibrary
 FileIndexFacade.isInLibraryClasses
+FileIndexFacade.isInSource
 FileManager.findCachedViewProvider
 FileManager.findCachedViewProviders
 FileManager.findDirectory
@@ -124,6 +132,10 @@ InferredAnnotationsManager.findInferredAnnotation
 InjectedLanguageManager.getCachedInjectedDocumentsInRange
 InjectedLanguageManager.getTopLevelFile
 InjectedLanguageManager.isInjectedViewProvider
+JavaCodeStyleProvider.getDefaultCommonSettings
+JavaCodeStyleProvider.getLanguage
+JavaCodeStyleProvider.useBaseLanguageCommonSettings (default)
+JavaFileCodeStyleFacadeFactory.createFacade
 JavaPsiImplementationHelper.getEffectiveLanguageLevel
 LibraryTable.addListener
 LibraryTablesRegistrar.getLibraryTable

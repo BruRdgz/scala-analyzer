@@ -198,7 +198,7 @@ final class ScalaLanguageServer(
     val windowCapabilities = offered.flatMap(c => Option(c.getWindow))
     val textCapabilities = offered.flatMap(c => Option(c.getTextDocument))
     val scopesScalaFeatures = textCapabilities.exists { c =>
-      Seq[DynamicRegistrationCapabilities](c.getCompletion, c.getSignatureHelp, c.getFormatting,
+      Seq[DynamicRegistrationCapabilities](c.getSignatureHelp, c.getFormatting,
         c.getRangeFormatting, c.getReferences, c.getCodeAction).forall { feature =>
         Option(feature).flatMap(f => Option(f.getDynamicRegistration)).exists(_.booleanValue)
       }
@@ -238,20 +238,20 @@ final class ScalaLanguageServer(
     val signatureRetriggers = java.util.List.of(",")
     val actionKinds = java.util.List.of(CodeActionKind.QuickFix, CodeActionKind.RefactorRewrite,
       CodeActionKind.SourceOrganizeImports)
+    capabilities.setCompletionProvider(new CompletionOptions(/* resolveProvider = */ false, completionTriggers))
     if (scopesScalaFeatures) {
       capabilities.setInlayHintProvider(scalaOnly(new InlayHintRegistrationOptions))
       capabilities.setSelectionRangeProvider(scalaOnly(new SelectionRangeRegistrationOptions))
       capabilities.setImplementationProvider(scalaOnly(new ImplementationRegistrationOptions))
       scalaOnly(rename)
       scalaOnly(tokens)
-      val completion = scalaOnly(new CompletionRegistrationOptions(completionTriggers, false))
       val signatures = scalaOnly(new SignatureHelpRegistrationOptions)
       signatures.setTriggerCharacters(signatureTriggers)
       signatures.setRetriggerCharacters(signatureRetriggers)
       val actions = scalaOnly(new CodeActionRegistrationOptions)
       actions.setCodeActionKinds(actionKinds)
       languageRegistrations = Seq(
-        "completion" -> completion, "signatureHelp" -> signatures,
+        "signatureHelp" -> signatures,
         "formatting" -> scalaOnly(new DocumentFormattingRegistrationOptions),
         "rangeFormatting" -> scalaOnly(new DocumentRangeFormattingRegistrationOptions),
         "references" -> scalaOnly(new ReferenceRegistrationOptions), "codeAction" -> actions,
@@ -259,7 +259,6 @@ final class ScalaLanguageServer(
     } else {
       capabilities.setInlayHintProvider(true)
       capabilities.setSelectionRangeProvider(true)
-      capabilities.setCompletionProvider(new CompletionOptions(/* resolveProvider = */ false, completionTriggers))
       capabilities.setSignatureHelpProvider(new SignatureHelpOptions(signatureTriggers, signatureRetriggers))
       capabilities.setDocumentFormattingProvider(true)
       capabilities.setDocumentRangeFormattingProvider(true)

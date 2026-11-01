@@ -3,6 +3,8 @@ package scalapsihost.language
 import com.intellij.codeInsight.completion.*
 import com.intellij.codeInsight.completion.impl.CompletionSorterImpl
 import com.intellij.codeInsight.intention.preview.IntentionPreviewUtils
+import com.intellij.modcommand.{ActionContext, ModCommandExecutor, ModNavigate}
+import com.intellij.modcompletion.ModCompletionItem
 import com.intellij.codeInsight.lookup.{Classifier, Lookup, LookupElement, LookupElementBuilder, LookupElementPresentation, LookupElementRenderer, WeighingContext}
 import com.intellij.openapi.editor.Editor
 import com.intellij.openapi.editor.impl.DocumentImpl
@@ -108,12 +110,12 @@ object Completion {
    * Runs under a cancellable read without changing the source. Temporary editors, PSI copies and offset maps
    * are released after rendering; the result contains presentation values only.
    *
-   * @param file Scala source being queried
+   * @param file Scala or Java source being queried
    * @param offset caret offset in UTF-16 code units
    * @param limit maximum number of rendered suggestions to return
    * @return ranked suggestions and whether more renderable items remain
    */
-  def complete(file: ScalaFile, offset: Int, limit: Int = MaxSuggestions): Suggestions = HostLock.query {
+  def complete(file: PsiFile, offset: Int, limit: Int = MaxSuggestions): Suggestions = HostLock.query {
     completionResults(file, file.getText, offset) { results =>
       // The lookup renders visible items lazily. One more successful rendering determines whether the list is incomplete.
       val suggestions = sort(results).iterator.flatMap(result => rendered(result, offset))
@@ -128,14 +130,14 @@ object Completion {
    * The input file must already contain the lookup text in place of the typed prefix. The candidate is found again
    * using its original prefix and identity; a missing lookup or candidate produces no follow-up.
    *
-   * @param file Scala file containing the inserted lookup text
+   * @param file Scala or Java file containing the inserted lookup text
    * @param start UTF-16 start offset of that text
    * @param prefixText prefix used to obtain the original suggestion
    * @param lookup inserted lookup string
    * @param identity suggestion identity returned by [[complete]]
    * @return previewed follow-up edits and caret, or none when the selection can no longer be replayed
    */
-  def insert(file: ScalaFile, start: Int, prefixText: String, lookup: String, identity: String): Option[Inserted] =
+  def insert(file: PsiFile, start: Int, prefixText: String, lookup: String, identity: String): Option[Inserted] =
     HostLock.query {
       val end = start + lookup.length
       val text = file.getText
@@ -153,7 +155,7 @@ object Completion {
     }
 
   /** Previews the best matching suggestion and its insert handler, as the plugin's completion tests do. */
-  private[scalapsihost] def choose(file: ScalaFile, offset: Int, lookup: String, completionChar: Char): Inserted =
+  private[scalapsihost] def choose(file: PsiFile, offset: Int, lookup: String, completionChar: Char): Inserted =
     HostLock.query {
       completionResults(file, file.getText, offset) { results =>
         val chosen = sort(results).find(_.getLookupElement.getAllLookupStrings.contains(lookup))
@@ -163,7 +165,7 @@ object Completion {
     }
 
   /** Replaces `prefix` with the chosen lookup string and runs its insert handler, on a copy of the file. */
-  private def handle(file: ScalaFile, chosen: CompletionResult, results: Vector[CompletionResult], prefix: TextRange,
+  private def handle(file: PsiFile, chosen: CompletionResult, results: Vector[CompletionResult], prefix: TextRange,
                      completionChar: Char): Inserted = {
     val element = chosen.getLookupElement
     val (changed, editor) = ChangeEngine.run(file) { copy =>
@@ -171,7 +173,7 @@ object Completion {
       document.replaceString(prefix.getStartOffset, prefix.getEndOffset, element.getLookupString)
       val editor = IntentionPreviewUtils.getPreviewEditor
       editor.getCaretModel.moveToOffset(prefix.getStartOffset + element.getLookupString.length)
-      runHandler(copy, editor, element, results.map(_.getLookupElement).toArray, prefix.getStartOffset, completionChar)
+      runHandler(copy, editor, element, results.map(_.getLookupElement).toArray, prefix, completionChar)
       // Keep the caret model until postponed formatting has updated its offset in ChangeEngine.
       editor
     }
@@ -179,10 +181,29 @@ object Completion {
   }
 
   /** Runs an insert handler on the copy using the lookup's offsets, candidates and completion character. */
-  private def runHandler(copy: ScalaFile, editor: Editor, element: LookupElement, elements: Array[LookupElement],
-                         start: Int, completionChar: Char): Unit = {
+  private def runHandler(copy: PsiFile, editor: Editor, element: LookupElement, elements: Array[LookupElement],
+                         prefix: TextRange, completionChar: Char): Unit = {
+    val start = prefix.getStartOffset
     val document = copy.getViewProvider.getDocument
     val tail = editor.getCaretModel.getOffset
+    val modItem = element.as(classOf[CompletionItemLookupElement])
+    if (modItem != null) {
+      val mode = if (completionChar == Lookup.REPLACE_SELECT_CHAR) ModCompletionItem.InsertionMode.OVERWRITE
+                 else ModCompletionItem.InsertionMode.INSERT
+      // Compute against the queried snapshot, before its prefix was replaced on the preview copy.
+      val action = ActionContext.from(null, copy.getOriginalFile).withOffset(start).withSelection(prefix)
+      val command = modItem.computeCommand(action, new ModCompletionItem.InsertionContext(mode, completionChar))
+      // ModCommand completion consumes its prefix before applying the computed update, as LookupImpl does.
+      document.deleteString(start, tail)
+      PsiDocumentManager.getInstance(copy.getProject).commitDocument(document)
+      ModCommandExecutor.getInstance.executeForFileCopy(command, copy)
+      command.unpack().asScala.foreach {
+        case navigate: ModNavigate if navigate.file() == copy.getOriginalFile.getVirtualFile && navigate.caret() >= 0 =>
+          editor.getCaretModel.moveToOffset(navigate.caret())
+        case _ => ()
+      }
+      return
+    }
     val identifierEnd = CompletionInitializationContext.calcDefaultIdentifierEnd(editor, tail)
     val offsets = new OffsetMap(document)
     try {
@@ -266,7 +287,7 @@ object Completion {
   }
 
   /** Supplies contributor results while their dummy-identifier copy and offset translations remain alive. */
-  private def completionResults[T](file: ScalaFile, text: String, offset: Int)(use: Vector[CompletionResult] => T): T =
+  private def completionResults[T](file: PsiFile, text: String, offset: Int)(use: Vector[CompletionResult] => T): T =
     Using.Manager { resources =>
       require(offset >= 0 && offset <= text.length, s"completion offset outside the text: $offset")
       ProgressManager.checkCanceled()
@@ -293,7 +314,7 @@ object Completion {
     }.get
 
   /** Builds the completion PSI copy with its dummy identifier and translates initialization offsets around it. */
-  private def dummyIdentifierCopy(file: ScalaFile, text: String, init: CompletionInitializationContext, offset: Int,
+  private def dummyIdentifierCopy(file: PsiFile, text: String, init: CompletionInitializationContext, offset: Int,
                                   resources: Using.Manager): OffsetsInFile = {
     val dummy = init.getDummyIdentifier
     val copy = resources(new TemporaryCopy(file, text.substring(0, init.getStartOffset) + dummy + text.substring(init.getSelectionEndOffset))).file
@@ -313,7 +334,7 @@ object Completion {
   }
 
   /** Creates completion-only PSI through the file factory without the write access required by PsiFile.copy. */
-  private final class TemporaryCopy(original: ScalaFile, text: String) extends AutoCloseable {
+  private final class TemporaryCopy(original: PsiFile, text: String) extends AutoCloseable {
     val file: PsiFile = PsiFileFactory.getInstance(original.getProject)
       .createFileFromText(original.getName, original.getLanguage, text, false, false)
     file match {
@@ -321,7 +342,10 @@ object Completion {
       case other => throw new IllegalStateException(s"completion copy is not a source file: ${other.getClass.getName}")
     }
     // Module scopes come from the original file; Scala features are plain user data, set before the tree is parsed.
-    ScalaFeatures.setAttachedScalaFeatures(file, ScalaFeatures.forPsiOrDefault(original))
+    original match {
+      case scala: ScalaFile => ScalaFeatures.setAttachedScalaFeatures(file, ScalaFeatures.forPsiOrDefault(scala))
+      case _ => ()
+    }
 
     /** Drops the temporary copy's view-provider cache entry. */
     override def close(): Unit =
@@ -399,18 +423,23 @@ object Completion {
 
   /** Maps the suggestion's PSI element to the closest host completion category. */
   private def kind(element: LookupElement): Kind = element.getPsiElement match {
-    case _: ScEnumCase => Kind.EnumMember
+    case _: ScEnumCase | _: PsiEnumConstant => Kind.EnumMember
     case _: ScEnum => Kind.Enum
     case _: ScTrait => Kind.Interface
     case _: ScObject => Kind.Module
     case _: ScTypeParam | _: PsiTypeParameter => Kind.TypeParameter
-    case _: ScTypeDefinition | _: ScTypeAlias | _: PsiClass => Kind.Class
+    case _: ScTypeDefinition | _: ScTypeAlias => Kind.Class
+    case cls: PsiClass if cls.isEnum => Kind.Enum
+    case cls: PsiClass if cls.isInterface => Kind.Interface
+    case _: PsiClass => Kind.Class
+    case method: PsiMethod if method.isConstructor => Kind.Constructor
     case function: ScFunction if function.isConstructor => Kind.Constructor
     case _: ScFunction | _: PsiMethod | _: ScSyntheticFunction => Kind.Method
     case _: ScClassParameter => Kind.Field
-    case _: ScParameter | _: PsiParameter => Kind.Variable
+    case _: ScParameter | _: PsiParameter | _: PsiLocalVariable => Kind.Variable
     case _: PsiField => Kind.Field
     case _: PsiPackage => Kind.Module
+    case _: PsiKeyword => Kind.Keyword
     case named: ScNamedElement =>
       if (Option(element.as(classOf[ScalaLookupItem])).exists(_.isLocalVariable)) Kind.Variable
       else named.nameContext match {

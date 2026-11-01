@@ -1,5 +1,6 @@
 package scalapsihost.platform
 
+import com.intellij.openapi.progress.ProgressManager
 import com.intellij.openapi.vfs.{DeprecatedVirtualFileSystem, VirtualFile, VirtualFileWithId}
 
 import java.io.{InputStream, OutputStream}
@@ -145,12 +146,27 @@ final class LibraryFileSystem extends DeprecatedVirtualFileSystem with AutoClose
    * @param name exact filename to look up
    * @return matching files, or an empty sequence when absent
    */
-  def filesNamed(name: String): Seq[VirtualFile] = {
+  def filesNamed(name: String): Seq[VirtualFile] = filenameIndex.getOrElse(name, Seq.empty)
+
+  /**
+   * Lists binary filenames without opening their PSI.
+   *
+   * Uses the mounted filename index; names can contain the JVM's nested-class separator.
+   * Callers must still check the resolved class name and its module scope.
+   *
+   * @return the set of classfile base names
+   */
+  def classFileNames: Set[String] = filenameIndex.keySet.filter(_.endsWith(".class"))
+    .map(_.stripSuffix(".class"))
+
+  /** Builds the shared filename index lazily, publishing it only after a complete traversal. */
+  private def filenameIndex: Map[String, Seq[VirtualFile]] = {
     var index = byName
     if (index == null) {
       val all = Vector.newBuilder[VirtualFile]
       /** Collects a file and its descendants. */
       def visit(file: VirtualFile): Unit = {
+        ProgressManager.checkCanceled()
         all += file
         if (file.isDirectory) file.getChildren.foreach(visit)
       }
@@ -159,7 +175,7 @@ final class LibraryFileSystem extends DeprecatedVirtualFileSystem with AutoClose
       index = all.result().groupBy(_.getName)
       byName = index
     }
-    index.getOrElse(name, Seq.empty)
+    index
   }
 
   /** Adds a stable root identity and invalidates the cached filename index. */

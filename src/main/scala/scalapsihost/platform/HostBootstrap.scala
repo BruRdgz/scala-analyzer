@@ -79,6 +79,9 @@ private[scalapsihost] object HostBootstrap {
   ).map { (name, id, order) => ExtensionBean(Map("key" -> "completion", "id" -> id, "order" -> order,
     "implementationClass" -> s"com.intellij.codeInsight.completion.$name")) }
 
+  private val JavaCompletionContributors = Seq(ExtensionBean(Map("language" -> "JAVA",
+    "implementationClass" -> "com.intellij.codeInsight.completion.JavaCompletionContributor", "id" -> "java")))
+
   /** Installs the process-wide platform and returns the ready PSI host. */
   def start(config: HostConfig): ScalaPsiHost = {
     // PathManager reads these on first use; the ID enumeration of index keys is persisted under the system path.
@@ -104,7 +107,7 @@ private[scalapsihost] object HostBootstrap {
   /** The ordered installation state shared by the four bootstrap phases. */
   private final class Bootstrap(private val config: HostConfig, private val root: Disposable) {
     private val appServices = new ServiceTable("Application")
-    private val completionContributors = scalaCompletionContributors(config.scalaPluginJars).map(_.implementation).toSet
+    private val completionContributors = (scalaCompletionContributors(config.scalaPluginJars) ++ JavaCompletionContributors).map(_.implementation).toSet
     private val projectServices = new ServiceTable("Project")
     private val appData = new UserDataHolderBase
     private val projectData = new UserDataHolderBase
@@ -334,6 +337,14 @@ private[scalapsihost] object HostBootstrap {
       area.getExtensionPoint[AnyRef]("com.intellij.overridingMethodsSearch").asInstanceOf[ExtensionPointImpl[AnyRef]]
         .registerExtension(new com.intellij.psi.impl.search.JavaOverridingMethodsSearcher, root)
       // The Java rename processors look for the base methods of a method through the super-methods searches.
+      CoreApplicationEnvironment.registerExtensionPoint(area,
+        com.intellij.java.codeserver.highlighting.JavaErrorFilter.EP_NAME.getName,
+        classOf[com.intellij.java.codeserver.highlighting.JavaErrorFilter])
+      declare("com.intellij.implicitClassSearch").asInstanceOf[ExtensionPointImpl[AnyRef]]
+        .registerExtension(new com.intellij.psi.impl.search.ImplicitClassesSearcher, root)
+      appServices.register(classOf[com.intellij.codeInspection.SuppressManager])(
+        newPrivate(Class.forName("com.intellij.codeInspection.SuppressManagerImpl")
+          .asSubclass(classOf[com.intellij.codeInspection.SuppressManager])))
       declare("com.intellij.superMethodsSearch").asInstanceOf[ExtensionPointImpl[AnyRef]]
         .registerExtension(new com.intellij.psi.impl.search.MethodSuperSearcher, root)
       declare("com.intellij.deepestSuperMethodsSearch").asInstanceOf[ExtensionPointImpl[AnyRef]]
@@ -349,9 +360,21 @@ private[scalapsihost] object HostBootstrap {
         if (beans.isEmpty) throw new IllegalStateException(s"no completion beans for $epName")
         registerCompletionBeans(epName, beans, completionPlugin)
       }
+      registerCompletionBeans("com.intellij.completion.contributor", JavaCompletionContributors,
+        new DefaultPluginDescriptor(PluginId.getId("com.intellij.java")))
       registerCompletionBeans("com.intellij.weigher", PlatformCompletionWeighers, new DefaultPluginDescriptor(PluginId.getId("com.intellij")))
       for (name <- Seq("com.intellij.modcompletion.completionItemProvider", "com.intellij.modcompletion.completionItemFilter"))
         CoreApplicationEnvironment.registerExtensionPoint(area, name, classOf[LanguageExtensionPoint[?]])
+      com.intellij.modcompletion.ModCompletionItemProvider.EP_NAME.addExplicitExtension(JavaLanguage.INSTANCE,
+        newPrivate(Class.forName("com.intellij.java.completion.modcommand.KeywordCompletionItemProvider")
+          .asSubclass(classOf[com.intellij.modcompletion.ModCompletionItemProvider])))
+      CoreApplicationEnvironment.registerExtensionPoint(area,
+        com.intellij.java.impl.template.JavaTemplateCodeInsightSupport.EP_NAME.getName,
+        classOf[com.intellij.java.impl.template.JavaTemplateCodeInsightSupport])
+      projectServices.register(classOf[com.intellij.codeInsight.AutoPopupControllerHelper])(
+        tableProxy(classOf[com.intellij.codeInsight.AutoPopupControllerHelper], "AutoPopupControllerHelper") {
+          case ("autoPopupParameterInfoAfterCompletion", _) => CallLog.hit("Completion.popup.parameterInfo"); null
+        })
       // These popup requests are optional UI hints; recording intent leaves the synchronous insertion valid without a popup.
       projectServices.register(classOf[com.intellij.codeInsight.AutoPopupController])(new com.intellij.codeInsight.AutoPopupController {
         override def autoPopupParameterInfo(editor: com.intellij.openapi.editor.Editor, element: com.intellij.psi.PsiElement): Unit =
@@ -370,7 +393,32 @@ private[scalapsihost] object HostBootstrap {
           CallLog.unsupported("AutoPopupController.waitForDelayedActions")
       })
       appServices.register(classOf[com.intellij.codeInsight.completion.CompletionService])(new Completion.Service)
+      // Tab-out scopes are interactive editor state; LSP insertion returns edits and a caret instead.
+      appServices.register(classOf[com.intellij.codeInsight.editorActions.TabOutScopesTracker])(
+        tableProxy(classOf[com.intellij.codeInsight.editorActions.TabOutScopesTracker], "TabOutScopesTracker") {
+          case ("registerScopeRange", _) => CallLog.hit("Completion.tabOutScopeSkipped"); null
+        })
+      // Ranking is deterministic and has no persisted selection history in the host.
+      appServices.register(classOf[com.intellij.psi.statistics.StatisticsManager])(
+        new com.intellij.psi.statistics.StatisticsManager {
+          override def getUseCount(info: com.intellij.psi.statistics.StatisticsInfo): Int = 0
+          override def getLastUseRecency(info: com.intellij.psi.statistics.StatisticsInfo): Int = Int.MaxValue
+          override def getAllValues(context: String): Array[com.intellij.psi.statistics.StatisticsInfo] = Array.empty
+          override def incUseCount(info: com.intellij.psi.statistics.StatisticsInfo): Unit = CallLog.hit("Completion.usageSkipped")
+        })
+      appServices.register(classOf[com.intellij.util.Queries])(new com.intellij.util.QueriesImpl)
+      appServices.register(classOf[com.intellij.codeInsight.completion.InternalCompletionSettings])(
+        new com.intellij.codeInsight.completion.InternalCompletionSettings)
+      appServices.register(classOf[com.intellij.codeInsight.TailTypeFactory])(
+        new com.intellij.codeInsight.completion.FrontendFriendlyTailTypeFactory)
+      // No IDE preference store; editor settings use their own defaults when this optional service is absent.
+      appServices.registerNull(classOf[com.intellij.ide.util.PropertiesComponent])
+      appServices.register(classOf[com.intellij.openapi.editor.ex.EditorSettingsExternalizable])(
+        new com.intellij.openapi.editor.ex.EditorSettingsExternalizable(
+          new com.intellij.openapi.editor.ex.EditorSettingsExternalizable.OsSpecificState))
       appServices.register(classOf[com.intellij.codeInsight.CodeInsightSettings])(new com.intellij.codeInsight.CodeInsightSettings)
+      appServices.register(classOf[com.intellij.codeInsight.JavaIdeCodeInsightSettings])(
+        new com.intellij.codeInsight.JavaIdeCodeInsightSettings)
       appServices.register(classOf[ScalaCodeInsightSettings])(new ScalaCodeInsightSettings)
       // The IDE shows implicit arguments and conversions while the user toggles them on; an LSP client can only show
       // or hide inlay hints as a whole, so they are on.
@@ -523,17 +571,30 @@ private[scalapsihost] object HostBootstrap {
         case ("createCustomSettings", Array(settings: com.intellij.psi.codeStyle.CodeStyleSettings)) =>
           new org.jetbrains.plugins.scala.lang.formatting.settings.ScalaCodeStyleSettings(settings)
       }
+      val javaStyleProvider = tableProxy(classOf[com.intellij.psi.codeStyle.LanguageCodeStyleProvider], "JavaCodeStyleProvider") {
+        case ("getLanguage", _) => JavaLanguage.INSTANCE
+        case ("getDefaultCommonSettings", _) =>
+          val common = new com.intellij.psi.codeStyle.CommonCodeStyleSettings(JavaLanguage.INSTANCE)
+          common.initIndentOptions()
+          common
+        case ("getDocCommentSettings", _) => com.intellij.psi.codeStyle.DocCommentSettings.DEFAULTS
+        case ("createCustomSettings", Array(settings: com.intellij.psi.codeStyle.CodeStyleSettings)) =>
+          new com.intellij.psi.codeStyle.JavaCodeStyleSettings(settings)
+      }
       appServices.register(classOf[com.intellij.psi.codeStyle.CodeStyleSettingsService])(
         tableProxy(classOf[com.intellij.psi.codeStyle.CodeStyleSettingsService], "CodeStyleSettingsService") {
           case ("addListener", _) => null
           case ("getFileTypeIndentOptionsFactories", _) => java.util.List.of()
           case ("getLanguageCodeStyleProviders", _) =>
-            java.util.List.of(scalaStyleProvider)
-          // Only Scala's custom settings bean, with defaults; not the settings-UI provider.
+            java.util.List.of(scalaStyleProvider, javaStyleProvider)
+          // Language settings beans with defaults, without their settings-UI providers.
           case ("getCustomCodeStyleSettingsFactories", _) =>
             java.util.List.of(new com.intellij.psi.codeStyle.CustomCodeStyleSettingsFactory {
               override def createCustomSettings(s: com.intellij.psi.codeStyle.CodeStyleSettings) =
                 new org.jetbrains.plugins.scala.lang.formatting.settings.ScalaCodeStyleSettings(s)
+            }, new com.intellij.psi.codeStyle.CustomCodeStyleSettingsFactory {
+              override def createCustomSettings(s: com.intellij.psi.codeStyle.CodeStyleSettings) =
+                new com.intellij.psi.codeStyle.JavaCodeStyleSettings(s)
             })
         })
       appServices.register(classOf[com.intellij.formatting.Formatter])(new com.intellij.formatting.FormatterImpl)
@@ -545,6 +606,8 @@ private[scalapsihost] object HostBootstrap {
       CoreApplicationEnvironment.registerExtensionPoint(area, "com.intellij.lang.formatter", classOf[LanguageExtensionPoint[?]])
       com.intellij.lang.LanguageFormatting.INSTANCE.addExplicitExtension(org.jetbrains.plugins.scala.ScalaLanguage.INSTANCE,
         new org.jetbrains.plugins.scala.lang.formatting.ScalaFormattingModelBuilder)
+      com.intellij.lang.LanguageFormatting.INSTANCE.addExplicitExtension(JavaLanguage.INSTANCE,
+        new com.intellij.lang.java.JavaFormattingModelBuilder)
       CoreApplicationEnvironment.registerExtensionPoint(area, "com.intellij.lang.importOptimizer", classOf[LanguageExtensionPoint[?]])
       com.intellij.lang.LanguageImportStatements.INSTANCE.addExplicitExtension(org.jetbrains.plugins.scala.ScalaLanguage.INSTANCE,
         new org.jetbrains.plugins.scala.editor.importOptimizer.ScalaImportOptimizer)
@@ -636,6 +699,22 @@ private[scalapsihost] object HostBootstrap {
           provider, com.intellij.psi.PsiReferenceRegistrar.DEFAULT_PRIORITY, root)
         registry
       }
+      // Host module metadata lives in ModuleModel; there are no IDE workspace entities or manifest overrides.
+      projectServices.register(classOf[com.intellij.platform.backend.workspace.WorkspaceModel])(
+        tableProxy(classOf[com.intellij.platform.backend.workspace.WorkspaceModel], "WorkspaceModel") {
+          case ("getCurrentSnapshot", _) => com.intellij.platform.workspace.storage.ImmutableEntityStorage.Companion.empty()
+        })
+      projectServices.register(classOf[com.intellij.codeInsight.guess.GuessManager])(
+        new com.intellij.codeInsight.guess.impl.GuessManagerImpl(project))
+      projectServices.register(classOf[com.intellij.psi.controlFlow.ControlFlowFactory]) {
+        val factory = new com.intellij.psi.controlFlow.ControlFlowFactory(project)
+        Disposer.register(root, factory)
+        factory
+      }
+      appServices.register(classOf[com.intellij.openapi.module.JdkApiCompatibilityService])(
+        new com.intellij.openapi.module.JdkApiCompatibilityService)
+      appServices.register(classOf[com.intellij.openapi.projectRoots.JavaVersionService])(
+        new com.intellij.openapi.projectRoots.JavaVersionServiceImpl)
       // Java module (JPMS) accessibility: the host has no module-info graph (its modules come from the build), so the
       // platform's graph-less implementation, which treats every class as accessible.
       appServices.register(classOf[com.intellij.psi.JavaModuleGraphHelper])(new com.intellij.psi.DumbJavaModuleGraphHelper)
@@ -674,10 +753,14 @@ private[scalapsihost] object HostBootstrap {
           override def getSyntaxHighlighter(project: Project, file: VirtualFile): SyntaxHighlighter = highlighter
         })
       }
+      SyntaxHighlighterFactory.LANGUAGE_FACTORY.addExplicitExtension(JavaLanguage.INSTANCE,
+        new com.intellij.lang.java.JavaSyntaxHighlighterFactory)
       LanguageCommenters.INSTANCE.addExplicitExtension(org.jetbrains.plugins.scala.ScalaLanguage.INSTANCE, new ScalaCommenter)
       // The platform descriptor's default enables whitespace expansion. Other advanced settings remain unsupported.
       appServices.register(classOf[AdvancedSettings])(new AdvancedSettings {
         override protected def getSetting(id: String): AnyRef = id match {
+          // Ordinary member completion; qualifier-as-argument rewrites are not enabled in the host.
+          case "java.completion.qualifier.as.argument" => java.lang.Boolean.FALSE
           case "editor.selection.expand-whitespaces" =>
             CallLog.answered("AdvancedSettings.editor.selection.expand-whitespaces")
             java.lang.Boolean.TRUE
@@ -749,7 +832,20 @@ private[scalapsihost] object HostBootstrap {
       appServices.register(classOf[StubElementRegistryService])(
         new com.intellij.psi.stubs.StubElementRegistryServiceImpl(kotlinx.coroutines.CoroutineScopeKt.CoroutineScope(kotlin.coroutines.EmptyCoroutineContext.INSTANCE)))
 
-      Registry.Companion.setContributedKeys(Descriptors.scalaRegistryKeys(getClass.getClassLoader).asJava)
+      // Compiler statistics need IDE-built indexes; live argument templates need an interactive editor.
+      val javaRegistryKeys = Seq(
+        "compiler.ref.index" -> "Compiler reference index",
+        "ide.java.completion.suggest.static.after.instance" -> "Suggest static members after instance qualifiers",
+        "java.completion.argument.live.template" -> "Interactive argument templates",
+        "java.completion.show.constructors" -> "Separate constructor suggestions",
+      ).map { (key, description) => key -> new com.intellij.openapi.util.registry.RegistryKeyDescriptor(
+        key, description, "false", false, false, "com.intellij.java", null) }.toMap
+      val highestJava = "java.highest.language.level"
+      val javaRelease = new com.intellij.openapi.util.registry.RegistryKeyDescriptor(highestJava,
+        "Highest Java level supported by the host", com.intellij.pom.java.LanguageLevel.HIGHEST.toJavaVersion.feature.toString,
+        false, false, "com.intellij.java", null)
+      Registry.Companion.setContributedKeys((Descriptors.scalaRegistryKeys(getClass.getClassLoader) ++ javaRegistryKeys +
+        (highestJava -> javaRelease)).asJava)
       Registry.Companion.markAsLoaded()
 
       val fileTypes = new CoreFileTypeRegistry
@@ -921,6 +1017,12 @@ private[scalapsihost] object HostBootstrap {
       // Library files (classes and attached sources) live in the host's library file system; every other file is a
       // project source the host was given.
       val fileIndex = tableProxy(classOf[com.intellij.openapi.roots.ProjectFileIndex], "ProjectFileIndex") {
+        case ("getClassRootForFile", Array(f: LibraryFile)) if !f.isLibrarySource => f.root
+        case ("getClassRootForFile", _) => null
+        case ("getSourceRootForFile", Array(f: LibraryFile)) if f.isLibrarySource => f.root
+        case ("getSourceRootForFile", _) => null
+        case ("isInProject" | "isInProjectOrExcluded", Array(f: VirtualFile)) =>
+          java.lang.Boolean.valueOf(moduleModel.ofFile(f).nonEmpty || fileStore.isLibrary(f))
         case ("isInLibrary", Array(f: VirtualFile)) => java.lang.Boolean.valueOf(fileStore.isLibrary(f))
         case ("isInLibraryClasses", Array(f: VirtualFile)) => java.lang.Boolean.valueOf(fileStore.isLibraryClass(f))
         case ("isInLibrarySource", Array(f: VirtualFile)) => java.lang.Boolean.valueOf(fileStore.isLibrarySource(f))
@@ -962,6 +1064,16 @@ private[scalapsihost] object HostBootstrap {
       psiManagerRef = psiManager
       projectServices.register(classOf[PsiManager])(psiManager)
       projectServices.register(classOf[PsiModificationTracker])(psiModTracker)
+      // Host root changes already invalidate PSI; using that count also invalidates Java module-descriptor caches.
+      projectServices.register(classOf[com.intellij.openapi.roots.ProjectRootModificationTracker])(
+        new com.intellij.openapi.roots.ProjectRootModificationTracker {
+          override def getModificationCount: Long = psiModTracker.getModificationCount
+        })
+      projectServices.register(classOf[com.intellij.psi.impl.PsiJavaModuleModificationTracker]) {
+        val tracker = new com.intellij.psi.impl.PsiJavaModuleModificationTracker(project)
+        Disposer.register(root, tracker)
+        tracker
+      }
       // PSI <-> document synchronization without the IDE's global editor event multicaster.
       projectServices.register(classOf[com.intellij.psi.PsiDocumentManager]) {
         val documents = new HostPsiDocumentManager(project)
@@ -984,6 +1096,8 @@ private[scalapsihost] object HostBootstrap {
       // The host's indexes are always ready before it answers queries.
       projectServices.register(classOf[DumbService])(new Host_DumbService(dispatch {
         case ("DumbService.isDumb", _) => java.lang.Boolean.FALSE
+        // The host never enters dumb mode, so this state has no transitions to invalidate.
+        case ("DumbService.getModificationTracker", _) => com.intellij.openapi.util.ModificationTracker.NEVER_CHANGED
         // Index-free "alternative" resolution exists only for dumb mode, which the host never enters.
         case ("DumbService.isAlternativeResolveEnabled", _) => java.lang.Boolean.FALSE
         // No extension is dumb-aware-filtered away: the host is never dumb.
@@ -1095,23 +1209,33 @@ private[scalapsihost] object HostBootstrap {
         // Java sources parse at the highest language level: it accepts the syntax of every Java release the build may
         // target (the build's own release is not read yet).
         case ("JavaPsiImplementationHelper.getEffectiveLanguageLevel", _) => com.intellij.pom.java.LanguageLevel.HIGHEST
+        case ("JavaPsiImplementationHelper.getDefaultImportAnchor",
+              Array(list: com.intellij.psi.PsiImportList, statement: com.intellij.psi.PsiImportStatementBase)) =>
+          new com.intellij.psi.impl.source.codeStyle.ImportHelper(
+            com.intellij.psi.codeStyle.JavaCodeStyleSettings.getInstance(statement.getContainingFile)).getDefaultAnchor(list, statement)
       }))
-      // Java class-file parameters compiled without names: the IDE suggests names from Java code style (which needs
-      // Java code-style settings and IDE registry keys); without a suggestion the platform names them `p`, `p1`, ...
-      projectServices.register(classOf[com.intellij.psi.codeStyle.JavaCodeStyleManager])(new Host_JavaCodeStyleManager(dispatch {
-        // suggestCompiledParameterName takes the first suggestion: none.
-        case ("JavaCodeStyleManager.suggestVariableName", _) => com.intellij.psi.codeStyle.SuggestedNameInfo.NULL_INFO
-      }))
+      CoreApplicationEnvironment.registerExtensionPoint(area, "com.intellij.importFilter", classOf[com.intellij.codeInsight.ImportFilter])
+      CoreApplicationEnvironment.registerExtensionPoint(area, "com.intellij.codeStyle.ReferenceAdjuster", classOf[LanguageExtensionPoint[?]])
+      com.intellij.psi.codeStyle.ReferenceAdjuster.Extension.INSTANCE.addExplicitExtension(JavaLanguage.INSTANCE,
+        new com.intellij.psi.impl.source.codeStyle.JavaReferenceAdjuster)
+      // Java completion renders static-import preferences and inserts source imports through the platform manager.
+      projectServices.register(classOf[com.intellij.psi.codeStyle.JavaCodeStyleManager])(
+        new com.intellij.psi.impl.source.codeStyle.JavaCodeStyleManagerImpl(project))
       // Source classes combine Scala synthetic representations with Java stub entries; Java binaries remain on demand.
       lazy val scalaShortNames = new org.jetbrains.plugins.scala.caches.ScalaShortNamesCache(using project)
       projectServices.register(classOf[com.intellij.psi.search.PsiShortNamesCache])(new Host_PsiShortNamesCache(dispatch {
         case ("PsiShortNamesCache.getClassesByName", Array(name: String, scope: com.intellij.psi.search.GlobalSearchScope)) =>
+          val binaries = libraryFiles.filesNamed(name + ".class").collect {
+            case binary: LibraryFile if !binary.isLibrarySource && !binary.isDirectory && scope.contains(binary) => binary
+          }.flatMap(binary => Option(psiManagerRef.findFile(binary))).collect {
+            case owner: com.intellij.psi.PsiClassOwner => owner.getClasses.toSeq
+          }.flatten.filter(_.getName == name)
           (scalaShortNames.getClassesByName(name, scope).toSeq ++
             StubIndex.getElements(JavaStubIndexKeys.CLASS_SHORT_NAMES,
-              name, project, scope, classOf[PsiClass]).asScala).distinct.toArray
+              name, project, scope, classOf[PsiClass]).asScala ++ binaries).distinct.toArray
         case ("PsiShortNamesCache.getAllClassNames", _) =>
           (scalaShortNames.getAllClassNames.toSeq ++ StubIndex.getInstance
-            .getAllKeys(JavaStubIndexKeys.CLASS_SHORT_NAMES, project).asScala).distinct.sorted.toArray
+            .getAllKeys(JavaStubIndexKeys.CLASS_SHORT_NAMES, project).asScala ++ libraryFiles.classFileNames).distinct.sorted.toArray
       }))
       // Annotation lookups cache by owner; the host has no mirrored elements (light copies of sources), so an owner is
       // its own cache key.

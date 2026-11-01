@@ -137,7 +137,7 @@ final class ProjectSession private (
    *
    * @param path registered project-source path
    * @param at caret position in zero-based lines and UTF-16 columns
-   * @return `CompletionChoices` in relevance order, with an incomplete flag; empty for non-Scala sources
+   * @return `CompletionChoices` in relevance order, with an incomplete flag; empty for unsupported source languages
    */
   def completion(path: Path, at: LineColumn): CompletionChoices = language.completion(path, at)
 
@@ -220,8 +220,8 @@ final class ProjectSession private (
    *
    * This may run concurrently with session operations and waits for import application. Scala 3 compiler
    * diagnostics use the current buffer when compile settings are available; other compiler diagnostics come
-   * from the last build compile. Java sources report parser errors from the current buffer, without semantic
-   * compiler diagnostics.
+   * from the last build compile. Java sources use the platform's syntax and semantic analysis of the current
+   * buffer, without running javac.
    *
    * @param path registered project-source path
    * @return source problems from the diagnostics available for its language

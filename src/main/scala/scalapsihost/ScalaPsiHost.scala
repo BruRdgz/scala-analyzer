@@ -3,7 +3,7 @@ package scalapsihost
 import com.intellij.codeInsight.daemon.impl.{AnnotationHolderImpl, AnnotationSessionImpl}
 import com.intellij.lang.annotation.HighlightSeverity
 import com.intellij.openapi.util.TextRange
-import com.intellij.psi.{PsiErrorElement, PsiFile, SyntaxTraverser}
+import com.intellij.psi.{PsiErrorElement, PsiFile, PsiJavaFile, SyntaxTraverser}
 import com.intellij.openapi.application.Application
 import com.intellij.openapi.fileTypes.FileTypeRegistry
 import com.intellij.openapi.module.Module
@@ -74,7 +74,7 @@ final class ScalaPsiHost private[scalapsihost] (
   def read[T](query: => T): T = HostLock.query(query)
 
   /** The completion suggestions at the UTF-16 text `offset`; nothing is inserted until one is chosen. */
-  def completion(file: ScalaFile, offset: Int): Completion.Suggestions = Completion.complete(file, offset)
+  def completion(file: PsiFile, offset: Int): Completion.Suggestions = Completion.complete(file, offset)
 
   /** The inline hints collected by the plugin's hints pass. */
   def inlayHints(file: ScalaFile): Seq[InlayHints.InlayHint] = InlayHints.in(file)
@@ -86,7 +86,7 @@ final class ScalaPsiHost private[scalapsihost] (
   def selectionRanges(file: ScalaFile, offset: Int): Seq[TextRange] = SelectionRanges.at(file, offset)
 
   /** What the insert handler of a chosen suggestion changes (see [[Completion.insert]]). */
-  def insertCompletion(file: ScalaFile, start: Int, prefixText: String, lookup: String, identity: String)
+  def insertCompletion(file: PsiFile, start: Int, prefixText: String, lookup: String, identity: String)
       : Option[Completion.Inserted] =
     Completion.insert(file, start, prefixText, lookup, identity)
 
@@ -323,6 +323,12 @@ final class ScalaPsiHost private[scalapsihost] (
       case ("ModuleRootManager.getDependencies", _) => hostModule.spec.dependsOn.flatMap(modules.byId).map(_.module).toArray
     })
     lazy val module: Module = tableProxy(classOf[Module], "Module") {
+      case ("getModuleWithDependenciesAndLibrariesScope", _) => modules.resolveScope(hostModule)
+      case ("getModuleScope", _) => new com.intellij.psi.search.GlobalSearchScope(project) {
+        override def contains(file: VirtualFile): Boolean = hostModule.sources.contains(file)
+        override def isSearchInModuleContent(candidate: Module): Boolean = candidate eq module
+        override def isSearchInLibraries: Boolean = false
+      }
       case ("getName", _) => hostModule.spec.stableId
       case ("getProject", _) => project
       case ("isDisposed", _) => java.lang.Boolean.FALSE
@@ -360,6 +366,26 @@ final class ScalaPsiHost private[scalapsihost] (
     SyntaxTraverser.psiTraverser(file).filter(classOf[PsiErrorElement]).asScala.toSeq
       .filter(error => filters.forall(_.shouldHighlightErrorElement(error)))
       .map(error => Diagnostic(HighlightSeverity.ERROR, error.getTextRange, error.getErrorDescription))
+  }
+
+  /**
+   * Collects Java compilation errors from the current PSI, including unresolved names and type errors.
+   *
+   * Uses the platform's error collector and module resolve scope; no compiler output is generated. Analysis uses
+   * the host's Java language level and classpath, without javac options or annotation processors.
+   *
+   * @param file Java source to analyze
+   * @return errors with UTF-16 ranges in the current buffer
+   */
+  def diagnostics(file: PsiJavaFile): Seq[Diagnostic] = HostLock.query {
+    val errors = Vector.newBuilder[Diagnostic]
+    val collector = new com.intellij.java.codeserver.highlighting.JavaErrorCollector(file, error =>
+      errors += Diagnostic(HighlightSeverity.ERROR, error.range(), error.description()))
+    SyntaxTraverser.psiTraverser(file).forEach { element =>
+      com.intellij.openapi.progress.ProgressManager.checkCanceled()
+      collector.processElement(element)
+    }
+    errors.result()
   }
 
   /**

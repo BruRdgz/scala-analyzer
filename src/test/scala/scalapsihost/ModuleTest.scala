@@ -121,6 +121,10 @@ class ModuleTest extends munit.FunSuite {
   }
 
   test("Java-only source packages and short names follow edits and module scopes") {
+    // Short-name lookup also includes JDK binaries (including jline's Widget); this fixture checks source ownership.
+    def sourceFiles(classes: Array[com.intellij.psi.PsiClass]): Set[com.intellij.psi.PsiFile] =
+      classes.iterator.map(_.getContainingFile).filter(_.getVirtualFile.isInstanceOf[scalapsihost.platform.SourceFile]).toSet
+
     val first = host.addModule(ModuleSpec("java-lookup-first", "2.13.18", Seq.empty, Seq(library213)))
     val second = host.addModule(ModuleSpec("java-lookup-second", "2.13.18", Seq.empty, Seq(library213)))
     val text = "package hostjava.deep; public class Widget { public static class Nested {} }"
@@ -139,8 +143,8 @@ class ModuleTest extends munit.FunSuite {
         assertEquals(parent.getSubPackages(scope).map(_.getQualifiedName).toSet, Set("hostjava.deep", "hostjava.info"))
         assertEquals(facade.findPackage("hostjava.deep").getClasses(scope).map(_.getContainingFile).toSet, Set(a))
         assert(facade.findPackage("hostjava.info") != null)
-        assertEquals(cache.getClassesByName("Widget", scope).map(_.getContainingFile).toSet, Set(a))
-        assertEquals(cache.getClassesByName("Widget", host.modules.resolveScope(second)).map(_.getContainingFile).toSet, Set(b))
+        assertEquals(sourceFiles(cache.getClassesByName("Widget", scope)), Set(a))
+        assertEquals(sourceFiles(cache.getClassesByName("Widget", host.modules.resolveScope(second))), Set(b))
         assert(cache.getAllClassNames.contains("Widget"))
         assertEquals(facade.findClass("hostjava.deep.Widget.Nested", scope).getContainingFile, a)
         val field = use.asInstanceOf[com.intellij.psi.PsiJavaFile].getClasses.head.getFields.head
@@ -154,8 +158,8 @@ class ModuleTest extends munit.FunSuite {
         val cache = com.intellij.psi.search.PsiShortNamesCache.getInstance(host.project)
         val scope = host.modules.resolveScope(first)
         assertEquals(facade.findClass("hostjava.deep.Widget", scope), null)
-        assertEquals(cache.getClassesByName("Widget", scope).toSeq, Seq.empty)
-        assertEquals(cache.getClassesByName("Renamed", scope).map(_.getContainingFile).toSet, Set(a))
+        assertEquals(sourceFiles(cache.getClassesByName("Widget", scope)), Set.empty)
+        assertEquals(sourceFiles(cache.getClassesByName("Renamed", scope)), Set(a))
         assertEquals(facade.findPackage("hostjava").getSubPackages(scope).map(_.getQualifiedName).toSet,
           Set("hostjava.moved", "hostjava.info"))
       }

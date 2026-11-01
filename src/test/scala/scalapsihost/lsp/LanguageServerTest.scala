@@ -272,7 +272,8 @@ class LanguageServerTest extends munit.FunSuite {
     scalaSelector(capabilities.getImplementationProvider.getRight)
     scalaSelector(capabilities.getRenameProvider.getRight)
     scalaSelector(capabilities.getSemanticTokensProvider)
-    assertEquals(capabilities.getCompletionProvider, null)
+    assertEquals(capabilities.getCompletionProvider.getTriggerCharacters.asScala.toSeq, Seq("."))
+    assertEquals(capabilities.getCompletionProvider.getResolveProvider, java.lang.Boolean.FALSE)
     assertEquals(capabilities.getSignatureHelpProvider, null)
     assertEquals(capabilities.getDocumentFormattingProvider, null)
     assertEquals(capabilities.getDocumentRangeFormattingProvider, null)
@@ -290,10 +291,8 @@ class LanguageServerTest extends munit.FunSuite {
       scalaSelector(registration.getRegisterOptions)
       registration.getMethod -> gson.toJsonTree(registration.getRegisterOptions).getAsJsonObject
     }.toMap
-    assertEquals(methods.keySet, Set("textDocument/completion", "textDocument/signatureHelp",
+    assertEquals(methods.keySet, Set("textDocument/signatureHelp",
       "textDocument/formatting", "textDocument/rangeFormatting", "textDocument/references", "textDocument/codeAction"))
-    assertEquals(methods("textDocument/completion").getAsJsonArray("triggerCharacters").toString, "[\".\"]")
-    assertEquals(methods("textDocument/completion").get("resolveProvider").getAsBoolean, false)
     assertEquals(methods("textDocument/signatureHelp").getAsJsonArray("triggerCharacters").asScala.map(_.getAsString).toSeq,
       Seq("(", "[", ","))
     assertEquals(methods("textDocument/signatureHelp").getAsJsonArray("retriggerCharacters").asScala.map(_.getAsString).toSeq,
@@ -593,6 +592,62 @@ class LanguageServerTest extends munit.FunSuite {
     }
   }
 
+  test("Java semantic diagnostics publish current-buffer type and resolution errors") {
+    val java = fixture.resolve("core/src/main/java/core/Shout.java")
+    val service = server.getTextDocumentService
+    val broken = "package core; class Shout { String emoji = \"😀\"; int value = \"wrong\"; void use() { missing(); } }"
+    def change(text: String, version: Int): Unit = service.didChange(new DidChangeTextDocumentParams(
+      new VersionedTextDocumentIdentifier(java.toUri.toString, version), JavaList.of(new TextDocumentContentChangeEvent(text))))
+    try {
+      service.didOpen(new DidOpenTextDocumentParams(new TextDocumentItem(java.toUri.toString, "java", 140, broken)))
+      val problems = diagnosticsOf(java, 140)
+      assertEquals(problems.size, 2, problems.toString)
+      assert(problems.forall(_.getSource == "java-plugin"))
+      val mismatch = problems.find(_.getMessage.contains("Incompatible types")).getOrElse(fail(problems.toString))
+      assertEquals(mismatch.getRange.getStart, new Position(0, broken.indexOf("\"wrong\"")))
+      assert(problems.exists(_.getMessage.contains("missing")), problems.toString)
+      change("package core; class Shout { int value = 1; void use() {} }", 141)
+      assertEquals(diagnosticsOf(java, 141), Seq.empty)
+    } finally {
+      change(Files.readString(java), 142)
+      service.documentSymbol(new DocumentSymbolParams(document(java))).get(30, TimeUnit.SECONDS)
+    }
+  }
+
+  test("Java completion returns prefix edits and replays its method insert handler over JSON-RPC") {
+    val java = fixture.resolve("core/src/main/java/core/Shout.java")
+    val service = server.getTextDocumentService
+    val text = "package core; class Shout { static String message(int n) { return \"ok\"; } static void use() { String emoji = \"😀\"; Shout.mes; } }"
+    def change(value: String, version: Int): Unit = service.didChange(new DidChangeTextDocumentParams(
+      new VersionedTextDocumentIdentifier(java.toUri.toString, version), JavaList.of(new TextDocumentContentChangeEvent(value))))
+    try {
+      service.didOpen(new DidOpenTextDocumentParams(new TextDocumentItem(java.toUri.toString, "java", 150, text)))
+      val offset = text.indexOf("Shout.mes") + "Shout.mes".length
+      val list = service.completion(new CompletionParams(document(java), new Position(0, offset)))
+        .get(1, TimeUnit.MINUTES).getRight
+      val item = list.getItems.asScala.find(_.getFilterText == "message").getOrElse(fail(list.toString))
+      assertEquals(item.getKind, CompletionItemKind.Method)
+      assertEquals(item.getTextEdit.getLeft.getRange, new Range(new Position(0, offset - 3), new Position(0, offset)))
+      assert(item.getDetail.contains("String"), item.toString)
+      change(text.replace("Shout.mes;", "Shout.message;"), 151)
+      val command = Option(item.getCommand).getOrElse(fail(item.toString))
+      server.getWorkspaceService.executeCommand(new ExecuteCommandParams(command.getCommand, command.getArguments))
+        .get(1, TimeUnit.MINUTES)
+      val applied = Option(Client.applied.poll(30, TimeUnit.SECONDS)).getOrElse(fail("no Java insertion edits"))
+      val edit = applied.getEdit.getDocumentChanges.get(0).getLeft
+      assertEquals(edit.getTextDocument.getUri, java.toUri.toString)
+      assertEquals(edit.getTextDocument.getVersion, Integer.valueOf(151))
+      assert(edit.getEdits.asScala.exists(_.getNewText.contains("(")), edit.toString)
+      val shown = Option(Client.showed.poll(30, TimeUnit.SECONDS)).getOrElse(fail("no Java insertion caret"))
+      assertEquals(shown.getUri, java.toUri.toString)
+      val completed = text.replace("Shout.mes;", "Shout.message();")
+      assertEquals(shown.getSelection.getStart, new Position(0, completed.indexOf("Shout.message(") + "Shout.message(".length))
+    } finally {
+      change(Files.readString(java), 152)
+      service.documentSymbol(new DocumentSymbolParams(document(java))).get(30, TimeUnit.SECONDS)
+    }
+  }
+
   test("Java syntax diagnostics follow unsaved buffers and clear after correction") {
     val java = fixture.resolve("core/src/main/java/core/Shout.java")
     val service = implementation.getTextDocumentService
@@ -604,7 +659,7 @@ class LanguageServerTest extends munit.FunSuite {
       service.didOpen(new DidOpenTextDocumentParams(new TextDocumentItem(java.toUri.toString, "java", 1, broken)))
       val problems = diagnosticsOf(java, 1)
       assert(problems.nonEmpty)
-      assert(problems.forall(_.getSource == "java-parser"))
+      assert(problems.forall(_.getSource == "java-plugin"))
       assert(problems.head.getRange.getStart.getCharacter > broken.indexOf("😀"))
       change("""package core; class Shout { String value = "😀"; }""", 2)
       assertEquals(diagnosticsOf(java, 2), Seq.empty)

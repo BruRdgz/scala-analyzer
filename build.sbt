@@ -64,6 +64,7 @@ lazy val root = (project in file("."))
     libraryDependencies ++= Seq(
       "com.jetbrains.intellij.platform" % "ide-impl" % platformVersion % InlayPlatform intransitive(),
       "com.jetbrains.intellij.platform" % "ide" % platformVersion % InlayPlatform intransitive(),
+      "com.jetbrains.intellij.platform" % "ide-core-impl" % platformVersion % InlayPlatform intransitive(),
       "com.jetbrains.intellij.platform" % "core-impl" % platformVersion,
       "com.jetbrains.intellij.platform" % "analysis-impl" % platformVersion,
       "com.jetbrains.intellij.java" % "java-psi-impl" % platformVersion,
@@ -94,6 +95,11 @@ lazy val root = (project in file("."))
       // no colors.
       "com.jetbrains.intellij.java" % "java-analysis-impl" % platformVersion intransitive(),
       "com.jetbrains.intellij.java" % "java-analysis" % platformVersion intransitive(),
+      // Java's PSI error collector and shared completion/type-analysis rules, without the IDE container.
+      "com.jetbrains.intellij.java" % "java-codeserver-core" % platformVersion intransitive(),
+      "com.jetbrains.intellij.java" % "java-codeserver-highlighting" % platformVersion intransitive(),
+      // Java completion settings, import layout and formatting of insertion edits.
+      "com.jetbrains.intellij.java" % "java-frontback-impl" % platformVersion intransitive(),
       // External-system data model (model.Key, model.project.*): the plugin's sbt constants, read when it checks for sbt build
       // modules. Only this jar; no external system runs.
       "com.jetbrains.intellij.platform" % "external-system" % platformVersion intransitive(),
@@ -125,7 +131,7 @@ lazy val root = (project in file("."))
     ),
     inlayPlatformJar := {
       val sources = update.value.select(configurationFilter(InlayPlatform.name), moduleFilter(), artifactFilter(`type` = "jar"))
-      if (sources.size != 2) sys.error(s"expected the ide-impl and ide jars for the platform slice, got: $sources")
+      if (sources.size != 3) sys.error(s"expected the ide-impl, ide and ide-core-impl jars for the platform slice, got: $sources")
       // Measured by replaying InlayHintsOracle with class-load logging against the full jar.
       val included = Seq(
         "com/intellij/codeInsight/hints/filtering/", // ScalaInlayParameterHintsPass: MethodInfoExcludeListFilter, the whole filtering package.
@@ -135,17 +141,24 @@ lazy val root = (project in file("."))
         "com/intellij/openapi/editor/actions/EditorActionUtil.class", // SelectWordUtil: word/lexeme boundaries in the editor's lexer.
         // RefactoringUIUtil, which the Java rename processors' conflict checks (ConflictsUtil) load: a field of editor settings.
         "com/intellij/openapi/editor/ex/FocusChangeListener.class",
+        // Java insert handlers read the editor's default parenthesis setting, without opening an editor.
+        "com/intellij/openapi/editor/impl/softwrap/SoftWrapAppliancePlaces.class",
+        "com/intellij/openapi/editor/ex/BidiTextDirection.class",
         "com/intellij/openapi/editor/ex/EditorEx.class",
         "com/intellij/ui/EditorSettingsProvider.class",
         "com/intellij/openapi/ui/DialogWrapper.class", // The plugin's find-usages handlers: their dialogs extend AbstractFindUsagesDialog; the host opens none.
       )
+      val includedFamilies = Seq("com/intellij/openapi/editor/ex/EditorSettingsExternalizable",
+        "com/intellij/openapi/editor/actions/CaretStop")
       val directory = target.value / "inlay-platform"
       val out = directory / s"scala-inlay-platform-$platformVersion.jar"
       val slice = FileFunction.cached(streams.value.cacheDirectory / "inlay-platform", FilesInfo.hash, FilesInfo.exists) { _ =>
         val extracted = directory / "classes"
         IO.delete(extracted)
         val entries = sources.flatMap(source => IO.unzip(source, extracted, new NameFilter {
-          def accept(name: String): Boolean = included.exists(entry => name == entry || entry.endsWith("/") && name.startsWith(entry))
+          def accept(name: String): Boolean =
+            included.exists(entry => name == entry || entry.endsWith("/") && name.startsWith(entry)) ||
+              name.endsWith(".class") && includedFamilies.exists(name.startsWith)
         }))
         IO.zip(entries.toSeq.filter(_.isFile).pair(Path.relativeTo(extracted)), out)
         Set(out)

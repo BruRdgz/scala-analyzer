@@ -1,16 +1,16 @@
 package scalapsihost.platform
 
-import com.intellij.openapi.editor.{Caret, CaretModel, Document, Editor, EditorSettings, SelectionModel}
+import com.intellij.openapi.editor.{Caret, CaretModel, Document, Editor, EditorSettings, ScrollingModel, SelectionModel}
 import com.intellij.openapi.editor.colors.EditorColorsManager
 import com.intellij.openapi.editor.event.{DocumentEvent, DocumentListener}
 import com.intellij.openapi.editor.ex.util.LexerEditorHighlighter
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.util.{Key, TextRange, UserDataHolderBase}
 import com.intellij.psi.PsiDocumentManager
-import org.jetbrains.plugins.scala.highlighter.ScalaSyntaxHighlighterFactory
+import com.intellij.openapi.fileTypes.SyntaxHighlighterFactory
 
 /** Provides a request-scoped editor; callers close it to detach document-position tracking. */
-private[scalapsihost] final class RequestEditor(document: Document, project: Project, offset: Int)
+private[scalapsihost] final class RequestEditor(document: Document, project: Project, offset: Int, caretRightBiased: Boolean = true)
     extends AutoCloseable {
   // State stays on the request thread, under its read/preview or write action. Offsets are UTF-16 code units;
   // selections include their start and exclude their end.
@@ -22,11 +22,13 @@ private[scalapsihost] final class RequestEditor(document: Document, project: Pro
   private lazy val settings = tableProxy(classOf[EditorSettings], "SelectionSettings") {
     // AbstractWordSelectioner and ScalaStringLiteralSelectioner read the platform's default camel-word mode.
     case ("isCamelWords", _) => java.lang.Boolean.FALSE
+    case ("isInsertParenthesesAutomatically", _) => java.lang.Boolean.valueOf(
+      com.intellij.openapi.editor.ex.EditorSettingsExternalizable.getInstance.isInsertParenthesesAutomatically)
   }
   /** Builds the layered lexer lazily from the document's PSI and current text snapshot. */
   private lazy val highlighter = {
     val file = PsiDocumentManager.getInstance(project).getPsiFile(document)
-    val syntax = ScalaSyntaxHighlighterFactory.createScalaSyntaxHighlighter(project, file.getVirtualFile, file.getLanguage)
+    val syntax = SyntaxHighlighterFactory.getSyntaxHighlighter(file.getLanguage, project, file.getVirtualFile)
     val lexerHighlighter = new LexerEditorHighlighter(syntax, EditorColorsManager.getInstance.getGlobalScheme)
 
     lexerHighlighter.setText(document.getImmutableCharSequence)
@@ -48,7 +50,7 @@ private[scalapsihost] final class RequestEditor(document: Document, project: Pro
         else if (at > oldEnd) at + lengthDelta
         else newEnd
 
-      caretOffset = shifted(caretOffset, rightBiased = true)
+      caretOffset = shifted(caretOffset, rightBiased = caretRightBiased)
       selectionStart = shifted(selectionStart, rightBiased = false)
       selectionEnd = shifted(selectionEnd, rightBiased = true)
       if (!hadSelection || selectionStart == selectionEnd) removeSelection()
@@ -80,12 +82,18 @@ private[scalapsihost] final class RequestEditor(document: Document, project: Pro
   /** Stores user data through the reflection boundary where Key's type parameter is erased. */
   private def putData(key: Key[?], value: AnyRef): Unit = data.putUserData(key.asInstanceOf[Key[AnyRef]], value)
 
+  // Scrolling is performed by the LSP client after it receives the final caret, not by this preview editor.
+  private lazy val scrolling = tableProxy(classOf[ScrollingModel], "CompletionScrolling") {
+    case ("scrollToCaret", _) => CallLog.hit("Completion.scrollSkipped"); null
+  }
+
   /** Exposes the lazily connected editor, caret and selection adapters for this request. */
   lazy val editor: Editor = tableProxy(classOf[Editor], "RequestEditor") {
     case ("getDocument", _) => document
     case ("getProject", _) => project
     case ("getCaretModel", _) => caretModel
     case ("getSelectionModel", _) => selectionModel
+    case ("getScrollingModel", _) => scrolling
     // Word selection reads isCamelWords; it never changes editor settings.
     case ("getSettings", _) => settings
     // EditorActionUtil's lexeme boundaries and InjectedFileReferenceSelectioner's escapes use the layered lexer.

@@ -59,9 +59,9 @@ private[scalapsihost] final class ProjectLanguageOperations(
   /** The current in-memory document text, including changes not yet saved to disk. */
   def text(path: Path): String = host.read(file(path).getText)
 
-  /** The completion suggestions at `at`, best first. Only Scala files complete. */
+  /** The completion suggestions at `at`, best first. Scala and Java use their language contributors. */
   def completion(path: Path, at: LineColumn): CompletionChoices = file(path) match {
-    case sourceFile: ScalaFile =>
+    case sourceFile: (ScalaFile | PsiJavaFile) =>
       host.read {
         val sourceDocument = document(sourceFile)
         val suggestions = host.completion(sourceFile, offset(sourceDocument, at))
@@ -114,7 +114,7 @@ private[scalapsihost] final class ProjectLanguageOperations(
   def insertCompletion(path: Path, start: LineColumn, prefixText: String, lookup: String, identity: String)
       : Option[CompletionFollowUp] =
     file(path) match {
-      case sourceFile: ScalaFile =>
+      case sourceFile: (ScalaFile | PsiJavaFile) =>
         val startOffset = host.read(offset(document(sourceFile), start))
         host.insertCompletion(sourceFile, startOffset, prefixText, lookup, identity).map { inserted =>
           val changes = host.read(inserted.result.edits.map(textChange(document(sourceFile), _)))
@@ -157,7 +157,7 @@ private[scalapsihost] final class ProjectLanguageOperations(
     host.edit(sourceFile, start, end, replacement)
   }
 
-  /** Combines plugin diagnostics with current-text Scala 3 diagnostics or the build's latest compiler problems. */
+  /** Collects current PSI problems and the compiler diagnostics available for the source's language. */
   def problems(path: Path, spec: Option[CompileSpec], lastBuildProblems: Seq[CompilerDiagnostic]): Seq[FileProblem] =
     file(path) match {
       case scalaFile: ScalaFile =>
@@ -182,9 +182,9 @@ private[scalapsihost] final class ProjectLanguageOperations(
         fromPlugin ++ fromCompiler
       case javaFile: PsiJavaFile => host.read {
         val sourceDocument = document(javaFile)
-        host.syntaxErrors(javaFile).map { problem =>
+        host.diagnostics(javaFile).map { problem =>
           FileProblem(problemSeverity(problem.severity), position(sourceDocument, problem.range.getStartOffset),
-            position(sourceDocument, problem.range.getEndOffset), problem.message, "java-parser")
+            position(sourceDocument, problem.range.getEndOffset), problem.message, "java-plugin")
         }
       }
       case _ => Seq.empty
