@@ -176,7 +176,14 @@ private[scalapsihost] final class ProjectLanguageOperations(
             reported.map(c => FileProblem(problemSeverity(c.severity), c.start, c.end, c.message, "scalac"))
           }
         fromPlugin ++ fromCompiler
-      case _ => Seq.empty // Java sources are only there to be resolved against.
+      case javaFile: PsiJavaFile => host.read {
+        val sourceDocument = document(javaFile)
+        host.syntaxErrors(javaFile).map { problem =>
+          FileProblem(problemSeverity(problem.severity), position(sourceDocument, problem.range.getStartOffset),
+            position(sourceDocument, problem.range.getEndOffset), problem.message, "java-parser")
+        }
+      }
+      case _ => Seq.empty
     }
 
   /** Renders a referenced or declared symbol's quick-info signature and available ScalaDoc as Markdown. */

@@ -348,23 +348,32 @@ final class ScalaPsiHost private[scalapsihost] (
     read(actions.collect(file, range, diagnostics(file)))
 
   /**
+   * Collects parser errors accepted by the platform's highlighting filters.
+   *
+   * @param file source PSI, including an incomplete Scala or Java buffer
+   * @return syntax diagnostics against the current document text
+   */
+  def syntaxErrors(file: PsiFile): Seq[Diagnostic] = HostLock.query {
+    val filters = com.intellij.codeInsight.highlighting.HighlightErrorFilter.EP_NAME.getExtensions(project).asScala
+    SyntaxTraverser.psiTraverser(file).filter(classOf[PsiErrorElement]).asScala.toSeq
+      .filter(error => filters.forall(_.shouldHighlightErrorElement(error)))
+      .map(error => Diagnostic(HighlightSeverity.ERROR, error.getTextRange, error.getErrorDescription))
+  }
+
+  /**
    * The problems the IDE's highlighting pass reports for `file`: syntax errors, and the plugin's `ScalaAnnotator`
    * run over every element through the platform's annotation session. Presentation-only annotations (no message)
    * are left out.
    */
   def diagnostics(file: ScalaFile): Seq[Diagnostic] = HostLock.query {
-    // As the IDE's highlighting visitor: error elements the filters reject (e.g. inside ScalaDoc) are not reported.
-    val errorFilters = com.intellij.codeInsight.highlighting.HighlightErrorFilter.EP_NAME.getExtensions(project).asScala
-    val syntaxErrors = SyntaxTraverser.psiTraverser(file).filter(classOf[PsiErrorElement]).asScala.toSeq
-      .filter(e => errorFilters.forall(_.shouldHighlightErrorElement(e)))
-      .map(e => Diagnostic(HighlightSeverity.ERROR, e.getTextRange, e.getErrorDescription))
+    val syntax = syntaxErrors(file)
     val annotator = new org.jetbrains.plugins.scala.annotator.ScalaAnnotator
     val annotations = AnnotationSessionImpl.computeWithSession(file, /* batchMode = */ false, annotator, { holder =>
       val impl = holder.asInstanceOf[AnnotationHolderImpl]
       SyntaxTraverser.psiTraverser(file).forEach(e => impl.runAnnotatorWithContext(e))
       impl.asScala.toSeq
     })
-    syntaxErrors ++ annotations.collect {
+    syntax ++ annotations.collect {
       case a if a.getMessage != null =>
         Diagnostic(a.getSeverity, new TextRange(a.getStartOffset, a.getEndOffset), a.getMessage,
           Option(a.getQuickFixes).toSeq.flatMap(_.asScala).map(f => f.textRange -> f.quickFix))

@@ -417,6 +417,27 @@ class LanguageServerTest extends munit.FunSuite {
     ))
   }
 
+  test("Java syntax diagnostics follow unsaved buffers and clear after correction") {
+    val java = fixture.resolve("core/src/main/java/core/Shout.java")
+    val service = implementation.getTextDocumentService
+    val broken = """package core; class Shout { String value = "😀" + ; }"""
+    def change(text: String, version: Int): Unit = service.didChange(new DidChangeTextDocumentParams(
+      new VersionedTextDocumentIdentifier(java.toUri.toString, version),
+      JavaList.of(new TextDocumentContentChangeEvent(text))))
+    try {
+      service.didOpen(new DidOpenTextDocumentParams(new TextDocumentItem(java.toUri.toString, "java", 1, broken)))
+      val problems = diagnosticsOf(java, 1)
+      assert(problems.nonEmpty)
+      assert(problems.forall(_.getSource == "java-parser"))
+      assert(problems.head.getRange.getStart.getCharacter > broken.indexOf("😀"))
+      change("""package core; class Shout { String value = "😀"; }""", 2)
+      assertEquals(diagnosticsOf(java, 2), Seq.empty)
+    } finally {
+      change(Files.readString(java), 3)
+      service.documentSymbol(new DocumentSymbolParams(document(java))).get(30, TimeUnit.SECONDS)
+    }
+  }
+
   test("Java outline and qualified workspace symbols use Java declarations") {
     val java = fixture.resolve("core/src/main/java/core/Shout.java")
     val service = implementation.getTextDocumentService
