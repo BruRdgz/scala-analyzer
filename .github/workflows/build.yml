@@ -70,7 +70,7 @@ jobs:
           npm ci
           npm run check
           mkdir -p ../../target/release
-          npm run package -- --out "../../target/release/scala-psi-host-${VERSION}.vsix"
+          npm run package -- --out "../../target/release/scala-analyzer-${VERSION}.vsix"
       - name: Archive and record the built artifacts
         run: python3 dist/release.py package
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -88,7 +88,7 @@ jobs:
             host/target/test-reports/**
             host/target/host-state/**.txt
             host/target/host-state/logs/**
-            /tmp/scala-psi-host-bsp*.log
+            /tmp/scala-analyzer-bsp*.log
           retention-days: 7
 
   installed:
@@ -130,16 +130,16 @@ jobs:
         run: |
           (cd target/release && shasum -a 256 -c SHA256SUMS)
           mkdir -p "$RUNNER_TEMP/server"
-          tar -xzf "target/release/scala-psi-host-${VERSION}.tar.gz" -C "$RUNNER_TEMP/server"
-          test -x "$RUNNER_TEMP/server/scala-psi-host-${VERSION}/bin/scala-psi-host"
-          echo "SCALA_PSI_HOST_STATE=$RUNNER_TEMP/scala-psi-host-state" >> "$GITHUB_ENV"
+          tar -xzf "target/release/scala-analyzer-${VERSION}.tar.gz" -C "$RUNNER_TEMP/server"
+          test -x "$RUNNER_TEMP/server/scala-analyzer-${VERSION}/bin/scala-analyzer"
+          echo "SCALA_ANALYZER_STATE=$RUNNER_TEMP/scala-analyzer-state" >> "$GITHUB_ENV"
       - name: Configure the BSP fixture on this machine
         working-directory: host/fixtures/bsp-project
         run: sbt --java-home "$JAVA_HOME" bspConfig
       - name: Exercise the extracted server over stdio
         run: >-
           python3 dist/smoke-test.py
-          "$RUNNER_TEMP/server/scala-psi-host-${VERSION}/bin/scala-psi-host"
+          "$RUNNER_TEMP/server/scala-analyzer-${VERSION}/bin/scala-analyzer"
           fixtures/bsp-project fixtures/bsp-project/app/src/main/scala/app/Main.scala 6 53
           --expected-version "$VERSION"
       - name: Exercise the installed VSIX
@@ -147,16 +147,16 @@ jobs:
         run: |
           npm ci
           if [ "$RUNNER_OS" = Linux ]; then
-            xvfb-run -a npm run test:installed -- "../../target/release/scala-psi-host-${VERSION}.vsix" "$RUNNER_TEMP/server/scala-psi-host-${VERSION}/bin/scala-psi-host" ../../fixtures/bsp-project
+            xvfb-run -a npm run test:installed -- "../../target/release/scala-analyzer-${VERSION}.vsix" "$RUNNER_TEMP/server/scala-analyzer-${VERSION}/bin/scala-analyzer" ../../fixtures/bsp-project
           else
-            npm run test:installed -- "../../target/release/scala-psi-host-${VERSION}.vsix" "$RUNNER_TEMP/server/scala-psi-host-${VERSION}/bin/scala-psi-host" ../../fixtures/bsp-project
+            npm run test:installed -- "../../target/release/scala-analyzer-${VERSION}.vsix" "$RUNNER_TEMP/server/scala-analyzer-${VERSION}/bin/scala-analyzer" ../../fixtures/bsp-project
           fi
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: failure()
         with:
           name: installed-failure-${{ matrix.os }}
           path: |
-            ${{ runner.temp }}/scala-psi-host-state/logs/**
+            ${{ runner.temp }}/scala-analyzer-state/logs/**
             host/target/vscode-test-logs/**
-            /tmp/scala-psi-host-bsp*.log
+            /tmp/scala-analyzer-bsp*.log
           retention-days: 7

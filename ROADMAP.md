@@ -44,12 +44,12 @@ Beta 1 remains implemented but untagged, and Beta 2 closed without inspections.
 
 #### Current package ownership
 
-- `scalapsihost.platform`: IntelliJ bootstrap, adapters, threading, files, and indexes; flat initially.
-- `scalapsihost.build`: BSP, compiler, and scalafmt integration.
-- `scalapsihost.workspace`: project-session and build-import lifecycle.
-- `scalapsihost.language`: language operations and internal result models.
-- `scalapsihost.lsp`: transport and request/response mapping.
-- `scalapsihost`: root `ScalaPsiHost` facade and caller-facing `HostConfig`, `Diagnostic`, `ModuleSpec`, `HostModule`,
+- `scalaanalyzer.platform`: IntelliJ bootstrap, adapters, threading, files, and indexes; flat initially.
+- `scalaanalyzer.build`: BSP, compiler, and scalafmt integration.
+- `scalaanalyzer.workspace`: project-session and build-import lifecycle.
+- `scalaanalyzer.language`: language operations and internal result models.
+- `scalaanalyzer.lsp`: transport and request/response mapping.
+- `scalaanalyzer`: root `ScalaPsiHost` facade and caller-facing `HostConfig`, `Diagnostic`, `ModuleSpec`, `HostModule`,
   `ModuleModel`, `LineColumn`, and `LibraryIndexReport` types.
 
 The package map describes the current implementation. The historical milestones below retain their oracle counts and

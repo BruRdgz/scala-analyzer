@@ -1,0 +1,807 @@
+package scalaanalyzer
+
+import com.intellij.lang.annotation.HighlightSeverity
+import com.intellij.openapi.editor.impl.DocumentImpl
+import com.intellij.openapi.util.TextRange
+import com.intellij.psi.search.searches.ReferencesSearch
+import com.intellij.psi.util.PsiTreeUtil
+import org.jetbrains.plugins.scala.lang.psi.api.ScalaFile
+import org.jetbrains.plugins.scala.lang.psi.api.statements.ScFunction
+
+import scalaanalyzer.TestHost.{applyEdits, choose}
+import scalaanalyzer.language.{ChangeEngine, Completion, ProjectSearch}
+import scalaanalyzer.platform.{CallLog, HostDispatchThread, HostLock, HostLog, RequestEditor}
+
+import java.nio.file.Path
+import java.util.concurrent.{CompletableFuture, CountDownLatch, Executors, TimeUnit}
+import java.util.concurrent.atomic.AtomicReference
+
+import scala.concurrent.{Await, ExecutionContext, Future}
+import scala.concurrent.duration.Duration
+import scala.jdk.CollectionConverters.*
+import scala.util.Using
+
+/**
+ * Editing as an editor does it: a change to one file's text is reparsed in place and reaches every query that
+ * depends on it, including other files' highlighting. Expectations are what scalac reports for each version.
+ */
+class EditingTest extends munit.FunSuite {
+  private def host = TestHost.host
+  private lazy val module = {
+    TestHost.libraryReport // the JDK
+    host.addModule(ModuleSpec("editing", "2.13.18", Seq.empty, Seq(Path.of(sys.props("scalaanalyzer.fixture.scalaLibrary")))))
+  }
+
+  private def errors(file: ScalaFile): Seq[String] =
+    host.diagnostics(file).filter(_.severity == HighlightSeverity.ERROR).map(_.message)
+
+  // The platform picks a physical file's language; for a module on Scala 3 the plugin's substitutor makes it Scala 3.
+  test("a source of a Scala 3 module is Scala 3") {
+    val scala3 = host.addModule(ModuleSpec("editing3", "3.3.4", Seq.empty, Seq(Path.of(sys.props("scalaanalyzer.fixture.scalaLibrary")))))
+    val file = host.openFile(Path.of("/editing3/C.scala"), "object C:\n  def f(b: Boolean): Int = if b then 1 else 2\n", scala3)
+    try {
+      assertEquals(host.read(file.getLanguage), org.jetbrains.plugins.scala.Scala3Language.INSTANCE)
+      assertEquals(errors(file.asInstanceOf[ScalaFile]), Seq.empty)
+    } finally host.closeSource(file)
+  }
+
+  test("request editor positions preserve boundary affinity through document edits") {
+    final case class EditCase(
+      name: String,
+      caret: Int,
+      selection: TextRange,
+      edit: ChangeEngine.Edit,
+      expectedCaret: Int,
+      expectedSelection: TextRange,
+    )
+
+    val project = host.project
+    val cases = Seq(
+      EditCase("insertion at an unselected caret", caret = 2, selection = new TextRange(2, 2),
+        edit = ChangeEngine.Edit(new TextRange(2, 2), "XY"),
+        expectedCaret = 4, expectedSelection = new TextRange(4, 4)),
+      EditCase("insertion at the selection start", caret = 4, selection = new TextRange(2, 4),
+        edit = ChangeEngine.Edit(new TextRange(2, 2), "XY"),
+        expectedCaret = 6, expectedSelection = new TextRange(2, 6)),
+      EditCase("insertion at the selection end", caret = 4, selection = new TextRange(2, 4),
+        edit = ChangeEngine.Edit(new TextRange(4, 4), "XY"),
+        expectedCaret = 6, expectedSelection = new TextRange(2, 6)),
+      EditCase("replacement covering the caret and selection start", caret = 3, selection = new TextRange(2, 5),
+        edit = ChangeEngine.Edit(new TextRange(1, 4), "X"),
+        expectedCaret = 2, expectedSelection = new TextRange(2, 3)),
+      EditCase("deletion collapsing the selection onto the caret", caret = 6, selection = new TextRange(2, 4),
+        edit = ChangeEngine.Edit(new TextRange(2, 4), ""),
+        expectedCaret = 4, expectedSelection = new TextRange(4, 4)),
+    )
+
+    for (testCase <- cases) HostLock.write {
+      val document = new DocumentImpl("abcdef", /* forUseInNonAWTThread = */ true)
+
+      Using.resource(new RequestEditor(document, project, testCase.caret)) { request =>
+        val caret = request.editor.getCaretModel
+        val selection = request.editor.getSelectionModel
+        val edit = testCase.edit
+
+        selection.setSelection(testCase.selection.getStartOffset, testCase.selection.getEndOffset)
+        document.replaceString(edit.range.getStartOffset, edit.range.getEndOffset, edit.text)
+
+        assertEquals(caret.getOffset, testCase.expectedCaret, testCase.name)
+        assertEquals(caret.getPrimaryCaret.getSelectionRange, testCase.expectedSelection, testCase.name)
+      }
+    }
+  }
+
+  // As the IDE's background reads: a query checks for cancellation as it works, and an edit cancels it rather than
+  // waiting for it to finish.
+  test("an edit cancels the queries running meanwhile") {
+    val file = host.openFile(Path.of("/editing/D.scala"), "object D\n", module)
+    try {
+      val started = new java.util.concurrent.CountDownLatch(1)
+      val query = scala.concurrent.Future {
+        host.read {
+          started.countDown()
+          while (true) com.intellij.openapi.progress.ProgressManager.checkCanceled()
+        }
+      }(using scala.concurrent.ExecutionContext.global)
+      assert(started.await(30, java.util.concurrent.TimeUnit.SECONDS), "the query did not start")
+
+      host.edit(file, 0, 0, "// edited\n")
+
+      intercept[com.intellij.openapi.progress.ProcessCanceledException](
+        scala.concurrent.Await.result(query, scala.concurrent.duration.Duration(30, "s")))
+      assertEquals(host.read(file.getText), "// edited\nobject D\n")
+    } finally host.closeSource(file)
+  }
+
+  test("a writer cancels a query between read acquisition and progress registration") {
+    host.project
+    val executor = Executors.newFixedThreadPool(2)
+    val readerThread = new AtomicReference[Thread]()
+    val writerThread = new AtomicReference[Thread]()
+    val reading = new CountDownLatch(1)
+    val writing = new CountDownLatch(1)
+    val release = new CountDownLatch(1)
+    val listeners = com.intellij.openapi.util.Disposer.newDisposable()
+    HostLock.addReadListener(new com.intellij.openapi.application.ReadActionListener {
+      override def readActionStarted(action: Class[?]): Unit =
+        if (Thread.currentThread() eq readerThread.get()) {
+          reading.countDown()
+          if (!release.await(30, TimeUnit.SECONDS)) throw new IllegalStateException("the reader was not released")
+        }
+    }, listeners)
+    HostLock.addWriteListener(new com.intellij.openapi.application.WriteActionListener {
+      override def beforeWriteActionStart(action: Class[?]): Unit =
+        if (Thread.currentThread() eq writerThread.get()) writing.countDown()
+    }, listeners)
+    try {
+      val query = CompletableFuture.supplyAsync(() => {
+        readerThread.set(Thread.currentThread())
+        HostLock.query(42)
+      }, executor)
+      assert(reading.await(30, TimeUnit.SECONDS))
+      val writer = CompletableFuture.runAsync(() => {
+        writerThread.set(Thread.currentThread())
+        HostLock.write(())
+      }, executor)
+      assert(writing.await(30, TimeUnit.SECONDS))
+      release.countDown()
+      val error = intercept[java.util.concurrent.ExecutionException](query.get(30, TimeUnit.SECONDS))
+      assert(error.getCause.isInstanceOf[com.intellij.openapi.progress.ProcessCanceledException])
+      writer.get(30, TimeUnit.SECONDS)
+      assertEquals(HostLock.query(42), 42)
+    } finally {
+      release.countDown()
+      executor.shutdown()
+      val stopped = executor.awaitTermination(30, TimeUnit.SECONDS)
+      com.intellij.openapi.util.Disposer.dispose(listeners)
+      assert(stopped)
+    }
+  }
+
+  test("queries arriving while a writer waits for intent are cancelled too") {
+    host.project
+    val executor = Executors.newFixedThreadPool(2)
+    val writerThread = new AtomicReference[Thread]()
+    val writing = new CountDownLatch(1)
+    val listeners = com.intellij.openapi.util.Disposer.newDisposable()
+    HostLock.addIntentListener(new com.intellij.openapi.application.WriteIntentReadActionListener {
+      override def beforeWriteIntentReadActionStart(action: Class[?]): Unit =
+        if (Thread.currentThread() eq writerThread.get()) writing.countDown()
+    }, listeners)
+    try {
+      val writer = HostLock.writeIntent {
+        val pending = CompletableFuture.runAsync(() => {
+          writerThread.set(Thread.currentThread())
+          HostLock.write(())
+        }, executor)
+        assert(writing.await(30, TimeUnit.SECONDS))
+        val query = CompletableFuture.supplyAsync(() => HostLock.query(42), executor)
+        val error = intercept[java.util.concurrent.ExecutionException](query.get(30, TimeUnit.SECONDS))
+        assert(error.getCause.isInstanceOf[com.intellij.openapi.progress.ProcessCanceledException])
+        pending
+      }
+      writer.get(30, TimeUnit.SECONDS)
+      assertEquals(HostLock.query(42), 42)
+    } finally {
+      executor.shutdown()
+      val stopped = executor.awaitTermination(30, TimeUnit.SECONDS)
+      com.intellij.openapi.util.Disposer.dispose(listeners)
+      assert(stopped)
+    }
+  }
+
+  test("a write listener can inspect PSI before the write starts") {
+    val file = host.openFile(Path.of("/editing/WriteListener.scala"), "object WriteListener\n", module)
+    val listeners = com.intellij.openapi.util.Disposer.newDisposable()
+    val writer = Thread.currentThread()
+    var observed = ""
+    HostLock.addWriteListener(new com.intellij.openapi.application.WriteActionListener {
+      override def beforeWriteActionStart(action: Class[?]): Unit =
+        if (Thread.currentThread() eq writer) observed = host.read(file.getText)
+    }, listeners)
+    try {
+      host.edit(file, 0, 0, "// edited\n")
+      assertEquals(observed, "object WriteListener\n")
+      assertEquals(host.read(file.getText), "// edited\nobject WriteListener\n")
+    } finally {
+      com.intellij.openapi.util.Disposer.dispose(listeners)
+      host.closeSource(file)
+    }
+  }
+
+  // The word index follows edits: a usage added to or removed from a file is found, or no longer found.
+  test("reference search finds usages in other files and follows edits") {
+    val aText = "object Searched { def target: Int = 1 }\n"
+    val bText = "object SearchUser { val x: Int = 1 }\n"
+    val a = host.openFile(Path.of("/editing/Searched.scala"), aText, module).asInstanceOf[ScalaFile]
+    val b = host.openFile(Path.of("/editing/SearchUser.scala"), bText, module).asInstanceOf[ScalaFile]
+    def usages: Seq[(String, String)] = host.read {
+      val target = PsiTreeUtil.findChildrenOfType(a, classOf[ScFunction]).asScala.head
+      ReferencesSearch.search(target).findAll().asScala.map(ref => ref.getElement.getContainingFile.getName -> ref.getElement.getText).toSeq
+    }
+    try {
+      assertEquals(usages, Seq.empty)
+
+      val usage = bText.indexOf("1")
+      host.edit(b, usage, usage + 1, "Searched.target")
+      assertEquals(usages, Seq("SearchUser.scala" -> "Searched.target"))
+
+      host.edit(b, usage, usage + "Searched.target".length, "1")
+      assertEquals(usages, Seq.empty)
+    } finally {
+      host.closeSource(a)
+      host.closeSource(b)
+    }
+  }
+
+  test("rename restores class and word indices before the editor applies its edits") {
+    val original = "package renamed\nclass BeforeRename\nobject RenameUser { val x = new BeforeRename }\n"
+    val file = scalaFile("BeforeRename", original)
+    try {
+      val documents = com.intellij.psi.PsiDocumentManager.getInstance(host.project)
+      for (_ <- 1 to 2) {
+        val changes = host.rename(file, original.indexOf("BeforeRename"), "AfterRename")
+        assertEquals(changes.map(_._1), Seq(file))
+        assertEquals(applyEdits(original, changes.head._2), original.replace("BeforeRename", "AfterRename"))
+        host.read {
+          assertEquals(file.getText, original)
+          assertEquals(documents.getDocument(file).getText, original)
+          assert(documents.isCommitted(documents.getDocument(file)))
+          val facade = com.intellij.psi.JavaPsiFacade.getInstance(host.project)
+          val scope = com.intellij.psi.search.GlobalSearchScope.projectScope(host.project)
+          assert(facade.findClass("renamed.BeforeRename", scope) != null)
+          assertEquals(facade.findClass("renamed.AfterRename", scope), null)
+          assertEquals(ProjectSearch.usages(ProjectSearch.usageTarget(file, original.indexOf("BeforeRename")).get).size, 1)
+        }
+      }
+    } finally host.closeSource(file)
+  }
+
+  // PackagePrivateUseScopeTest: the scope includes the declaring package and its children, but not another package.
+  test("package-private use scopes include sources in child packages") {
+    val texts = Seq(
+      "package scoped\nprivate[scoped] class ScopedClass\n",
+      "package scoped\nobject SamePackage\n",
+      "package scoped.child\nobject ChildPackage\n",
+      "package elsewhere\nobject OtherPackage\n",
+    )
+    val files = texts.zipWithIndex.map((text, i) => scalaFile(s"Scope$i", text))
+    try host.read {
+      val target = ProjectSearch.usageTarget(files.head, texts.head.indexOf("ScopedClass")).get
+      val scope = target.getUseScope
+      assertEquals(files.map(f => scope.contains(f.getVirtualFile)), Seq(true, true, true, false))
+    } finally files.foreach(host.closeSource)
+  }
+
+  test("an edit is reparsed in place and changes what other files see") {
+    val aText = "object A { def f: Int = 1 }\n"
+    val a = host.openFile(Path.of("/editing/A.scala"), aText, module).asInstanceOf[ScalaFile]
+    val b = host.openFile(Path.of("/editing/B.scala"), "object B { val x: Int = A.f }\n", module).asInstanceOf[ScalaFile]
+    try {
+      assertEquals(errors(b), Seq.empty)
+
+      val start = aText.indexOf("Int = 1")
+      host.edit(a, start, start + "Int = 1".length, "String = \"s\"")
+
+      assertEquals(host.read(a.getText), "object A { def f: String = \"s\" }\n")
+      assert(host.read(a.isValid), "the edited file is the same PSI file, reparsed in place")
+      assertEquals(errors(b), Seq("Type mismatch. Required: Int, found: String"))
+      // Nothing left the host's tables or was logged as an error on the way (both would hide problems).
+      val swallowed = CallLog.snapshot.map(_._1).filter(e => e.startsWith("UNSUPPORTED ") || e.startsWith("LOGGED ERROR "))
+      assertEquals(swallowed, Seq.empty)
+    } finally {
+      host.closeSource(a)
+      host.closeSource(b)
+    }
+  }
+
+  private def scalaFile(name: String, text: String): ScalaFile =
+    host.openFile(Path.of(s"/editing/$name.scala"), text, module) match {
+      case f: ScalaFile => f
+      case other => fail(s"not Scala: $other")
+    }
+
+  test("completion renders member signatures, and its handler adds the parentheses once chosen") {
+    val text = "object Complete { val emoji = \"😀\"; def message(n: Int): String = \"hi\"; Complete.mes }"
+    val file = scalaFile("Complete", text)
+    try {
+      val offset = text.indexOf("Complete.mes") + "Complete.mes".length
+      val result = host.completion(file, offset)
+      val item = result.items.find(_.lookup == "message").getOrElse(fail(result.toString))
+      assertEquals(item.kind, Completion.Kind.Method)
+      assert(item.tail.exists(_.contains("Int")) && item.typeText.contains("String"), item.toString)
+      assertEquals(item.prefix, new TextRange(offset - 3, offset))
+      assert(item.hasHandler, item.toString)
+      assertEquals(host.read(file.getText), text)
+      assert(choose(file, offset, "message").contains("Complete.message(<caret>)"))
+    } finally host.closeSource(file)
+  }
+
+  test("Java completion preserves overloads, prefix ranges and insertion without changing the source") {
+    val text = "class JavaComplete { String message(int n) { return \"hi\"; } @Deprecated String message(String s) { return s; } void use() { String emoji = \"😀\"; this.mes; boolean flag = tr; } }"
+    val file = host.openFile(Path.of("/editing/JavaComplete.java"), text, module)
+    try {
+      val offset = text.indexOf("this.mes") + "this.mes".length
+      val result = host.completion(file, offset)
+      val methods = result.items.filter(_.lookup == "message")
+      assertEquals(methods.size, 2, result.toString)
+      assert(methods.forall(_.kind == Completion.Kind.Method))
+      assert(methods.forall(_.prefix == new TextRange(offset - 3, offset)))
+      assertEquals(methods.count(_.deprecated), 1)
+      assertEquals(methods.map(_.identity).distinct.size, 2)
+      val keywords = host.completion(file, text.indexOf("= tr") + "= tr".length).items
+      assert(keywords.exists(item => item.lookup == "true" && item.kind == Completion.Kind.Keyword), keywords.toString)
+      val inserted = Completion.choose(file, offset, "message", com.intellij.codeInsight.lookup.Lookup.NORMAL_SELECT_CHAR)
+      assert(inserted.result.text.contains("this.message()"), inserted.toString)
+      assertEquals(inserted.caret, inserted.result.text.indexOf("this.message(") + "this.message(".length)
+      val keyword = Completion.choose(file, text.indexOf("= tr") + "= tr".length, "true",
+        com.intellij.codeInsight.lookup.Lookup.NORMAL_SELECT_CHAR)
+      assert(keyword.result.text.contains("boolean flag = true;"), keyword.toString)
+      assertEquals(keyword.caret, keyword.result.text.indexOf("flag = true") + "flag = true".length)
+      assertEquals(host.read(file.getText), text)
+      // As in LSP replay, the editor has already replaced the prefix when the command arrives.
+      val start = text.indexOf("= tr") + "= ".length
+      val candidate = keywords.find(_.lookup == "true").getOrElse(fail(keywords.toString))
+      host.edit(file, start, start + 2, candidate.lookup)
+      val selected = text.substring(0, start) + candidate.lookup + text.substring(start + 2)
+      val replayed = host.insertCompletion(file, start, candidate.prefixText, candidate.lookup, candidate.identity)
+        .getOrElse(fail("the keyword could not be replayed"))
+      assertEquals(replayed.result.edits, Seq.empty)
+      assertEquals(replayed.caret, start + candidate.lookup.length)
+      assertEquals(host.read(file.getText), selected)
+    } finally host.closeSource(file)
+  }
+
+  test("Java member completion respects inherited access and static qualifiers") {
+    val declarations = "class Parent { public int visible; private int hidden; public static int shared; public <T> T echo(T value) { return value; } } "
+    Seq("this" -> Set("visible", "echo"), "Parent" -> Set("shared")).foreach { (qualifier, expected) =>
+      val text = declarations + s"class Child extends Parent { void use() { $qualifier. } }"
+      val file = host.openFile(Path.of("/editing/Child.java"), text, module)
+      try {
+        val offset = text.indexOf(s"$qualifier. }") + qualifier.length + 1
+        val names = host.completion(file, offset).items.map(_.lookup).toSet
+        assert(expected.subsetOf(names), names.toString)
+        assert(!names.contains("hidden"), names.toString)
+        val excluded = if (qualifier == "this") Set("shared") else Set("visible", "echo")
+        assert(names.intersect(excluded).isEmpty, names.toString)
+      } finally host.closeSource(file)
+    }
+  }
+
+  test("Java class completion imports source and JDK classes without changing the original") {
+    val declaration = host.openFile(Path.of("/editing/models/Model.java"), "package models; public class Model {}", module)
+    try {
+      Seq(("Mod", "Model", "models.Model"), ("ArrayL", "ArrayList", "java.util.ArrayList")).foreach { (prefix, name, qualified) =>
+        val text = s"class JavaClient { Object value = new $prefix; }"
+        val file = host.openFile(Path.of("/editing/JavaClient.java"), text, module)
+        try {
+          val offset = text.indexOf(prefix + ";") + prefix.length
+          val items = host.completion(file, offset).items
+          assert(items.exists(item => item.lookup == name && item.kind == Completion.Kind.Class), items.toString)
+          val inserted = Completion.choose(file, offset, name, com.intellij.codeInsight.lookup.Lookup.NORMAL_SELECT_CHAR)
+          assert(inserted.result.text.contains(s"import $qualified;"), inserted.toString)
+          assert(inserted.result.text.contains(s"new $name") && inserted.result.text.contains("()"), inserted.toString)
+          assertEquals(host.read(file.getText), text)
+        } finally host.closeSource(file)
+      }
+    } finally host.closeSource(declaration)
+  }
+
+  test("completion after `new` presents library Java classes") {
+    val text = "object AfterNew { val t = new Threa; val l = new java.util.ArrayLi }"
+    val file = scalaFile("AfterNew", text)
+    try {
+      for ((prefix, name) <- Seq("new Threa" -> "Thread", "new java.util.ArrayLi" -> "ArrayList")) {
+        val result = host.completion(file, text.indexOf(prefix) + prefix.length)
+        assert(result.items.exists(_.lookup == name), s"$prefix: $result")
+      }
+    } finally host.closeSource(file)
+  }
+
+  test("completion preserves overloads and deprecation, and imports a chosen class") {
+    val hidden = host.openFile(Path.of("/editing/Hidden.scala"), "package hidden\nclass ZebraUnimported", module)
+    val text = "package visible\nobject Lookup { @deprecated(\"old\", \"1\") def message(n: Int): String = \"\"; " +
+      "def message(n: String): Int = 0; Lookup.mes }"
+    val file = scalaFile("Lookup", text)
+    try {
+      val offset = text.indexOf("Lookup.mes") + "Lookup.mes".length
+      val completed = host.completion(file, offset)
+      val limited = Completion.complete(file, offset, limit = 1)
+      assertEquals(limited.items, completed.items.take(1))
+      assert(limited.incomplete)
+      val unlimited = Completion.complete(file, offset, limit = Int.MaxValue)
+      assertEquals(unlimited, completed)
+      val items = completed.items.filter(_.lookup == "message")
+      assertEquals(items.size, 2)
+      assertEquals(items.map(_.identity).distinct.size, 2)
+      assertEquals(items.count(_.deprecated), 1)
+      for (expression <- Seq("val value: ZebraUn = ???", "val value: Any = new ZebraUn")) {
+        val changed = s"package visible\nobject Lookup { $expression }"
+        host.edit(file, 0, host.read(file.getTextLength), changed)
+        val chosen = choose(file, changed.indexOf("ZebraUn") + "ZebraUn".length, "ZebraUnimported")
+        assert(chosen.contains("import hidden.ZebraUnimported"), chosen)
+        assert(chosen.replace("<caret>", "").contains(expression.replace("ZebraUn", "ZebraUnimported")), chosen)
+      }
+    } finally {
+      host.closeSource(file)
+      host.closeSource(hidden)
+    }
+  }
+
+  test("completion ranks a local before a named argument, whose handler adds the assignment") {
+    val text = "object Named { def use = { val namelocal = \"s\"; " +
+      "def printName(nameParam: String = \"Unknown\"): Unit = (); printName(name) } }"
+    val file = scalaFile("Named", text)
+    try {
+      val offset = text.indexOf("printName(name)") + "printName(name".length
+      val names = host.completion(file, offset).items.map(_.lookup)
+      assert(names.contains("namelocal") && names.contains("nameParam"), names)
+      assert(names.indexOf("namelocal") < names.indexOf("nameParam"), names)
+      assert(choose(file, offset, "nameParam").contains("printName(nameParam = <caret>)"))
+    } finally host.closeSource(file)
+  }
+
+  test("a chosen constructor gets its import and the caret between its parentheses") {
+    val target = host.openFile(Path.of("/editing/ConstructorTarget.scala"), "package imported\nclass ConstructorTarget(n: Int)\n", module)
+    val text = "object ConstructorUser { val x = new ConstructorT }"
+    val file = scalaFile("ConstructorUser", text)
+    try {
+      val chosen = choose(file, text.indexOf("ConstructorT }") + "ConstructorT".length, "ConstructorTarget")
+      assert(chosen.contains("new ConstructorTarget(<caret>)"), chosen)
+      assert(chosen.contains("import imported.ConstructorTarget"), chosen)
+    } finally {
+      host.closeSource(file)
+      host.closeSource(target)
+    }
+  }
+
+  test("string, backtick and keyword handlers preserve surrounding text and their caret") {
+    val cases = Seq(
+      ("object Strings { val member = 1; val s = \"$mem<caret>\" }", "member", "object Strings { val member = 1; val s = s\"$member<caret>\" }"),
+      ("object Strings { object value { val member = 1 }; val s = s\"$value.mem<caret>\" }", "member",
+        "object Strings { object value { val member = 1 }; val s = s\"${value.member<caret>}\" }"),
+      ("object Ticks { def `type`(): Unit = (); Ticks.`ty<caret>` }", "`type`", "object Ticks { def `type`(): Unit = (); Ticks.`type`()<caret> }"),
+      ("object Keywords {\n  val n = 1\n  n mat<caret>\n}", "match", "object Keywords {\n  val n = 1\n  n match {\n    case <caret>\n  }\n}")
+    )
+    for ((marked, lookup, expected) <- cases) {
+      val file = scalaFile("Handler", marked.replace("<caret>", ""))
+      try assertEquals(choose(file, marked.indexOf("<caret>"), lookup), expected)
+      finally host.closeSource(file)
+    }
+  }
+
+  test("a chosen class is imported by its package prefix when the code style asks for it") {
+    val manager = com.intellij.psi.codeStyle.CodeStyleSettingsManager.getInstance(host.project)
+    val settings = host.read(manager.getCurrentSettings.clone())
+    settings.getCustomSettings(classOf[org.jetbrains.plugins.scala.lang.formatting.settings.ScalaCodeStyleSettings])
+      .setImportsWithPrefix(Array("scala.collection.mutable._"))
+    for (expression <- Seq("val value: ArrayBuff = ???", "val value = new ArrayBuff")) {
+      val text = s"object PrefixUser { $expression }"
+      val file = scalaFile("PrefixUser", text)
+      try manager.computeWithLocalSettings(settings, _ => {
+        val chosen = choose(file, text.indexOf("ArrayBuff") + "ArrayBuff".length, "ArrayBuffer")
+        assert(chosen.contains("mutable.ArrayBuffer"), chosen)
+        assert(chosen.contains("import scala.collection.mutable"), chosen)
+      }) finally host.closeSource(file)
+    }
+  }
+
+  test("completion offers an abstract class after `new`, though its handler's dialog cannot run") {
+    val text = "trait NeedsImplementation { def run(): Unit }; object User { new NeedsImpl }"
+    val file = scalaFile("NeedsImplementation", text)
+    try {
+      val chosen = choose(file, text.lastIndexOf("NeedsImpl") + "NeedsImpl".length, "NeedsImplementation")
+      assert(chosen.contains("new NeedsImplementation"), chosen)
+    } finally host.closeSource(file)
+  }
+
+  test("word-aligned character diffs separate imports and preserve UTF-16 boundaries") {
+    val original = "object Diff { val n = 1 }\n"
+    val imported = "import example.Value\n\n"
+    val changed = imported + original.replace("1", "2")
+    val edits = ChangeEngine.diff(original, changed)
+    assertEquals(edits.map(_.text), Seq(imported, "2"))
+    assertEquals(applyEdits(original, edits), changed)
+    assertEquals(ChangeEngine.diff(original, original), Seq.empty)
+    val supplementary = "// 😀\nval x=1\n"
+    val replacement = "// 🦊\nval x = 1\n"
+    val unicodeEdits = ChangeEngine.diff(supplementary, replacement)
+    assertEquals(unicodeEdits.head.range, new TextRange(3, 5))
+    assertEquals(applyEdits(supplementary, unicodeEdits), replacement)
+  }
+
+  test("copy edits reconstruct exactly without changing source PSI, document or index") {
+    val text = "object CopyOriginal { val emoji = \"😀\"; val number = 1 }\n"
+    val file = host.openFile(Path.of("/editing/CopyOriginal.scala"), text, module) match {
+      case f: ScalaFile => f
+      case other => fail(s"not Scala: $other")
+    }
+    try {
+      val documents = com.intellij.psi.PsiDocumentManager.getInstance(host.project)
+      val stamp = host.read(documents.getDocument(file).getModificationStamp)
+      val key = com.intellij.openapi.util.Key.create[String]("change-engine.copyable")
+      host.read(file.putCopyableUserData(key, "copied"))
+      val (changed, _) = ChangeEngine.run(file) { copy =>
+        assert(!copy.isPhysical)
+        assertEquals(copy.getCopyableUserData(key), "copied")
+        assertEquals(org.jetbrains.plugins.scala.project.ScalaFeatures.forPsiOrDefault(copy).isScala3,
+          org.jetbrains.plugins.scala.project.ScalaFeatures.forPsiOrDefault(file).isScala3)
+        val document = copy.getViewProvider.getDocument
+        val start = document.getText.indexOf("😀")
+        document.replaceString(start, start + "😀".length, "🦊")
+        documents.commitDocument(document)
+        assert(copy.getText.contains("🦊"), copy.getText)
+        document.insertString(document.getTextLength, "// done\n")
+      }
+      assertEquals(changed.text, text.replace("😀", "🦊") + "// done\n")
+      assertEquals(applyEdits(text, changed.edits), changed.text)
+      assertEquals(host.read(file.getText), text)
+      assertEquals(host.read(documents.getDocument(file).getText), text)
+      assertEquals(host.read(documents.getDocument(file).getModificationStamp), stamp)
+      host.read {
+        val classes = com.intellij.psi.search.PsiShortNamesCache.getInstance(host.project)
+          .getClassesByName("CopyOriginal", com.intellij.psi.search.GlobalSearchScope.allScope(host.project))
+        assert(classes.nonEmpty)
+        assert(classes.forall(_.getContainingFile eq file), classes.toSeq)
+      }
+    } finally host.closeSource(file)
+  }
+
+  test("code actions preview intentions and annotator fixes without changing the source") {
+    val cases = Seq(
+      ("object Action { val a = 1; val b = 2; val x = a ==<caret> b }", "Negate",
+        "object Action { val a = 1; val b = 2; val x = !(a != b)\n}"),
+      ("object wrapper { val string: String = ???; val value: Int = <caret>string }", "Change type 'Int' to 'String'",
+        "object wrapper { val string: String = ???; val value: String = string }"),
+    )
+    TestHost.libraryReport
+    for ((marked, title, expected) <- cases) {
+      val original = marked.replace("<caret>", "")
+      val file = scalaFile("Action", original)
+      try {
+        val at = marked.indexOf("<caret>")
+        val actions = host.codeActions(file, new TextRange(at, at))
+        val chosen = actions.find(_.title.startsWith(title)).getOrElse(fail(actions.toString))
+        assertEquals(chosen.disabled, None)
+        assertEquals(applyEdits(original, chosen.edits), expected)
+        assertEquals(host.read(file.getText), original)
+      } finally host.closeSource(file)
+    }
+  }
+
+  test("type-import actions keep colliding candidates separate and preserve the source") {
+    val targets = Seq("first", "second").map { pack =>
+      scalaFile(s"${pack}ImportChoice", s"package $pack\nclass ImportChoice\n")
+    }
+    val original = "object ImportClient { val value: ImportChoice = ??? }\n"
+    val file = scalaFile("ImportClient", original)
+    try {
+      val at = original.indexOf("ImportChoice")
+      val actions = host.codeActions(file, new TextRange(at, at)).filter(_.title.startsWith("Import '"))
+      for (pack <- Seq("first", "second")) {
+        val title = s"Import '$pack.ImportChoice'"
+        val action = actions.find(_.title == title).getOrElse(fail(actions.toString))
+        assertEquals(action.disabled, None)
+        val changed = applyEdits(original, action.edits)
+        assert(changed.contains(s"import $pack.ImportChoice"), changed)
+        assertEquals(host.read(file.getText), original)
+      }
+      val scope = com.intellij.psi.search.GlobalSearchScope.projectScope(host.project)
+      def importValues = host.read {
+        com.intellij.util.indexing.FileBasedIndex.getInstance.getValues(
+          org.jetbrains.plugins.scala.autoImport.ImportOrderingIndexer.Id, "first", scope).size()
+      }
+      assertEquals(importValues, 0)
+      val chosen = actions.find(_.title == "Import 'first.ImportChoice'").getOrElse(fail(actions.toString))
+      val changed = applyEdits(original, chosen.edits)
+      host.edit(file, 0, original.length, changed)
+      assertEquals(importValues, 1)
+      host.edit(file, 0, changed.length, original)
+      assertEquals(importValues, 0)
+    } finally {
+      host.closeSource(file)
+      targets.foreach(host.closeSource)
+    }
+  }
+
+  test("organize imports removes unused imports on a copy and keeps used imports") {
+    TestHost.libraryReport
+    val original = "import scala.util.Try\nimport scala.collection.mutable.ArrayBuffer\n\n" +
+      "object Organized { val buffer = ArrayBuffer.empty[Int] }\n"
+    val file = scalaFile("Organized", original)
+    try {
+      val action = host.organizeImports(file)
+      val changed = applyEdits(original, action.edits)
+      assertEquals(changed, original.replace("import scala.util.Try\n", ""))
+      assertEquals(host.read(file.getText), original)
+      host.edit(file, 0, original.length, changed)
+      assertEquals(host.organizeImports(file).edits, Seq.empty)
+    } finally host.closeSource(file)
+  }
+
+  test("organize imports preserves a local import dependency") {
+    val original = """object LocalChain {
+      |  object R {
+      |    object C {
+      |      class D
+      |    }
+      |  }
+      |
+      |  import R._
+      |  import C.D
+      |  val x : D = new D
+      |}""".stripMargin
+    val file = scalaFile("LocalChain", original)
+    try assertEquals(applyEdits(original, host.organizeImports(file).edits), original)
+    finally host.closeSource(file)
+  }
+
+  test("IntelliJ formatting returns minimal edits with request indentation") {
+    val text = "object FormatMe {\nval emoji=\"😀\"\nval n=1+2\n}\n"
+    val file = host.openFile(Path.of("/editing/FormatMe.scala"), text, module) match {
+      case f: ScalaFile => f
+      case other => fail(s"not Scala: $other")
+    }
+    try {
+      val result = ChangeEngine.format(file, None, 4, useTabs = false)
+      assertEquals(result.text, "object FormatMe {\n    val emoji = \"😀\"\n    val n = 1 + 2\n}\n")
+      assertEquals(applyEdits(text, result.edits), result.text)
+      assertEquals(host.read(file.getText), text)
+      assert(result.edits.size > 1, result.edits)
+    } finally host.closeSource(file)
+  }
+
+  test("formatting a copy completes while another thread holds a read") {
+    val text = "object Concurrent { val n=1+2 }\n"
+    val file = scalaFile("Concurrent", text)
+    val started = new CountDownLatch(1)
+    val release = new CountDownLatch(1)
+    val reader = Future {
+      HostLock.readLocked {
+        started.countDown()
+        release.await()
+      }
+    }(using ExecutionContext.global)
+    try {
+      assert(started.await(30, TimeUnit.SECONDS), "the read did not start")
+      val formatting = Future {
+        ChangeEngine.format(file, None, 2, useTabs = false)
+      }(using ExecutionContext.global)
+      val result = Await.result(formatting, Duration(5, "s"))
+      assertEquals(result.text, "object Concurrent {\n  val n = 1 + 2\n}\n")
+      assertEquals(applyEdits(text, result.edits), result.text)
+    } finally {
+      release.countDown()
+      Await.result(reader, Duration(30, "s"))
+      host.closeSource(file)
+    }
+  }
+
+  test("a newer edit cancels a copy modification and releases its read lock") {
+    val file = host.openFile(Path.of("/editing/Cancelled.scala"), "object Cancelled\n", module) match {
+      case f: ScalaFile => f
+      case other => fail(s"not Scala: $other")
+    }
+    try {
+      val started = new java.util.concurrent.CountDownLatch(1)
+      val query = scala.concurrent.Future {
+        ChangeEngine.run(file) { _ =>
+          started.countDown()
+          while (true) com.intellij.openapi.progress.ProgressManager.checkCanceled()
+        }
+      }(using scala.concurrent.ExecutionContext.global)
+      assert(started.await(30, java.util.concurrent.TimeUnit.SECONDS))
+      host.edit(file, 0, 0, "// newer\n")
+      intercept[com.intellij.openapi.progress.ProcessCanceledException](
+        scala.concurrent.Await.result(query, scala.concurrent.duration.Duration(30, "s")))
+      assertEquals(host.read(file.getText), "// newer\nobject Cancelled\n")
+    } finally host.closeSource(file)
+  }
+
+  test("addImportForClass changes only the import line through the copy engine") {
+    val target = host.openFile(Path.of("/editing/ImportTarget.scala"), "package imported\nclass ImportTarget\n", module)
+    val text = "object ImportUser { val x: ImportTarget = ??? }\n"
+    val file = host.openFile(Path.of("/editing/ImportUser.scala"), text, module) match {
+      case f: ScalaFile => f
+      case other => fail(s"not Scala: $other")
+    }
+    try {
+      val cls = host.read {
+        com.intellij.psi.JavaPsiFacade.getInstance(host.project).findClass("imported.ImportTarget",
+          com.intellij.psi.search.GlobalSearchScope.allScope(host.project))
+      }
+      assert(cls != null)
+      val (result, _) = ChangeEngine.run(file)(_.addImportForClass(cls, null))
+      assertEquals(result.edits.size, 1, result.edits)
+      assertEquals(result.edits.head.range, TextRange.EMPTY_RANGE)
+      assertEquals(result.text, "import imported.ImportTarget\n\n" + text)
+      assertEquals(applyEdits(text, result.edits), result.text)
+      assertEquals(host.read(file.getText), text)
+    } finally {
+      host.closeSource(file)
+      host.closeSource(target)
+    }
+  }
+
+
+  test("PSI gists follow committed buffers while virtual gists retain VFS contents") {
+    val host = TestHost.host
+    val errorsBefore = HostLog.count(HostLog.Level.Error)
+    val unsupportedBefore = CallLog.snapshot.filter(_._1.startsWith("UNSUPPORTED "))
+    val manager = com.intellij.util.gist.GistManager.getInstance()
+    val serializer = com.intellij.util.io.EnumeratorStringDescriptor.INSTANCE
+    val original = "object GistBuffer { val value = 1 }"
+    val changed = "object GistBuffer { val value = 2 }"
+    val file = host.openFile(Path.of("/editing/GistBuffer.scala"), original, module)
+    val virtual = file.getViewProvider.getVirtualFile
+    var computations = 0
+    val psiGist = manager.newPsiFileGist[String]("host-test.psi-buffer", 1, serializer, source => {
+      computations += 1
+      source.getText
+    })
+    val vfsGist = manager.newVirtualFileGist[String]("host-test.vfs-buffer", 1, serializer,
+      (_, source) => new String(source.contentsToByteArray(), java.nio.charset.StandardCharsets.UTF_8))
+    try {
+      assertEquals(psiGist.getFileData(file), original)
+      assertEquals(vfsGist.getFileData(host.project, virtual), original)
+      val documents = com.intellij.psi.PsiDocumentManager.getInstance(host.project)
+      val document = documents.getDocument(file)
+      HostLock.write(document.setText(changed))
+      assertEquals(psiGist.getFileData(file), original)
+      HostLock.write(documents.commitDocument(document))
+      assertEquals(psiGist.getFileData(file), changed)
+      assertEquals(vfsGist.getFileData(host.project, virtual), original)
+      val beforeFileInvalidation = computations
+      manager.invalidateData(virtual)
+      HostDispatchThread.drain()
+      assertEquals(psiGist.getFileData(file), changed)
+      assert(computations > beforeFileInvalidation)
+      val beforeGlobalInvalidation = computations
+      manager.invalidateData()
+      HostDispatchThread.drain()
+      assertEquals(psiGist.getFileData(file), changed)
+      assert(computations > beforeGlobalInvalidation)
+      assertEquals(HostLog.count(HostLog.Level.Error), errorsBefore)
+      assertEquals(CallLog.snapshot.filter(_._1.startsWith("UNSUPPORTED ")), unsupportedBefore)
+    } finally host.closeSource(file)
+  }
+
+  test("virtual gists distinguish cached nulls and contexts and invalidate by content, file and manager") {
+    val host = TestHost.host
+    val errorsBefore = HostLog.count(HostLog.Level.Error)
+    val unsupportedBefore = CallLog.snapshot.filter(_._1.startsWith("UNSUPPORTED "))
+    val manager = com.intellij.util.gist.GistManager.getInstance()
+    val serializer = com.intellij.util.io.EnumeratorStringDescriptor.INSTANCE
+    val first = new com.intellij.testFramework.LightVirtualFile("first.txt", "one")
+    val second = new com.intellij.testFramework.LightVirtualFile("second.txt", "two")
+    val gist = manager.newVirtualFileGist[String]("host-test.virtual-invalidation", 1, serializer,
+      (project, file) => if (project == null) null else new String(file.contentsToByteArray(), java.nio.charset.StandardCharsets.UTF_8))
+    assertEquals(gist.getUpToDateOrNull(host.project, first), null)
+    assertEquals(gist.getFileData(null, first), null)
+    val cachedNull = gist.getUpToDateOrNull(null, first)
+    assert(cachedNull != null)
+    assertEquals(cachedNull.get(), null)
+    assertEquals(gist.getUpToDateOrNull(host.project, first), null)
+    assertEquals(gist.getFileData(host.project, first), "one")
+    assertEquals(gist.getUpToDateOrNull(host.project, first).get(), "one")
+    assertEquals(gist.getFileData(host.project, second), "two")
+    HostLock.write(first.setContent(null, "changed", false))
+    assertEquals(gist.getUpToDateOrNull(host.project, first), null)
+    assertEquals(gist.getFileData(host.project, first), "changed")
+    manager.invalidateData(first)
+    HostDispatchThread.drain()
+    assertEquals(gist.getUpToDateOrNull(host.project, first), null)
+    assertEquals(gist.getUpToDateOrNull(host.project, second).get(), "two")
+    assertEquals(gist.getFileData(host.project, first), "changed")
+    manager.invalidateData()
+    HostDispatchThread.drain()
+    assertEquals(gist.getUpToDateOrNull(host.project, first), null)
+    assertEquals(gist.getUpToDateOrNull(host.project, second), null)
+    intercept[IllegalArgumentException] {
+      manager.newPsiFileGist[String]("host-test.virtual-invalidation", 2, serializer, _.getText)
+    }
+    assertEquals(HostLog.count(HostLog.Level.Error), errorsBefore)
+    assertEquals(CallLog.snapshot.filter(_._1.startsWith("UNSUPPORTED ")), unsupportedBefore)
+  }
+
+}

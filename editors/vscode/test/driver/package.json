@@ -1,5 +1,5 @@
 {
-  "name": "scala-psi-host-release-test",
+  "name": "scala-analyzer-release-test",
   "version": "0.0.0",
   "publisher": "brurdgz",
   "engines": {

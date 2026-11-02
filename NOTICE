@@ -1,4 +1,4 @@
-scala-psi-host
+scala-analyzer
 Copyright 2026 BruRdgz
 
 This product is licensed under the Apache License, Version 2.0 (see LICENSE).
@@ -8,5 +8,5 @@ It builds on, and its distribution includes, the following, licensed under the A
 - The Scala plugin for IntelliJ IDEA (https://github.com/JetBrains/intellij-scala), Copyright JetBrains s.r.o.
 - The IntelliJ Platform (https://github.com/JetBrains/intellij-community), Copyright JetBrains s.r.o.
 
-scala-psi-host is not affiliated with or endorsed by JetBrains. IntelliJ and IntelliJ IDEA are trademarks of
+scala-analyzer is not affiliated with or endorsed by JetBrains. IntelliJ and IntelliJ IDEA are trademarks of
 JetBrains s.r.o.

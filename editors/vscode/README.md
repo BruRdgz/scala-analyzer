@@ -1,9 +1,9 @@
-# Scala (scala-psi-host)
+# Scala (scala-analyzer)
 
-VS Code client for [scala-psi-host](https://github.com/BruRdgz/scala-psi-host).
+VS Code client for [scala-analyzer](https://github.com/BruRdgz/scala-analyzer).
 
 Install the VSIX and the server archive from the same GitHub release. Extract the server, install JDK 25,
-and set `scalaPsiHost.serverPath` to its `bin/scala-psi-host` launcher. Set `scalaPsiHost.javaHome` if JDK 25
+and set `scalaAnalyzer.serverPath` to its `bin/scala-analyzer` launcher. Set `scalaAnalyzer.javaHome` if JDK 25
 is not the Java used by VS Code's environment.
 
 Open a Scala workspace with a BSP connection (`sbt bspConfig` for sbt). The extension starts the server

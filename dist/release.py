@@ -30,13 +30,13 @@ def coordinates():
 def package():
     info = coordinates()
     distribution = ROOT / 'target/dist'
-    with zipfile.ZipFile(distribution / 'lib/scala-psi-host.jar') as jar:
+    with zipfile.ZipFile(distribution / 'lib/scala-analyzer.jar') as jar:
         manifest = jar.read('META-INF/MANIFEST.MF').decode()
         if f'Implementation-Version: {info["version"]}\r\n' not in manifest:
             raise ValueError('distribution jar has the wrong release version')
     output = ROOT / 'target/release'
     output.mkdir(parents=True, exist_ok=True)
-    name = f'scala-psi-host-{info["version"]}'
+    name = f'scala-analyzer-{info["version"]}'
     with tarfile.open(output / f'{name}.tar.gz', 'w:gz') as archive:
         archive.add(distribution, arcname=name)
     vsix = output / f'{name}.vsix'

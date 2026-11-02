@@ -8,14 +8,14 @@ const { downloadAndUnzipVSCode, resolveCliArgsFromVSCodeExecutablePath, runTests
 async function main() {
   const [vsix, server, workspace] = process.argv.slice(2).map(value => path.resolve(value));
   if (!vsix || !server || !workspace) throw new Error('usage: npm run test:installed -- <vsix> <server> <workspace>');
-  const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'scala-psi-host-vscode-'));
+  const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'scala-analyzer-vscode-'));
   try {
     const userData = path.join(profile, 'user');
     const extensions = path.join(profile, 'extensions');
     fs.mkdirSync(path.join(userData, 'User'), { recursive: true });
     fs.writeFileSync(path.join(userData, 'User/settings.json'), JSON.stringify({
-      'scalaPsiHost.serverPath': server,
-      'scalaPsiHost.javaHome': process.env.JAVA_HOME,
+      'scalaAnalyzer.serverPath': server,
+      'scalaAnalyzer.javaHome': process.env.JAVA_HOME,
       'security.workspace.trust.enabled': false,
       'extensions.autoUpdate': false,
       'extensions.autoCheckUpdates': false,
@@ -36,7 +36,7 @@ async function main() {
       vscodeExecutablePath: executable,
       extensionDevelopmentPath: path.join(__dirname, 'driver'),
       extensionTestsPath: path.join(__dirname, 'suite.js'),
-      extensionTestsEnv: { SCALA_PSI_HOST_STATE: path.join(profile, 'server-state') },
+      extensionTestsEnv: { SCALA_ANALYZER_STATE: path.join(profile, 'server-state') },
       launchArgs: [workspace, ...isolation, '--disable-workspace-trust', '--skip-welcome', '--skip-release-notes'],
     });
   } finally {

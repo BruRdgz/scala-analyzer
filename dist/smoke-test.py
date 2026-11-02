@@ -94,6 +94,8 @@ def exercise(process, args):
     for capability in ('hoverProvider', 'definitionProvider'):
         if not initialized['capabilities'].get(capability):
             raise RuntimeError(f'missing capability: {capability}')
+    if initialized['serverInfo']['name'] != 'scala-analyzer':
+        raise RuntimeError(f'wrong server name: {initialized["serverInfo"]}')
     if args.expected_version and initialized['serverInfo']['version'] != args.expected_version:
         raise RuntimeError(f'wrong packaged version: {initialized["serverInfo"]}')
     send('initialized', {}, request=False)

@@ -1,96 +1,116 @@
-# scala-psi-host
+<h1 align="center">scala-analyzer</h1>
 
-A Scala language server powered by the IntelliJ Scala plugin, running in a standalone process without the IntelliJ
-application container. It provides editor features through the Language Server Protocol (LSP) and imports Scala 2
-and Scala 3 projects through the Build Server Protocol (BSP).
+<p align="center">
+  <strong>A Scala language server powered by the IntelliJ Scala plugin.</strong><br>
+  Completion, diagnostics, navigation and refactoring in your LSP editor.
+</p>
 
-Release 0.1.0 supports Linux x64 and macOS Intel/Apple Silicon with JDK 25. Integration tests use sbt builds;
-mixed Scala/Java projects have partial Java support.
+<p align="center">
+  <a href="https://github.com/BruRdgz/scala-analyzer/actions/workflows/ci.yml"><img src="https://github.com/BruRdgz/scala-analyzer/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
+  <a href="https://github.com/BruRdgz/scala-analyzer/releases"><img src="https://img.shields.io/github/v/release/BruRdgz/scala-analyzer?label=release" alt="Latest release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache_2.0-blue" alt="License: Apache 2.0"></a>
+  <a href="#requirements"><img src="https://img.shields.io/badge/JDK-25-orange" alt="JDK 25 required"></a>
+  <a href="#requirements"><img src="https://img.shields.io/badge/Scala-2_%7C_3-red" alt="Scala 2 and 3"></a>
+</p>
+
+<p align="center">
+  <a href="#getting-started">Getting started</a> ·
+  <a href="#features">Features</a> ·
+  <a href="#configuration">Configuration</a> ·
+  <a href="#known-limitations">Limitations</a> ·
+  <a href="#development">Development</a>
+</p>
+
+scala-analyzer runs the IntelliJ Scala plugin in a standalone process, without the IntelliJ application container.
+It exposes editor features through the **Language Server Protocol (LSP)** and imports projects through the
+**Build Server Protocol (BSP)**. A VS Code extension is included; other editors can connect over stdio.
+
+> **Renaming from scala-psi-host:** release 0.1.0 artifacts retain the old name. The instructions below describe
+> the renamed distribution. Existing users should follow the [migration notes](CHANGELOG.md#unreleased).
 
 ## Features
 
-- Diagnostics from the Scala plugin and compiler, including current-buffer compilation for Scala 3.
-- Hover documentation, definitions, type definitions, references and implementations.
-- Completion with automatic imports and insertion handlers, signature help and inlay hints.
-- Rename, organize imports, previewable quick fixes, intentions and surround actions.
-- Whole-file and range formatting with scalafmt or the IntelliJ formatter.
-- Document highlights, outlines, folding, selection ranges and semantic tokens.
-- Workspace symbol search and module-aware resolution.
-- Navigation into library sources or decompiled class files.
+| Area | Capabilities |
+| --- | --- |
+| Diagnostics | Scala plugin and compiler diagnostics; current-buffer compilation for Scala 3; selected native inspections. |
+| Completion | Automatic imports, insertion handlers, signature help and inlay hints. |
+| Navigation | Definitions, type definitions, references, implementations and workspace symbols; library sources and decompiled classes. |
+| Documentation | Markdown hover with declaration context, parameters, return values and linked references. |
+| Editing | Rename, organize imports, previewable quick fixes, intentions and surround actions. |
+| Formatting | Whole-file scalafmt or IntelliJ formatting; range formatting through IntelliJ. |
+| Code structure | Semantic tokens, document highlights, outlines, folding and selection ranges. |
 
-## Install
+See [known limitations](#known-limitations) for the supported boundaries of these features.
 
-Download the server archive and VSIX from [GitHub Releases](https://github.com/BruRdgz/scala-psi-host/releases).
-Verify `SHA256SUMS`, extract the archive, and keep its `bin/` and `lib/` directories together. Install JDK 25
-and configure the editor as described below. The archive is shared by Linux and macOS; releases are tested on
-Linux x64, macOS Intel and macOS Apple Silicon. The VSIX is installed separately; it does not bundle a JDK
-or download a server automatically.
+## Requirements
 
-## Build
+| Requirement | Support |
+| --- | --- |
+| Runtime | **JDK 25** for the language server. |
+| Platforms | Linux x64, macOS Intel and macOS Apple Silicon. |
+| Languages | Scala 2 and Scala 3; partial Java support in mixed Scala/Java projects. |
+| Build import | A BSP connection file under `.bsp/`; integration tests use sbt builds. |
+| Editors | The included VS Code extension, or an LSP client that launches the server over stdio. |
 
-Requires Git, sbt and **JDK 25** for both the build and the server.
+The server uses one workspace root per process. Your project's build can use its own required JDK.
 
-The IntelliJ Platform version and Scala plugin revision are pinned in [build.sbt](build.sbt). From the repository
-root, build the plugin in a sibling checkout, then build the host:
+## Getting started
+
+### 1. Install the server and editor client
+
+Download the **server archive**, **VSIX**, **build-info.json** and **SHA256SUMS** from the same
+[GitHub release](https://github.com/BruRdgz/scala-analyzer/releases). In the download directory, verify the files:
 
 ```sh
-export JAVA_HOME=/absolute/path/to/jdk-25
-
-git clone https://github.com/JetBrains/intellij-scala ../intellij-scala
-git -C ../intellij-scala checkout 491569803c6c3c2f93a0bda51490425fda237fc0
-(
-  cd ../intellij-scala
-  sbt --java-home "$JAVA_HOME" packageArtifactZip
-)
-
-sbt --java-home "$JAVA_HOME" dist
+shasum -a 256 -c SHA256SUMS
 ```
 
-The distribution is written to `target/dist/`. Its launcher is `target/dist/bin/scala-psi-host`; keep the `bin/` and
-`lib/` directories together when moving it.
+Extract the server archive and keep its `bin/` and `lib/` directories together. The same archive serves all supported
+platforms. Install JDK 25 separately; the distribution does not bundle a JDK.
 
-By default, the build reads plugin jars from `../intellij-scala/target/plugin/Scala/lib` and verifies the checkout's
-revision. Set `SCALA_PLUGIN_LIB` to use another plugin build's `Scala/lib` directory. This skips the revision check;
-the supplied jars must still match the host's platform dependencies.
+For VS Code, use **Extensions: Install from VSIX...** to install the downloaded extension. The extension requires
+the server to be installed separately and does not download it automatically.
 
-## Usage
+### 2. Prepare your project
 
-Your Scala project needs a BSP connection file under `.bsp/`. For sbt, run this from the project's root using the
-JDK required by that build:
+For sbt, run this in your Scala project's root, using the JDK required by that build:
 
 ```sh
 sbt bspConfig
 ```
 
-Configure your editor's LSP client to launch the distribution's `bin/scala-psi-host` over stdio, with `JAVA_HOME`
-pointing to JDK 25. The server currently uses one workspace root and expects one BSP connection file.
+This creates the BSP connection under `.bsp/`. The server expects one connection file.
 
-A VS Code client is included in [editors/vscode](editors/vscode). Its configuration is:
+### 3. Connect your editor
+
+**VS Code:** add the following to your settings, adjusting both paths:
 
 ```json
 {
-  "scalaPsiHost.serverPath": "/absolute/path/to/scala-psi-host/target/dist/bin/scala-psi-host",
-  "scalaPsiHost.javaHome": "/absolute/path/to/jdk-25"
+  "scalaAnalyzer.serverPath": "/absolute/path/to/scala-analyzer/bin/scala-analyzer",
+  "scalaAnalyzer.javaHome": "/absolute/path/to/jdk-25"
 }
 ```
 
-The extension reports import progress and server readiness in the status bar. Its **Show Status** and **Show Log
-File** commands provide troubleshooting information. Set `scalaPsiHost.debugLog` to `true` before starting the
-server for request timing logs.
+Open the Scala project and a Scala source file. The status bar reports import progress and server readiness.
+See the [VS Code client documentation](editors/vscode/README.md) for more details.
 
-Completion follow-up edits require client support for `workspace/applyEdit`; caret placement also requires
+**Other LSP editors:** configure your client to launch `bin/scala-analyzer` over stdio, with `JAVA_HOME` pointing
+to JDK 25. Completion follow-up edits require `workspace/applyEdit`; caret placement also requires
 `window/showDocument`.
 
 ## Configuration
 
-| Environment variable | Purpose | Default |
+### Server environment
+
+| Variable | Purpose | Default |
 | --- | --- | --- |
 | `JAVA_HOME` | JDK used to run the server | `java` on `PATH` |
-| `SCALA_PSI_HOST_STATE` | State, logs, formatter cache and library source files | `$XDG_CACHE_HOME/scala-psi-host`, or `~/.cache/scala-psi-host` |
-| `SCALA_PSI_HOST_HEAP` | Maximum JVM heap | `2g` |
-| `SCALA_PSI_HOST_LOG` | Set to `debug` to log every request's timing | Informational logging |
+| `SCALA_ANALYZER_STATE` | State, logs, formatter cache and library source files | `$XDG_CACHE_HOME/scala-analyzer`, or `~/.cache/scala-analyzer` |
+| `SCALA_ANALYZER_HEAP` | Maximum JVM heap | `2g` |
+| `SCALA_ANALYZER_LOG` | Set to `debug` to log every request's timing | Informational logging |
 
-Logs are sent to the editor and written under `<state-dir>/logs/`. The latest ten log files are retained.
+### Formatting and build changes
 
 Whole-file formatting uses the nearest `.scalafmt.conf` between the source file and workspace root. The configuration
 must declare a formatter version; missing dependencies are downloaded from Maven Central and cached locally.
@@ -99,7 +119,21 @@ Project exclusion filters apply. Without a config, and for range requests, the I
 When the client supports dynamic file watchers, changes to sbt build definitions and source-file creation or deletion
 trigger a reimport. Unsaved source text is preserved.
 
+### Troubleshooting
+
+In VS Code, run **scala-analyzer: Show Status** to inspect the server or **scala-analyzer: Show Log File** to open its current log.
+Set `scalaAnalyzer.debugLog` to `true` before starting the server for request timing logs.
+
+Logs are sent to the editor and written under `<state-dir>/logs/`. The latest ten log files are retained.
+If a reimport fails after host updates have begun, restart the server; see the recovery limits below.
+
 ## Known limitations
+
+Some searches, inspections and editor actions have a narrower scope than the full IntelliJ IDE. Mixed Java support
+is partial, indexes are kept in memory, and each process serves one workspace.
+
+<details>
+<summary><strong>Search, editing, performance and recovery details</strong></summary>
 
 - References and implementations use text-based searches without compiler indexes. Implicit/SAM usages and Java
   inheritors can be missed. Rename can leave Java overrides unchanged.
@@ -122,45 +156,80 @@ trigger a reimport. Unsaved source text is preserved.
 - A reimport failure before host updates preserves the previous snapshot. A failure after updates begin requires
   restarting the server.
 
+</details>
+
 ## Development
 
-Generate the fixture's BSP connection once, then run the tests from the repository root:
+### Build from source
+
+Requires **Git, sbt and JDK 25**. From this repository's root, build the pinned Scala plugin in a sibling checkout,
+then build the server distribution:
+
+```sh
+export JAVA_HOME=/absolute/path/to/jdk-25
+
+git clone https://github.com/JetBrains/intellij-scala ../intellij-scala
+git -C ../intellij-scala checkout 491569803c6c3c2f93a0bda51490425fda237fc0
+(
+  cd ../intellij-scala
+  sbt --java-home "$JAVA_HOME" packageArtifactZip
+)
+
+sbt --java-home "$JAVA_HOME" dist
+```
+
+The output is `target/dist/`, with the launcher at `target/dist/bin/scala-analyzer`. Keep `bin/` and `lib/` together
+when moving the distribution.
+
+The IntelliJ Platform version and Scala plugin revision are pinned in [build.sbt](build.sbt). By default, the build
+reads jars from `../intellij-scala/target/plugin/Scala/lib` and verifies the checkout's revision. Set
+`SCALA_PLUGIN_LIB` to use another plugin build's `Scala/lib` directory. This skips the revision check; the supplied
+jars must still match the host's platform dependencies.
+
+### Run checks
+
+Generate the fixture's BSP connection once, then run the tests and Scaladoc from the repository root:
 
 ```sh
 (
   cd fixtures/bsp-project
   sbt --java-home "$JAVA_HOME" bspConfig
 )
-sbt --java-home "$JAVA_HOME" test
+sbt --java-home "$JAVA_HOME" test 'Compile/doc'
 ```
 
 The suite covers PSI semantics, module resolution, editing, BSP imports, formatting, LSP requests and the reviewed
-platform-adapter surface. Additional tools in [src/test/scala/scalapsihost/oracle](src/test/scala/scalapsihost/oracle)
-compare selected upstream plugin fixtures; their source files document the supported inputs.
+platform-adapter surface. Additional [oracle tools](src/test/scala/scalaanalyzer/oracle) compare selected upstream
+plugin fixtures; their source files document the supported inputs.
 
 To check a built distribution over stdio with Python 3:
 
 ```sh
 python3 dist/smoke-test.py \
-  target/dist/bin/scala-psi-host \
+  target/dist/bin/scala-analyzer \
   fixtures/bsp-project \
   fixtures/bsp-project/app/src/main/scala/app/Main.scala \
   6 53
 ```
 
-This checks initialization, document opening, diagnostics, hover, definition and shutdown. Positions are zero-based.
+This checks initialization, the server name, document opening, diagnostics, hover, definition and shutdown.
+Positions are zero-based.
 
-CI builds the pinned upstream plugin, runs the suite and Scaladoc checks, packages the server/VSIX, and exercises
-both the extracted server and installed extension on the supported platforms. Numeric version tags (for example,
-`0.1.0`) publish the exact checked artifacts to GitHub Releases. `version.sbt` and the VSIX manifest must agree.
-`build-info.json` records the source/dependency coordinates and packaged-file hashes. No Marketplace publication
-is performed by this workflow.
+### Release verification
 
-See [ROADMAP.md](ROADMAP.md) for planned work and [CHANGELOG.md](CHANGELOG.md) for release history.
+[CI](.github/workflows/build.yml) builds the pinned upstream plugin, runs the suite and Scaladoc checks, packages
+the server and VSIX, and exercises both the extracted server and installed extension on the supported platforms.
+Numeric version tags (for example, `0.1.0`) publish the exact checked artifacts to GitHub Releases.
 
-## License
+`version.sbt` and the VSIX manifest must agree. Each release includes `build-info.json` with source/dependency
+coordinates and packaged-file hashes, plus `SHA256SUMS`. The workflow does not publish to the VS Code Marketplace.
+
+For planned work, see the [roadmap](ROADMAP.md). For release history, see the [changelog](CHANGELOG.md).
+
+## License and acknowledgements
 
 Licensed under the [Apache License 2.0](LICENSE). See [NOTICE](NOTICE) for attribution.
 
-scala-psi-host builds on the Scala plugin for IntelliJ IDEA and the IntelliJ Platform by JetBrains. It is not
-affiliated with or endorsed by JetBrains. IntelliJ and IntelliJ IDEA are trademarks of JetBrains s.r.o.
+scala-analyzer builds on the [Scala plugin for IntelliJ IDEA](https://github.com/JetBrains/intellij-scala) and the
+[IntelliJ Platform](https://github.com/JetBrains/intellij-community) by JetBrains. It is not affiliated with or
+endorsed by JetBrains. IntelliJ and IntelliJ IDEA are trademarks of JetBrains s.r.o.

@@ -1,13 +1,13 @@
 {
-  "name": "scala-psi-host",
-  "displayName": "Scala (scala-psi-host)",
-  "description": "Scala diagnostics, completion, formatting, navigation, symbols and semantic colors from the IntelliJ Scala plugin, through the scala-psi-host language server.",
+  "name": "scala-analyzer",
+  "displayName": "Scala (scala-analyzer)",
+  "description": "Scala diagnostics, completion, formatting, navigation, symbols and semantic colors from the IntelliJ Scala plugin, through the scala-analyzer language server.",
   "version": "0.1.0",
   "publisher": "brurdgz",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/BruRdgz/scala-psi-host"
+    "url": "https://github.com/BruRdgz/scala-analyzer"
   },
   "engines": {
     "vscode": "^1.91.0"
@@ -24,40 +24,40 @@
   "main": "./extension.js",
   "contributes": {
     "configuration": {
-      "title": "scala-psi-host",
+      "title": "scala-analyzer",
       "properties": {
-        "scalaPsiHost.serverPath": {
+        "scalaAnalyzer.serverPath": {
           "type": "string",
           "default": "",
-          "description": "Path to bin/scala-psi-host of a built distribution (sbt dist)."
+          "description": "Path to bin/scala-analyzer of a built distribution (sbt dist)."
         },
-        "scalaPsiHost.javaHome": {
+        "scalaAnalyzer.javaHome": {
           "type": "string",
           "default": "",
           "description": "JDK 25 home for the server. Empty: the JAVA_HOME of VS Code's environment."
         },
-        "scalaPsiHost.debugLog": {
+        "scalaAnalyzer.debugLog": {
           "type": "boolean",
           "default": false,
-          "description": "Log every request the server answers, with its time (SCALA_PSI_HOST_LOG=debug). Takes effect when the server restarts."
+          "description": "Log every request the server answers, with its time (SCALA_ANALYZER_LOG=debug). Takes effect when the server restarts."
         }
       }
     },
     "configurationDefaults": {
       "[scala]": {
-        "editor.defaultFormatter": "brurdgz.scala-psi-host"
+        "editor.defaultFormatter": "brurdgz.scala-analyzer"
       }
     },
     "commands": [
       {
-        "command": "scalaPsiHost.showStatus",
+        "command": "scalaAnalyzer.showStatus",
         "title": "Show Status",
-        "category": "scala-psi-host"
+        "category": "scala-analyzer"
       },
       {
-        "command": "scalaPsiHost.showLog",
+        "command": "scalaAnalyzer.showLog",
         "title": "Show Log File",
-        "category": "scala-psi-host"
+        "category": "scala-analyzer"
       }
     ]
   },

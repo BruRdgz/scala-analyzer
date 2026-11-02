@@ -1,0 +1,18 @@
+#!/bin/sh
+# The scala-analyzer language server, speaking LSP on stdin and stdout. Run it from an editor in a project that
+# has a BSP connection file (.bsp/, e.g. from `sbt bspConfig`).
+#
+# Needs JDK 25: JAVA_HOME, or java on the PATH.
+# SCALA_ANALYZER_STATE: where the platform keeps its state (default: $XDG_CACHE_HOME/scala-analyzer)
+# SCALA_ANALYZER_HEAP:  maximum heap (default: 2g)
+set -e
+here=$(cd "$(dirname "$0")/.." && pwd)
+java=${JAVA_HOME:+$JAVA_HOME/bin/}java
+state=${SCALA_ANALYZER_STATE:-${XDG_CACHE_HOME:-$HOME/.cache}/scala-analyzer}
+# lib/classpath lists the jars in classpath order; the Scala plugin's are under lib/plugin/.
+classpath=$(sed "s|^|$here/|" "$here/lib/classpath" | paste -s -d ':' -)
+plugin=$(grep '^lib/plugin/' "$here/lib/classpath" | sed "s|^|$here/|" | paste -s -d ':' -)
+mkdir -p "$state"
+exec "$java" -Xmx"${SCALA_ANALYZER_HEAP:-2g}" -Djava.awt.headless=true --add-opens=java.base/java.lang=ALL-UNNAMED \
+  -Dscalaanalyzer.stateDir="$state" -Dscalaanalyzer.scalaPluginJars="$plugin" \
+  -cp "$classpath" scalaanalyzer.lsp.Main

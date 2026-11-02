@@ -6,7 +6,7 @@ const vscode = require('vscode');
 const timeoutMs = 10 * 60 * 1000;
 
 async function journey() {
-  const extension = vscode.extensions.getExtension('brurdgz.scala-psi-host');
+  const extension = vscode.extensions.getExtension('brurdgz.scala-analyzer');
   assert(extension, 'the packaged extension must be installed');
   await extension.activate();
   assert(extension.isActive, 'the installed extension must activate');

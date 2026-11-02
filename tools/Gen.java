@@ -2,12 +2,12 @@ import java.lang.reflect.*;
 import java.util.*;
 
 /**
- * Generates `scalapsihost.platform.Host_<Simple>` subclasses of abstract platform classes: every abstract method
- * forwards to `scalapsihost.platform.Dispatch.call("<Simple>.<method>", args)`. Uses erased signatures.
+ * Generates `scalaanalyzer.platform.Host_<Simple>` subclasses of abstract platform classes: every abstract method
+ * forwards to `scalaanalyzer.platform.Dispatch.call("<Simple>.<method>", args)`. Uses erased signatures.
  * Usage: java -cp <classpath> Gen.java <outDir> <fqcn>...
  */
 public class Gen {
-  private static final String PACKAGE = "scalapsihost.platform";
+  private static final String PACKAGE = "scalaanalyzer.platform";
 
   // Methods that are not abstract but throw in the base class, and that the host answers: forwarded like the abstract ones.
   static final Map<String, Set<String>> FORWARDED_CONCRETE = Map.of(

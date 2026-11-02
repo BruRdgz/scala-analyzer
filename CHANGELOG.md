@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- Rename the project to `scala-analyzer`, including the launcher, release archives, VS Code extension,
+  Scala/Java package (`scalaanalyzer`), JVM properties and custom protocol identifiers.
+- Migration from 0.1.0: install the new `brurdgz.scala-analyzer` extension and remove the old one; update
+  `scalaPsiHost.*` settings and commands to `scalaAnalyzer.*`, launcher paths to `bin/scala-analyzer`, and
+  `SCALA_PSI_HOST_*` environment variables to `SCALA_ANALYZER_*`. Update any explicit formatter ID too.
+  The default cache directory is now `scala-analyzer` under `$XDG_CACHE_HOME` or `~/.cache`; set
+  `SCALA_ANALYZER_STATE` to the previous directory to reuse it. Direct JVM clients must use
+  `scalaanalyzer.*` properties/packages, and custom LSP clients must use `scalaAnalyzer/state`,
+  `scalaAnalyzer/status` and `scalaAnalyzer.completeInsertion`. Old identifiers are not aliases.
+
 ## 0.1.0 — 2026-11-01
 
 First stable release for the documented Scala 2/3 and mixed Java workspace scope.

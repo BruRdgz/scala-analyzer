@@ -19,7 +19,7 @@ val inlayPlatformJar = taskKey[File]("The platform classes used by Scala hints, 
 
 val scalaPluginJars = taskKey[Seq[File]]("The Scala plugin's jars that go on the classpath")
 
-val dist = taskKey[File]("Builds the language server's distribution: bin/scala-psi-host and lib/ in target/dist")
+val dist = taskKey[File]("Builds the language server's distribution: bin/scala-analyzer and lib/ in target/dist")
 
 ThisBuild / scalaVersion := "3.9.0"
 // The compiler's import suggestions (on a "not found" error) load every class of the classpath's packages; some
@@ -29,13 +29,13 @@ ThisBuild / scalacOptions += "-Ximport-suggestion-timeout:0"
 lazy val root = (project in file("."))
   .configs(Fixtures, Fixtures212, InlayPlatform)
   .settings(
-    name := "scala-psi-host",
+    name := "scala-analyzer",
     Compile / packageOptions += Package.ManifestAttributes("Implementation-Version" -> version.value),
     initialize := {
       val _ = initialize.value
       val running = java.lang.Runtime.version()
       if (running.feature() < requiredJavaVersion)
-        sys.error(s"scala-psi-host needs sbt to run on JDK $requiredJavaVersion+ (found $running); use `sbt --java-home <jdk25>`")
+        sys.error(s"scala-analyzer needs sbt to run on JDK $requiredJavaVersion+ (found $running); use `sbt --java-home <jdk25>`")
     },
     scalaPluginLib := (sys.env.get("SCALA_PLUGIN_LIB") match {
       // A build of the plugin from elsewhere: its revision is the responsibility of whoever points to it.
@@ -178,7 +178,7 @@ lazy val root = (project in file("."))
       val dependencies = (Compile / dependencyClasspath).value.filter(_.data.getName.endsWith(".jar")).map { jar =>
         jar.data -> jar.get(moduleID.key).fold(jar.data.getName)(m => s"${m.organization}.${jar.data.getName}")
       }
-      val jars = ((Compile / packageBin).value -> "scala-psi-host.jar") +: dependencies
+      val jars = ((Compile / packageBin).value -> "scala-analyzer.jar") +: dependencies
       // The classpath in order (the host first), as paths relative to the distribution; the plugin's jars apart.
       val entries = jars.map { case (jar, name) =>
         val entry = (if (pluginJars(jar)) "lib/plugin/" else "lib/") + name
@@ -188,14 +188,14 @@ lazy val root = (project in file("."))
       }
       IO.writeLines(out / "lib" / "classpath", entries)
       for (resource <- Seq("LICENSE", "NOTICE", "README.md")) IO.copyFile(baseDirectory.value / resource, out / resource)
-      IO.copyFile(baseDirectory.value / "dist" / "scala-psi-host", out / "bin" / "scala-psi-host")
-      (out / "bin" / "scala-psi-host").setExecutable(true)
+      IO.copyFile(baseDirectory.value / "dist" / "scala-analyzer", out / "bin" / "scala-analyzer")
+      (out / "bin" / "scala-analyzer").setExecutable(true)
       out
     },
     // The language server's fixture modules and the measured adapter ledger each need their own host JVM:
     // other suites may open the same modules or record calls outside the surface scenario.
     Test / testGrouping := {
-      val isolated = Set("scalapsihost.lsp.LanguageServerTest", "scalapsihost.AdapterSurfaceTest")
+      val isolated = Set("scalaanalyzer.lsp.LanguageServerTest", "scalaanalyzer.AdapterSurfaceTest")
       val (own, shared) = (Test / definedTests).value.partition(test => isolated(test.name))
       val fork = Tests.SubProcess((Test / forkOptions).value)
       Seq(Tests.Group("shared", shared, fork)) ++ own.map(test => Tests.Group(test.name, Seq(test), fork))
@@ -218,11 +218,11 @@ lazy val root = (project in file("."))
         // As the IDE's and the plugin's test JVMs: in unit-test mode the platform records annotation-builder creation
         // traces through Throwable internals.
         "--add-opens=java.base/java.lang=ALL-UNNAMED",
-        s"-Dscalapsihost.stateDir=$state",
-        s"-Dscalapsihost.scalaPluginJars=${scalaPluginJars.value.mkString(java.io.File.pathSeparator)}",
-        s"-Dscalapsihost.fixture.scalaLibrary=${fixture(Fixtures)}",
-        s"-Dscalapsihost.fixture.scalaLibrarySources=${fixture(Fixtures, "sources")}",
-        s"-Dscalapsihost.fixture.scalaLibrary212=${fixture(Fixtures212)}",
+        s"-Dscalaanalyzer.stateDir=$state",
+        s"-Dscalaanalyzer.scalaPluginJars=${scalaPluginJars.value.mkString(java.io.File.pathSeparator)}",
+        s"-Dscalaanalyzer.fixture.scalaLibrary=${fixture(Fixtures)}",
+        s"-Dscalaanalyzer.fixture.scalaLibrarySources=${fixture(Fixtures, "sources")}",
+        s"-Dscalaanalyzer.fixture.scalaLibrary212=${fixture(Fixtures212)}",
       )
     },
   )
