@@ -248,6 +248,8 @@ class LanguageServerTest extends munit.FunSuite {
     assert(capabilities.getTypeDefinitionProvider.getLeft)
     assert(capabilities.getReferencesProvider.getLeft)
     assert(capabilities.getImplementationProvider.getLeft)
+    assert(capabilities.getCallHierarchyProvider.getLeft)
+    assert(capabilities.getTypeHierarchyProvider.getLeft)
     assert(capabilities.getRenameProvider.getRight.getPrepareProvider)
     assert(capabilities.getWorkspaceSymbolProvider.getLeft)
     assert(capabilities.getDocumentHighlightProvider.getLeft)
@@ -270,6 +272,8 @@ class LanguageServerTest extends munit.FunSuite {
     scalaSelector(capabilities.getInlayHintProvider.getRight)
     scalaSelector(capabilities.getSelectionRangeProvider.getRight)
     scalaSelector(capabilities.getImplementationProvider.getRight)
+    scalaSelector(capabilities.getCallHierarchyProvider.getRight)
+    scalaSelector(capabilities.getTypeHierarchyProvider.getRight)
     scalaSelector(capabilities.getRenameProvider.getRight)
     scalaSelector(capabilities.getSemanticTokensProvider)
     assertEquals(capabilities.getCompletionProvider.getTriggerCharacters.asScala.toSeq, Seq("."))
@@ -459,6 +463,125 @@ class LanguageServerTest extends munit.FunSuite {
     // `Shape` (line 2) and its `area` (line 3): Square on lines 6-7 and Circle on lines 10-11.
     assertEquals(implementations(new Position(2, 8)), sorted(Seq(span(shape, 6, 12, 18), span(shape, 10, 12, 18))))
     assertEquals(implementations(new Position(3, 7)), sorted(Seq(span(shape, 7, 6, 10), span(shape, 11, 6, 10))))
+  }
+
+  test("finds callers and callees with call-site ranges and rejects non-method call targets") {
+    val service = server.getTextDocumentService
+    def prepare(path: Path, line: Int, column: Int) = service.prepareCallHierarchy(
+      new CallHierarchyPrepareParams(document(path), new Position(line, column))).get(1, TimeUnit.MINUTES).asScala.toSeq
+    val text = prepare(greeting, 3, 7).head
+    assertEquals(text.getName, "text")
+    assertEquals(text.getSelectionRange, new Range(new Position(3, 6), new Position(3, 10)))
+    assert(text.getRange.getStart.getCharacter < text.getSelectionRange.getStart.getCharacter)
+    val incoming = service.callHierarchyIncomingCalls(new CallHierarchyIncomingCallsParams(text))
+      .get(1, TimeUnit.MINUTES).asScala.toSeq
+    assertEquals(incoming.map(_.getFrom.getName), Seq("main"))
+    assertEquals(incoming.head.getFromRanges.asScala.toSeq, Seq(new Range(new Position(6, 49), new Position(6, 53))))
+    val outgoing = service.callHierarchyOutgoingCalls(new CallHierarchyOutgoingCallsParams(incoming.head.getFrom))
+      .get(1, TimeUnit.MINUTES).asScala.toSeq
+    val toText = outgoing.filter(_.getTo.getName == "text")
+    assertEquals(toText.size, 1)
+    assertEquals(toText.head.getFromRanges, incoming.head.getFromRanges)
+    val libraryCalls = outgoing.filter(_.getTo.getName == "println")
+    assertEquals(libraryCalls.size, 1)
+    libraryCalls.foreach { call =>
+      assert(Files.exists(Path.of(java.net.URI.create(call.getTo.getUri))))
+      assertEquals(call.getFromRanges.asScala.toSeq, Seq(new Range(new Position(7, 4), new Position(7, 11))))
+      val callers = service.callHierarchyIncomingCalls(new CallHierarchyIncomingCallsParams(call.getTo))
+        .get(1, TimeUnit.MINUTES).asScala.toSeq
+      assert(callers.exists(c => c.getFrom.getName == "main" && c.getFrom.getUri == main.toUri.toString), callers)
+    }
+    assertEquals(prepare(shape, 2, 8), Seq.empty)
+    val abstractArea = prepare(shape, 3, 7).head
+    val overrides = service.callHierarchyOutgoingCalls(new CallHierarchyOutgoingCallsParams(abstractArea))
+      .get(1, TimeUnit.MINUTES).asScala.toSeq
+    assertEquals(overrides.map(_.getTo.getSelectionRange.getStart.getLine).toSet, Set(7, 11))
+    assert(overrides.forall(_.getFromRanges.isEmpty))
+  }
+
+  test("finds direct type children and follows library hierarchy items") {
+    val service = server.getTextDocumentService
+    def prepare(line: Int, column: Int) = service.prepareTypeHierarchy(
+      new TypeHierarchyPrepareParams(document(shape), new Position(line, column))).get(1, TimeUnit.MINUTES).get(0)
+    val parent = prepare(2, 8)
+    assertEquals(parent.getName, "Shape")
+    assertEquals(parent.getKind, SymbolKind.Interface)
+    val children = service.typeHierarchySubtypes(new TypeHierarchySubtypesParams(parent))
+      .get(1, TimeUnit.MINUTES).asScala.toSeq
+    assertEquals(children.map(_.getName).toSet, Set("Square", "Circle"))
+    val supers = service.typeHierarchySupertypes(new TypeHierarchySupertypesParams(prepare(6, 13)))
+      .get(1, TimeUnit.MINUTES).asScala.toSeq
+    assert(supers.exists(_.getName == "Shape"), supers)
+    val library = supers.filter(_.getUri != shape.toUri.toString)
+    assert(library.nonEmpty, supers)
+    library.foreach { item =>
+      assert(Files.exists(Path.of(java.net.URI.create(item.getUri))))
+      service.typeHierarchySupertypes(new TypeHierarchySupertypesParams(item)).get(1, TimeUnit.MINUTES)
+      val subtypes = service.typeHierarchySubtypes(new TypeHierarchySubtypesParams(item)).get(1, TimeUnit.MINUTES)
+      assert(subtypes.asScala.forall(_.getUri.startsWith(fixture.toUri.toString)))
+    }
+  }
+
+  test("groups Java calls and retains constructor call sites") {
+    val service = server.getTextDocumentService
+    val javaFile = fixture.resolve("core/src/main/java/core/Shout.java")
+    val text = "package core; class Shout { public Shout() {} int value() { return 1; } int caller() { return new Shout().value() + value(); } }"
+    def change(value: String, version: Int): Unit = service.didChange(new DidChangeTextDocumentParams(
+      new VersionedTextDocumentIdentifier(javaFile.toUri.toString, version), JavaList.of(new TextDocumentContentChangeEvent(value))))
+    def at(start: Int, length: Int) = new Range(new Position(0, start), new Position(0, start + length))
+    try {
+      change(text, 170)
+      val caller = service.prepareCallHierarchy(new CallHierarchyPrepareParams(document(javaFile), new Position(0, text.indexOf("caller"))))
+        .get(1, TimeUnit.MINUTES).get(0)
+      val calls = service.callHierarchyOutgoingCalls(new CallHierarchyOutgoingCallsParams(caller))
+        .get(1, TimeUnit.MINUTES).asScala.toSeq
+      assertEquals(calls.size, 2)
+      assertEquals(calls.find(_.getTo.getName == "value").get.getFromRanges.asScala.toSeq,
+        Seq(at(text.indexOf(".value") + 1, 5), at(text.lastIndexOf("value"), 5)))
+      val constructor = calls.find(_.getTo.getKind == SymbolKind.Constructor).get
+      assertEquals(constructor.getFromRanges.asScala.toSeq, Seq(at(text.indexOf("new Shout"), "new Shout()".length)))
+    } finally {
+      change(Files.readString(javaFile), 171)
+      service.documentSymbol(new DocumentSymbolParams(document(javaFile))).get(1, TimeUnit.MINUTES)
+    }
+  }
+
+  test("selects type hierarchy targets for classes, constructors, traits and aliases and rejects stale items") {
+    val service = server.getTextDocumentService
+    val cases = Seq(
+      "class Base; class Impl extends <caret>Base" -> "Base",
+      "trait Trait; class Base(i: Int); class Impl extends <caret>Base(1) with Trait" -> "Base",
+      "trait Trait; class Base(i: Int) { def this(s: String) = this(1) }; class Impl extends <caret>Base(\"\") with Trait" -> "Base",
+      "trait Trait; class Impl extends <caret>Trait" -> "Trait",
+      "class Base; object Aliases { type Alias = Base }; class Impl extends Aliases.<caret>Alias" -> "Base",
+    )
+    def change(text: String, version: Int): Unit = service.didChange(new DidChangeTextDocumentParams(
+      new VersionedTextDocumentIdentifier(shape.toUri.toString, version), JavaList.of(new TextDocumentContentChangeEvent(text))))
+    try {
+      for (((marked, expected), index) <- cases.zipWithIndex) {
+        val cursor = marked.indexOf("<caret>")
+        change(marked.replace("<caret>", ""), 180 + index)
+        val items = service.prepareTypeHierarchy(new TypeHierarchyPrepareParams(document(shape), new Position(0, cursor)))
+          .get(1, TimeUnit.MINUTES)
+        assertEquals(items.asScala.map(_.getName).toSeq, Seq(expected), marked)
+      }
+      val derived = "class Derived extends java.util.ArrayList[String]"
+      change(derived, 188)
+      val child = service.prepareTypeHierarchy(new TypeHierarchyPrepareParams(document(shape), new Position(0, 7)))
+        .get(1, TimeUnit.MINUTES).get(0)
+      val base = service.typeHierarchySupertypes(new TypeHierarchySupertypesParams(child))
+        .get(1, TimeUnit.MINUTES).asScala.find(_.getName == "ArrayList").get
+      val ancestors = service.typeHierarchySupertypes(new TypeHierarchySupertypesParams(base)).get(1, TimeUnit.MINUTES)
+      assert(ancestors.asScala.exists(_.getName == "AbstractList"), ancestors)
+      change("trait Before; class Child extends Before", 190)
+      val stale = service.prepareTypeHierarchy(new TypeHierarchyPrepareParams(document(shape), new Position(0, 7)))
+        .get(1, TimeUnit.MINUTES).get(0)
+      change("trait After; class Child extends After", 191)
+      assert(service.typeHierarchySubtypes(new TypeHierarchySubtypesParams(stale)).get(1, TimeUnit.MINUTES).isEmpty)
+    } finally {
+      change(Files.readString(shape), 192)
+      service.documentSymbol(new DocumentSymbolParams(document(shape))).get(1, TimeUnit.MINUTES)
+    }
   }
 
   test("finds the project's symbols by name, and no library symbol") {

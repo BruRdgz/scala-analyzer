@@ -2,7 +2,7 @@ package scalaanalyzer.lsp
 
 import com.intellij.diff.comparison.DiffTooBigException
 import com.intellij.openapi.progress.ProcessCanceledException
-import com.google.gson.JsonPrimitive
+import com.google.gson.{JsonObject, JsonPrimitive}
 import org.eclipse.lsp4j.*
 import org.eclipse.lsp4j.jsonrpc.ResponseErrorException
 import org.eclipse.lsp4j.jsonrpc.messages.{Either as LspEither, Either3 as LspEither3, ResponseError, ResponseErrorCode, Tuple}
@@ -10,7 +10,7 @@ import org.eclipse.lsp4j.services.*
 
 import scalaanalyzer.{LineColumn, ScalaPsiHost}
 import scalaanalyzer.build.ScalafmtFormatting
-import scalaanalyzer.language.{Completion, CompletionChoice, CompletionFollowUp, FileProblem, Fold, OutlineSymbol, ProblemSeverity, Rename, SignatureChoices, SourceSpan, TextChange, WorkspaceSymbolKind}
+import scalaanalyzer.language.{Completion, CompletionChoice, CompletionFollowUp, FileProblem, Fold, HierarchyItem, HierarchyTarget, OutlineSymbol, ProblemSeverity, Rename, SignatureChoices, SourceSpan, TextChange, WorkspaceSymbolKind}
 import scalaanalyzer.platform.{CallLog, HostLock, HostLog}
 import scalaanalyzer.workspace.ProjectSession
 
@@ -249,6 +249,8 @@ final class ScalaLanguageServer(
       capabilities.setInlayHintProvider(scalaOnly(new InlayHintRegistrationOptions))
       capabilities.setSelectionRangeProvider(scalaOnly(new SelectionRangeRegistrationOptions))
       capabilities.setImplementationProvider(scalaOnly(new ImplementationRegistrationOptions))
+      capabilities.setCallHierarchyProvider(scalaOnly(new CallHierarchyRegistrationOptions))
+      capabilities.setTypeHierarchyProvider(scalaOnly(new TypeHierarchyRegistrationOptions))
       scalaOnly(rename)
       scalaOnly(tokens)
       val signatures = scalaOnly(new SignatureHelpRegistrationOptions)
@@ -270,6 +272,8 @@ final class ScalaLanguageServer(
       capabilities.setDocumentRangeFormattingProvider(true)
       capabilities.setReferencesProvider(true)
       capabilities.setImplementationProvider(true)
+      capabilities.setCallHierarchyProvider(true)
+      capabilities.setTypeHierarchyProvider(true)
       capabilities.setCodeActionProvider(new CodeActionOptions(actionKinds))
       languageRegistrations = Seq.empty
     }
@@ -705,6 +709,44 @@ final class ScalaLanguageServer(
         spanLocations(s.implementations(path, lineColumn(params.getPosition)))
       }
 
+    /** Prepares method declarations accepted by the plugin's usage targeting. */
+    override def prepareCallHierarchy(params: CallHierarchyPrepareParams): CompletableFuture[JavaList[CallHierarchyItem]] =
+      onRead("prepareCallHierarchy", params.getTextDocument, java.util.List.of[CallHierarchyItem]()) { (s, path) =>
+        s.prepareHierarchy(path, lineColumn(params.getPosition), types = false).map(callHierarchyItem).asJava
+      }
+
+    /** Returns plugin caller groups with the references' ranges. */
+    override def callHierarchyIncomingCalls(params: CallHierarchyIncomingCallsParams): CompletableFuture[JavaList[CallHierarchyIncomingCall]] =
+      hierarchyRead("incomingCalls", params.getItem.getData, java.util.List.of[CallHierarchyIncomingCall]()) { (s, path, target) =>
+        s.hierarchyCalls(path, target, incoming = true).map(c =>
+          new CallHierarchyIncomingCall(callHierarchyItem(c.item), c.ranges.map(range).asJava)).asJava
+      }
+
+    /** Returns callee groups with call sites in the requested caller. */
+    override def callHierarchyOutgoingCalls(params: CallHierarchyOutgoingCallsParams): CompletableFuture[JavaList[CallHierarchyOutgoingCall]] =
+      hierarchyRead("outgoingCalls", params.getItem.getData, java.util.List.of[CallHierarchyOutgoingCall]()) { (s, path, target) =>
+        s.hierarchyCalls(path, target, incoming = false).map(c =>
+          new CallHierarchyOutgoingCall(callHierarchyItem(c.item), c.ranges.map(range).asJava)).asJava
+      }
+
+    /** Uses the Scala type hierarchy provider's target selection. */
+    override def prepareTypeHierarchy(params: TypeHierarchyPrepareParams): CompletableFuture[JavaList[TypeHierarchyItem]] =
+      onRead("prepareTypeHierarchy", params.getTextDocument, java.util.List.of[TypeHierarchyItem]()) { (s, path) =>
+        s.prepareHierarchy(path, lineColumn(params.getPosition), types = true).map(typeHierarchyItem).asJava
+      }
+
+    /** Returns direct supertypes, including navigable library declarations. */
+    override def typeHierarchySupertypes(params: TypeHierarchySupertypesParams): CompletableFuture[JavaList[TypeHierarchyItem]] =
+      hierarchyRead("supertypes", params.getItem.getData, java.util.List.of[TypeHierarchyItem]()) { (s, path, target) =>
+        s.hierarchyTypes(path, target, subtypes = false).map(typeHierarchyItem).asJava
+      }
+
+    /** Returns direct subtypes in project sources. */
+    override def typeHierarchySubtypes(params: TypeHierarchySubtypesParams): CompletableFuture[JavaList[TypeHierarchyItem]] =
+      hierarchyRead("subtypes", params.getItem.getData, java.util.List.of[TypeHierarchyItem]()) { (s, path, target) =>
+        s.hierarchyTypes(path, target, subtypes = true).map(typeHierarchyItem).asJava
+      }
+
     /** Returns applicable code actions, with versioned edits for actions that can be applied immediately. */
     override def codeAction(params: CodeActionParams): CompletableFuture[java.util.List[LspEither[Command, CodeAction]]] =
       onRead("codeAction", params.getTextDocument, java.util.List.of[LspEither[Command, CodeAction]]()) { (s, path) =>
@@ -836,6 +878,54 @@ final class ScalaLanguageServer(
         case NonFatal(e) => HostLog.error(s"problems of $path failed", e)
       }
     }
+
+  /** Encodes the documented host identity without retaining PSI or depending on case-class deserialization. */
+  private def hierarchyData(target: HierarchyTarget): JsonObject = {
+    val data = new JsonObject
+    data.addProperty("uri", target.uri)
+    data.addProperty("offset", target.offset)
+    data.addProperty("name", target.name)
+    target.libraryClass.foreach(data.addProperty("libraryClass", _))
+    data
+  }
+
+  /** Validates opaque client data before scheduling a hierarchy read against its project document. */
+  private def hierarchyRead[T](kind: String, data: Object, outside: => T)
+      (request: (ProjectSession, Path, HierarchyTarget) => T): CompletableFuture[T] = {
+    val target = data match {
+      case values: JsonObject =>
+        def string(key: String): Option[String] = Option(values.get(key))
+          .filter(v => v.isJsonPrimitive && v.getAsJsonPrimitive.isString).map(_.getAsString)
+        for {
+          uri <- string("uri")
+          name <- string("name")
+          offsetValue <- Option(values.get("offset")).filter(v => v.isJsonPrimitive && v.getAsJsonPrimitive.isNumber)
+          offset <- offsetValue.getAsString.toIntOption.filter(_ >= 0)
+          if !values.has("libraryClass") || string("libraryClass").exists(_.nonEmpty)
+        } yield HierarchyTarget(uri, offset, name, string("libraryClass"))
+      case _ => None
+    }
+    target match {
+      case Some(found) => onRead(kind, new TextDocumentIdentifier(found.uri), outside)((s, path) => request(s, path, found))
+      case None => CompletableFuture.completedFuture(outside)
+    }
+  }
+
+  /** Maps the shared declaration model to a call hierarchy item. */
+  private def callHierarchyItem(item: HierarchyItem): CallHierarchyItem = {
+    val result = new CallHierarchyItem(item.name, lspSymbolKind(item.kind), item.location.path.toUri.toString,
+      range(item.location.range), range(item.selectionRange))
+    result.setData(hierarchyData(item.target))
+    result
+  }
+
+  /** Maps the shared declaration model to a type hierarchy item. */
+  private def typeHierarchyItem(item: HierarchyItem): TypeHierarchyItem = {
+    val result = new TypeHierarchyItem(item.name, lspSymbolKind(item.kind), item.location.path.toUri.toString,
+      range(item.location.range), range(item.selectionRange))
+    result.setData(hierarchyData(item.target))
+    result
+  }
 
   /** Converts a host diagnostic to LSP severity, range and source fields. */
   private def diagnostic(problem: FileProblem): org.eclipse.lsp4j.Diagnostic = {

@@ -7,10 +7,11 @@ import com.intellij.lang.java.JavaDocumentationProvider
 import com.intellij.openapi.progress.ProgressManager
 import com.intellij.openapi.editor.Document
 import com.intellij.openapi.editor.colors.TextAttributesKey
+import com.intellij.psi.search.GlobalSearchScope
 import com.intellij.psi.util.PsiTypesUtil
 import com.intellij.openapi.util.TextRange
 import com.intellij.openapi.util.text.StringUtil
-import com.intellij.psi.{PsiClass, PsiCodeBlock, PsiComment, PsiImportList, PsiDocumentManager, PsiElement, PsiEnumConstant, PsiField, PsiFile, PsiJavaFile, PsiMethod, PsiNameIdentifierOwner, PsiNamedElement, PsiRecordComponent, PsiVariable, SyntaxTraverser}
+import com.intellij.psi.{JavaPsiFacade, PsiClass, PsiCodeBlock, PsiComment, PsiImportList, PsiDocumentManager, PsiElement, PsiEnumConstant, PsiField, PsiFile, PsiJavaFile, PsiMethod, PsiNameIdentifierOwner, PsiNamedElement, PsiRecordComponent, PsiVariable, SyntaxTraverser}
 import org.jetbrains.plugins.scala.extensions.PsiNamedElementExt
 import org.jetbrains.plugins.scala.editor.documentationProvider.{ScalaDocQuickInfoGenerator, ScalaDocumentationProvider}
 import org.jetbrains.plugins.scala.highlighter.DefaultHighlighter as H
@@ -21,6 +22,7 @@ import org.jetbrains.plugins.scala.lang.psi.api.statements.{ScEnumCase, ScExtens
 import org.jetbrains.plugins.scala.lang.psi.api.statements.params.ScClassParameter
 import org.jetbrains.plugins.scala.lang.psi.api.toplevel.ScNamedElement
 import org.jetbrains.plugins.scala.lang.psi.api.toplevel.typedef.{ScEnum, ScObject, ScTrait, ScTypeDefinition}
+import org.jetbrains.plugins.scala.lang.psi.light.ScFunctionWrapper
 import org.jetbrains.plugins.scala.lang.refactoring.util.ScalaNamesUtil
 import org.jetbrains.plugins.scala.structureView.element.Element
 
@@ -379,6 +381,112 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
   def implementations(path: Path, at: LineColumn): Seq[SourceSpan] = host.read {
     val sourceFile = file(path)
     ProjectSearch.implementations(sourceFile, offset(document(sourceFile), at)).flatMap(nameSpan).distinct
+  }
+
+  /** A hierarchy declaration located by the same navigation/materialization path as definition. */
+  private def hierarchyItem(element: PsiNamedElement, origin: Path): Option[HierarchyItem] = {
+    val navigation = element.getNavigationElement
+    val targetName = navigation match {
+      case named: PsiNamedElement => named.getName
+      case _ => element.getName
+    }
+    for {
+      location <- if (navigation.getTextOffset < 0) None else sourceLocation(element)
+      targetFile <- Option(navigation.getContainingFile)
+      target <- targetFile.getViewProvider.getVirtualFile match {
+        case source: SourceFile => Some(HierarchyTarget(source.path.toUri.toString,
+          nameRange(navigation).getStartOffset, targetName, None))
+        case _: LibraryFile =>
+          val owner = element match {
+            case clazz: PsiClass => Some(clazz)
+            case method: PsiMethod => Option(method.getContainingClass)
+            case _ => None
+          }
+          owner.flatMap(c => Option(c.getQualifiedName)).map(q =>
+            HierarchyTarget(origin.toUri.toString, nameRange(navigation).getStartOffset, targetName, Some(q)))
+        case _ => None
+      }
+    } yield {
+      HierarchyItem(element.getName, workspaceSymbolKind(element), SourceSpan(location._1, fileRange(targetFile, navigation.getTextRange)),
+        fileRange(targetFile, nameRange(navigation)), target)
+    }
+  }
+
+  /** Converts ranges in either a source buffer or library PSI, which need not have a document. */
+  private def fileRange(file: PsiFile, range: TextRange): (LineColumn, LineColumn) = {
+    val text = file.getText
+    def at(offset: Int): LineColumn = {
+      val position = StringUtil.offsetToLineColumn(text, offset)
+      LineColumn(position.line, position.column)
+    }
+    at(range.getStartOffset) -> at(range.getEndOffset)
+  }
+
+  /** Re-resolves request data; stale offsets must still identify the same declaration name. */
+  private def hierarchyElement(path: Path, target: HierarchyTarget, types: Boolean): Option[PsiNamedElement] = {
+    val source = file(path)
+    val element = target.libraryClass match {
+      case Some(qualified) =>
+        val scope = host.modules.resolveScope(source.getViewProvider.getVirtualFile)
+          .getOrElse(GlobalSearchScope.allScope(host.project))
+        Option(JavaPsiFacade.getInstance(host.project).findClass(qualified, scope)).flatMap { clazz =>
+          if (types) Some(clazz)
+          else {
+            // Java-facing Scala wrappers have the same location but are not the Scala search target.
+            val methods = (clazz.getMethods ++ clazz.getConstructors).toSeq.map {
+              case wrapper: ScFunctionWrapper => wrapper.delegate
+              case method => method
+            }.distinct
+            // Keep binary PSI for search identity; attached-source PSI supplies only the location.
+            val matching = methods.filter { method =>
+              val navigation = method.getNavigationElement
+              method.getName == target.name && navigation.getTextOffset >= 0 &&
+                nameRange(navigation).getStartOffset == target.offset
+            }
+            matching match {
+              case Seq(method) => Some(method)
+              case _ => None
+            }
+          }
+        }
+      case None if target.offset >= 0 && target.offset < source.getTextLength =>
+        if (types) ProjectSearch.typeTarget(source, target.offset)
+        else ProjectSearch.usageTarget(source, target.offset).collect { case method: PsiMethod => method }
+      case _ => None
+    }
+    element.filter(e => e.getName == target.name && nameRange(e.getNavigationElement).getStartOffset == target.offset)
+  }
+
+  /** Prepares method-only call targets or the type provider's class target. */
+  def prepareHierarchy(path: Path, at: LineColumn, types: Boolean): Seq[HierarchyItem] = host.read {
+    val source = file(path)
+    val cursor = offset(document(source), at)
+    val target = if (types) ProjectSearch.typeTarget(source, cursor)
+      else ProjectSearch.usageTarget(source, cursor).collect { case method: PsiMethod => method }
+    target.toSeq.flatMap(hierarchyItem(_, path))
+  }
+
+  /** Call edges, with project callers and the plugin's default project callee scope. */
+  def hierarchyCalls(path: Path, target: HierarchyTarget, incoming: Boolean): Seq[HierarchyCall] = host.read {
+    hierarchyElement(path, target, types = false).toSeq.collect { case method: PsiMethod => method }.flatMap { method =>
+      if (incoming) ProjectSearch.incomingCalls(method).flatMap { (caller, references) =>
+        for {
+          named <- Option(caller).collect { case declaration: PsiNamedElement => declaration }
+          _ <- nameSpan(named)
+          item <- hierarchyItem(named, path)
+        } yield HierarchyCall(item, references.flatMap((source, range) => sourceSpan(source, range).map(_.range)))
+      }
+      else ProjectSearch.outgoingCalls(method).flatMap { (callee, ranges) =>
+        hierarchyItem(callee, path).map(item => HierarchyCall(item, ranges.map(fileRange(method.getNavigationElement.getContainingFile, _))))
+      }
+    }
+  }
+
+  /** Direct superclasses or project-source subclasses, including navigable library supertypes. */
+  def hierarchyTypes(path: Path, target: HierarchyTarget, subtypes: Boolean): Seq[HierarchyItem] = host.read {
+    hierarchyElement(path, target, types = true).toSeq.collect { case clazz: PsiClass => clazz }
+      .flatMap(ProjectSearch.typeChildren(_, subtypes)).filter(c => !subtypes || nameSpan(c).nonEmpty)
+      .flatMap(hierarchyItem(_, path))
   }
 
   /** The project's symbols whose names match `query`, best match first. */

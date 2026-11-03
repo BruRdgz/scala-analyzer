@@ -233,3 +233,35 @@ final case class SemanticToken(
   kind: SemanticTokenKind,
   modifiers: Set[SemanticTokenModifier],
 )
+
+/**
+ * A hierarchy identity without retained PSI. Project items use their source URI and name offset; library items
+ * use the qualified owner class and declaration offset. `uri` remains the originating project document for reads.
+ * `name` rejects stale offsets that now select a different declaration.
+ *
+ * @param uri project source URI, or originating project document for a library declaration
+ * @param offset declaration name offset in its navigation PSI file, in UTF-16 code units
+ * @param name declaration name used to reject stale offsets
+ * @param libraryClass qualified class name for library classes and method owners, absent for project sources
+ */
+final case class HierarchyTarget(uri: String, offset: Int, name: String, libraryClass: Option[String])
+
+/**
+ * A declaration and its full and name ranges, shared by call and type hierarchies.
+ *
+ * @param name declaration name
+ * @param kind declaration category
+ * @param location declaration range in a project or materialized library file
+ * @param selectionRange declaration name range in the same file
+ * @param target identity used to resolve subsequent requests
+ */
+final case class HierarchyItem(name: String, kind: WorkspaceSymbolKind, location: SourceSpan,
+  selectionRange: (LineColumn, LineColumn), target: HierarchyTarget)
+
+/**
+ * A caller or callee with call-site ranges in the caller's document.
+ *
+ * @param item caller for incoming edges, callee for outgoing edges
+ * @param ranges call-site ranges; empty for an override edge without a call site
+ */
+final case class HierarchyCall(item: HierarchyItem, ranges: Seq[(LineColumn, LineColumn)])

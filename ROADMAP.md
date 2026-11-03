@@ -140,7 +140,6 @@ Closed on 2026-10-30 (`v0.1.0-b2`) without inspections: their milestone is still
 
 - A persistent index, for fast startup.
 - `.sbt` files (sbt's meta-build is a build target over BSP).
-- Call and type hierarchy.
 - Test discovery and code lenses over BSP.
 - Refactorings with dialogs in the IDE: extract, inline, change signature.
 - Worksheets; debugging (DAP).

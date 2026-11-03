@@ -4,7 +4,7 @@ import com.intellij.psi.PsiFile
 
 import scalaanalyzer.{HostModule, LineColumn, ScalaPsiHost}
 import scalaanalyzer.build.{BspImport, BuildConnection, CompileSpec, CompilerDiagnostic, DocumentCompiler, ImportedModule, ScalafmtFormatting}
-import scalaanalyzer.language.{CodeActionResult, CompletionChoices, CompletionFollowUp, FileChanges, FileProblem, Fold, InlineHint, Occurrence, OutlineSymbol, ProjectLanguageOperations, SemanticToken, SignatureChoices, SourceSpan, TextChange, WorkspaceSymbolMatch}
+import scalaanalyzer.language.{CodeActionResult, CompletionChoices, CompletionFollowUp, FileChanges, FileProblem, Fold, HierarchyCall, HierarchyItem, HierarchyTarget, InlineHint, Occurrence, OutlineSymbol, ProjectLanguageOperations, SemanticToken, SignatureChoices, SourceSpan, TextChange, WorkspaceSymbolMatch}
 import scalaanalyzer.platform.{HostLock, HostLog}
 
 import java.nio.file.{Files, Path}
@@ -336,6 +336,15 @@ final class ProjectSession private (
    * @return `Seq[SourceSpan]` of distinct declaration-name ranges
    */
   def implementations(path: Path, at: LineColumn): Seq[SourceSpan] = language.implementations(path, at)
+
+  /** Prepares a call or type hierarchy without retaining PSI across requests. */
+  def prepareHierarchy(path: Path, at: LineColumn, types: Boolean): Seq[HierarchyItem] = language.prepareHierarchy(path, at, types)
+
+  /** Resolves a hierarchy item and returns its incoming or outgoing call edges. */
+  def hierarchyCalls(path: Path, target: HierarchyTarget, incoming: Boolean): Seq[HierarchyCall] = language.hierarchyCalls(path, target, incoming)
+
+  /** Resolves a hierarchy item and returns its direct type children. */
+  def hierarchyTypes(path: Path, target: HierarchyTarget, subtypes: Boolean): Seq[HierarchyItem] = language.hierarchyTypes(path, target, subtypes)
 
   /**
    * Searches project symbols by name.

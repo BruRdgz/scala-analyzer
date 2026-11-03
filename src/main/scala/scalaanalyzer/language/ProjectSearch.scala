@@ -1,17 +1,25 @@
 package scalaanalyzer.language
 
 import com.intellij.codeInsight.TargetElementUtil
+import com.intellij.ide.hierarchy.{HierarchyBrowserScopes, HierarchyTreeStructure}
+import com.intellij.ide.hierarchy.call.CallHierarchyNodeDescriptor
+import com.intellij.ide.hierarchy.`type`.{SubtypesHierarchyTreeStructure, SupertypesHierarchyTreeStructure, TypeHierarchyNodeDescriptor}
 import com.intellij.openapi.project.Project
+import com.intellij.openapi.util.TextRange
 import com.intellij.psi.codeStyle.NameUtil
 import com.intellij.psi.search.{GlobalSearchScope, PsiShortNamesCache}
-import com.intellij.psi.search.searches.DefinitionsScopedSearch
-import com.intellij.psi.{PsiClass, PsiElement, PsiFile, PsiNamedElement}
+import com.intellij.psi.search.searches.{DefinitionsScopedSearch, OverridingMethodsSearch}
+import com.intellij.psi.{PsiAnonymousClass, PsiClass, PsiClassOwner, PsiElement, PsiFile, PsiMethod, PsiMethodCallExpression, PsiNamedElement, PsiNewExpression, PsiSyntheticClass}
 import com.intellij.usageView.UsageInfo
 import com.intellij.util.CommonProcessors
 import org.jetbrains.plugins.scala.extensions.PsiNamedElementExt
 import org.jetbrains.plugins.scala.lang.psi.api.toplevel.ScNamedElement
 import org.jetbrains.plugins.scala.findUsages.factory.ScalaFindUsagesHandlerFactory
 import org.jetbrains.plugins.scala.gotoclass.{ScalaGoToClassContributor, ScalaGoToSymbolContributor}
+import org.jetbrains.plugins.scala.hierarchy.{ScalaCalleeMethodsTreeStructure, ScalaCallerMethodsTreeStructure}
+import org.jetbrains.plugins.scala.lang.psi.api.base.{Constructor, ScReference}
+import org.jetbrains.plugins.scala.lang.psi.api.statements.{ScFunction, ScFunctionDefinition, ScTypeAliasDefinition}
+import org.jetbrains.plugins.scala.lang.psi.types.ScTypeExt
 
 import scalaanalyzer.ModuleModel
 import scalaanalyzer.platform.RequestEditor
@@ -20,9 +28,11 @@ import scala.jdk.CollectionConverters.*
 import scala.util.Using
 
 /**
- * Finds project usages, implementations and symbols using the plugin's search handlers.
+ * Finds usages, implementations, hierarchy edges and symbols using the plugin and platform searches.
  *
- * Searches use the project's source scope (see [[ModuleModel.sourcesScope]]). Callers hold the host's read lock.
+ * Usages and implementations use the project's source scope (see [[ModuleModel.sourcesScope]]). Hierarchies use the
+ * IDE's "Production" scope: its default "All" is a named scope, which needs the IDE's scope managers. The host marks
+ * no test sources, so this still covers the whole project. Callers hold the host's read lock.
  */
 object ProjectSearch {
   /**
@@ -97,6 +107,90 @@ object ProjectSearch {
       else if (onReference && others.isEmpty) Seq(source)
       else others
     }
+  }
+
+  /**
+   * Mirrors ScalaTypeHierarchyProvider and its Java enclosing-class fallback. The provider accepts lookup items,
+   * which requires the IDE's LookupManager; the host has no lookup UI, so it uses the same flags without that bit.
+   */
+  def typeTarget(file: PsiFile, offset: Int): Option[PsiClass] = {
+    val target = targetAt(file, offset, TargetElementUtil.ELEMENT_NAME_ACCEPTED | TargetElementUtil.REFERENCED_ELEMENT_ACCEPTED)
+    val scalaTarget = target.flatMap {
+      case clazz: PsiClass => Some(clazz)
+      case Constructor.ofClass(clazz) => Some(clazz)
+      case alias: ScTypeAliasDefinition => alias.aliasedType.toOption.flatMap(_.extractClass)
+      case _ => None
+    }
+    scalaTarget.orElse {
+      Iterator.iterate(Option(file.findElementAt(offset)))(_.flatMap(e => Option(e.getParent)))
+        .takeWhile(_.nonEmpty).flatten.collectFirst {
+          case clazz: PsiClass if !clazz.isInstanceOf[PsiAnonymousClass] && !clazz.isInstanceOf[PsiSyntheticClass] => clazz
+          case owner: PsiClassOwner if owner.getClasses.length == 1 => owner.getClasses.head
+        }
+    }
+  }
+
+  /** Caller descriptors retain the references that the plugin grouped by enclosing declaration. */
+  def incomingCalls(method: PsiMethod): Seq[(PsiElement, Seq[(PsiFile, TextRange)])] = {
+    val tree = new ScalaCallerMethodsTreeStructure(method.getProject, method, HierarchyBrowserScopes.SCOPE_PROJECT)
+    tree.getChildElements(tree.getBaseDescriptor).toSeq.collect { case descriptor: CallHierarchyNodeDescriptor =>
+      descriptor.getEnclosingElement -> descriptor.getReferences.asScala.toSeq.map { reference =>
+        val element = reference.getElement
+        element.getContainingFile -> reference.getRangeInElement.shiftRight(element.getTextRange.getStartOffset)
+      }.distinct
+    }.filter(_._1 != null)
+  }
+
+  /** Mirrors the plugin's callee visitor, which drops the call sites LSP needs, and reuses its scope filter. */
+  def outgoingCalls(method: PsiMethod): Seq[(PsiMethod, Seq[TextRange])] = {
+    class CalleeScope extends ScalaCalleeMethodsTreeStructure(method.getProject, method, HierarchyBrowserScopes.SCOPE_PROJECT) {
+      def accepts(called: PsiMethod): Boolean = isInScope(method.getContainingClass, called, HierarchyBrowserScopes.SCOPE_PROJECT)
+    }
+    val scope = new CalleeScope
+    val calls = scala.collection.mutable.LinkedHashMap.empty[PsiMethod, Vector[TextRange]]
+    def visit(element: PsiElement): Unit = if (element != null) {
+      val target = element match {
+        case reference: ScReference => Option(reference.resolve()).collect { case called: PsiMethod => called }
+        case call: PsiMethodCallExpression => Option(call.getMethodExpression.resolve()).collect { case called: PsiMethod => called }
+        case creation: PsiNewExpression => Option(creation.resolveConstructor())
+        case _ => None
+      }
+      target.filter(scope.accepts).foreach { called =>
+        val range = element match {
+          case reference: ScReference => reference.getRangeInElement.shiftRight(element.getTextRange.getStartOffset)
+          case call: PsiMethodCallExpression =>
+            val reference = call.getMethodExpression
+            reference.getRangeInElement.shiftRight(reference.getTextRange.getStartOffset)
+          case _ => element.getTextRange
+        }
+        calls.update(called, calls.getOrElse(called, Vector.empty) :+ range)
+      }
+      element.getChildren.foreach(visit)
+    }
+    // Call-site ranges belong to the navigation file shown by LSP, including attached library source.
+    val bodyMethod = method.getNavigationElement match {
+      case navigation: PsiMethod => navigation
+      case _ => method
+    }
+    bodyMethod match {
+      case function: ScFunctionDefinition => function.body.foreach(visit)
+      case _: ScFunction =>
+      case _ => visit(bodyMethod.getBody)
+    }
+    // LSP permits an empty list: an override edge has no call site in the caller's document.
+    OverridingMethodsSearch.search(method, method.getUseScope, true).findAll().asScala.filter(scope.accepts)
+      .foreach(called => calls.getOrElseUpdate(called, Vector.empty))
+    calls.toSeq.map((called, ranges) => called -> ranges.distinct)
+  }
+
+  /** Direct type children from the platform hierarchy, without presentation updates. */
+  def typeChildren(clazz: PsiClass, subtypes: Boolean): Seq[PsiClass] = {
+    val tree: HierarchyTreeStructure =
+      if (subtypes) new SubtypesHierarchyTreeStructure(clazz.getProject, clazz, HierarchyBrowserScopes.SCOPE_PROJECT)
+      else new SupertypesHierarchyTreeStructure(clazz.getProject, clazz)
+    tree.getChildElements(tree.getBaseDescriptor).toSeq.collect {
+      case descriptor: TypeHierarchyNodeDescriptor => descriptor.getPsiClass
+    }.collect { case child: PsiClass => child }
   }
 
   /**

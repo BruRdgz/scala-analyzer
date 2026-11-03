@@ -144,13 +144,16 @@ lazy val root = (project in file("."))
         "com/intellij/openapi/editor/ex/FocusChangeListener.class",
         // Java insert handlers read the editor's default parenthesis setting, without opening an editor.
         "com/intellij/openapi/editor/impl/softwrap/SoftWrapAppliancePlaces.class",
+        // Hierarchy descriptors allocate their appearance even when the host never calls their UI update methods.
+        "com/intellij/openapi/roots/ui/CellAppearanceEx.class",
+        "com/intellij/openapi/roots/ui/ModifiableCellAppearanceEx.class",
         "com/intellij/openapi/editor/ex/BidiTextDirection.class",
         "com/intellij/openapi/editor/ex/EditorEx.class",
         "com/intellij/ui/EditorSettingsProvider.class",
         "com/intellij/openapi/ui/DialogWrapper.class", // The plugin's find-usages handlers: their dialogs extend AbstractFindUsagesDialog; the host opens none.
       )
       val includedFamilies = Seq("com/intellij/openapi/editor/ex/EditorSettingsExternalizable",
-        "com/intellij/openapi/editor/actions/CaretStop")
+        "com/intellij/openapi/editor/actions/CaretStop", "com/intellij/openapi/roots/ui/util/CompositeAppearance")
       val directory = target.value / "inlay-platform"
       val out = directory / s"scala-inlay-platform-$platformVersion.jar"
       val slice = FileFunction.cached(streams.value.cacheDirectory / "inlay-platform", FilesInfo.hash, FilesInfo.exists) { _ =>
