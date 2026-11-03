@@ -492,6 +492,9 @@ class LanguageServerTest extends munit.FunSuite {
       assert(callers.exists(c => c.getFrom.getName == "main" && c.getFrom.getUri == main.toUri.toString), callers)
     }
     assertEquals(prepare(shape, 2, 8), Seq.empty)
+    // As in the IDE, a local's reference (`text`, line 8 of Main.scala) selects its method; an object selects nothing.
+    assertEquals(prepare(main, 7, 13).map(_.getName), Seq("main"))
+    assertEquals(prepare(main, 4, 8), Seq.empty)
     val abstractArea = prepare(shape, 3, 7).head
     val overrides = service.callHierarchyOutgoingCalls(new CallHierarchyOutgoingCallsParams(abstractArea))
       .get(1, TimeUnit.MINUTES).asScala.toSeq

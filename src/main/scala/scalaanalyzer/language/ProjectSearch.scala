@@ -2,7 +2,7 @@ package scalaanalyzer.language
 
 import com.intellij.codeInsight.TargetElementUtil
 import com.intellij.ide.hierarchy.{HierarchyBrowserScopes, HierarchyTreeStructure}
-import com.intellij.ide.hierarchy.call.CallHierarchyNodeDescriptor
+import com.intellij.ide.hierarchy.call.{CallHierarchyNodeDescriptor, JavaCallHierarchyProvider}
 import com.intellij.ide.hierarchy.`type`.{SubtypesHierarchyTreeStructure, SupertypesHierarchyTreeStructure, TypeHierarchyNodeDescriptor}
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.util.TextRange
@@ -59,6 +59,13 @@ object ProjectSearch {
    */
   def usageTarget(file: PsiFile, offset: Int): Option[PsiElement] =
     targetAt(file, offset, TargetElementUtil.getInstance.getReferenceSearchFlags)
+
+  /**
+   * The method whose calls the IDE's call hierarchy shows for an editor position: the target itself, or the method
+   * declaring it (a local or a parameter selects its method). The plugin's call trees take only methods.
+   */
+  def callTarget(file: PsiFile, offset: Int): Option[PsiMethod] =
+    usageTarget(file, offset).map(JavaCallHierarchyProvider.getElementForCallHierarchy).collect { case method: PsiMethod => method }
 
   /** Resolves the editor target without accepting lookup items, since the host has no completion lookup UI. */
   private def targetAt(file: PsiFile, offset: Int, flags: Int): Option[PsiElement] =

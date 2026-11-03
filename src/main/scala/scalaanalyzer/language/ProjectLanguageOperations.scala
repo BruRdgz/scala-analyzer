@@ -451,18 +451,18 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
         }
       case None if target.offset >= 0 && target.offset < source.getTextLength =>
         if (types) ProjectSearch.typeTarget(source, target.offset)
-        else ProjectSearch.usageTarget(source, target.offset).collect { case method: PsiMethod => method }
+        else ProjectSearch.callTarget(source, target.offset)
       case _ => None
     }
     element.filter(e => e.getName == target.name && nameRange(e.getNavigationElement).getStartOffset == target.offset)
   }
 
-  /** Prepares method-only call targets or the type provider's class target. */
+  /** Prepares the IDE's call hierarchy method or type hierarchy class at `at`. */
   def prepareHierarchy(path: Path, at: LineColumn, types: Boolean): Seq[HierarchyItem] = host.read {
     val source = file(path)
     val cursor = offset(document(source), at)
     val target = if (types) ProjectSearch.typeTarget(source, cursor)
-      else ProjectSearch.usageTarget(source, cursor).collect { case method: PsiMethod => method }
+      else ProjectSearch.callTarget(source, cursor)
     target.toSeq.flatMap(hierarchyItem(_, path))
   }
 

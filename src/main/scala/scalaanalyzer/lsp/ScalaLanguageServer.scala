@@ -709,7 +709,7 @@ final class ScalaLanguageServer(
         spanLocations(s.implementations(path, lineColumn(params.getPosition)))
       }
 
-    /** Prepares method declarations accepted by the plugin's usage targeting. */
+    /** Prepares the method the IDE's call hierarchy selects at the position. */
     override def prepareCallHierarchy(params: CallHierarchyPrepareParams): CompletableFuture[JavaList[CallHierarchyItem]] =
       onRead("prepareCallHierarchy", params.getTextDocument, java.util.List.of[CallHierarchyItem]()) { (s, path) =>
         s.prepareHierarchy(path, lineColumn(params.getPosition), types = false).map(callHierarchyItem).asJava
