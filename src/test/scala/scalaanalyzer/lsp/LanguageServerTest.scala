@@ -978,6 +978,33 @@ class LanguageServerTest extends munit.FunSuite {
     assert(answered.getRight.getItems.asScala.exists(_.getFilterText == "text"), answered.toString)
   }
 
+  test("reads answered together agree with reads answered one by one, and see the changes sent before them") {
+    val text = server.getTextDocumentService
+    val at = new Position(6, 50)
+    val reads: Seq[() => CompletableFuture[?]] = Seq(
+      () => text.hover(new HoverParams(document(main), at)),
+      () => text.definition(new DefinitionParams(document(main), at)),
+      () => text.documentHighlight(new DocumentHighlightParams(document(main), at)),
+      () => text.documentSymbol(new DocumentSymbolParams(document(main))),
+      () => text.semanticTokensFull(new SemanticTokensParams(document(main))),
+      () => text.foldingRange(new FoldingRangeRequestParams(document(main))),
+      () => text.inlayHint(new InlayHintParams(document(main), new Range(new Position(0, 0), new Position(20, 0)))),
+    )
+    def answer(request: CompletableFuture[?]) = String.valueOf(request.get(1, TimeUnit.MINUTES))
+    val oneByOne = reads.map(read => answer(read()))
+    // Rounds enough for every read to overlap the others on the read threads.
+    val together = Seq.fill(8)(reads.map(_())).map(_.map(answer))
+    together.foreach(round => assertEquals(round, oneByOne))
+
+    val current = Files.readString(main).replace("val text: String", "val text: Int")
+    text.didChange(new DidChangeTextDocumentParams(new VersionedTextDocumentIdentifier(main.toUri.toString, 25),
+      java.util.List.of(new TextDocumentContentChangeEvent(current + "\nobject Probe\n"))))
+    val symbols = text.documentSymbol(new DocumentSymbolParams(document(main))).get(1, TimeUnit.MINUTES)
+    text.didChange(new DidChangeTextDocumentParams(new VersionedTextDocumentIdentifier(main.toUri.toString, 26),
+      java.util.List.of(new TextDocumentContentChangeEvent(current))))
+    assert(symbols.asScala.exists(_.getRight.getName == "Probe"), symbols.toString)
+  }
+
   test("formats the fixture buffer and a selected range using the request's tab options") {
     val original = Files.readString(main).replace("val text: String", "val text: Int")
     val text = "package app\nobject FormatFixture {\nval emoji=\"😀\"\nval n=1+2\n}\n"

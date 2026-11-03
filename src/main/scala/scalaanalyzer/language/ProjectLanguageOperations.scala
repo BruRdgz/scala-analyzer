@@ -297,8 +297,11 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
     } yield location
   }
 
-  /** Materializes library source or decompiled text under its root-specific state directory as a read-only file. */
-  private def libraryFileOnDisk(file: LibraryFile, psi: PsiFile, text: String): Path = {
+  /**
+   * Materializes library source or decompiled text under its root-specific state directory as a read-only file.
+   * Synchronized: concurrent requests may materialize the same file.
+   */
+  private def libraryFileOnDisk(file: LibraryFile, psi: PsiFile, text: String): Path = synchronized {
     val rootName = file.root.getName
     val rootDirectory = s"${rootName.substring(rootName.lastIndexOf('/') + 1)}-${Integer.toHexString(rootName.hashCode)}"
     val entry = if (file.isLibrarySource) file.entry else {
