@@ -1243,7 +1243,8 @@ private[scalaanalyzer] object HostBootstrap {
             sourceName <- f.getClasses.headOption.collect { case c: com.intellij.psi.impl.compiled.ClsClassImpl => c.getSourceFileName }
             directory = classFile.entry.lastIndexOf('/') match { case -1 => "" case i => classFile.entry.substring(0, i + 1) }
             sourceFile <- Option(sourceRoot.findFileByRelativePath(directory + sourceName))
-            psi <- Option(psiManagerRef.findFile(sourceFile))
+            // As in the IDE, only a class owner: a source the host cannot parse (Kotlin) opens as a binary file.
+            psi <- Option(psiManagerRef.findFile(sourceFile)).collect { case owner: com.intellij.psi.PsiClassOwner => owner }
           } yield psi
           source.getOrElse(f)
         // A class of a file that is not a copy is its own original.
