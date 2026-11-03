@@ -302,6 +302,9 @@ private[scalaanalyzer] object HostBootstrap {
       declare("com.intellij.basicWordSelectionFilter")
       val wordFilters = area.getExtensionPoint[Condition[PsiElement]]("com.intellij.basicWordSelectionFilter")
       wordFilters.registerExtension(new DummyBlockWordSelectionFilter, root)
+      // Searches ask for use scope enlargers. The plugin's only one widens the scope to the IDE's sbt shared-source
+      // modules, which a build server never reports, and it needs the IDE's module types; the host registers none.
+      declare("com.intellij.useScopeEnlarger")
       // The plugin's extension points whose extensions are language semantics, loaded as its descriptors register
       // them. syntheticMemberInjector: case-class and companion members, context bounds, enums, `derives`, and the
       // members library macros generate (Monocle, Circe, Simulacrum, ...), as the IDE always runs them.

@@ -495,6 +495,9 @@ class LanguageServerTest extends munit.FunSuite {
     // As in the IDE, a local's reference (`text`, line 8 of Main.scala) selects its method; an object selects nothing.
     assertEquals(prepare(main, 7, 13).map(_.getName), Seq("main"))
     assertEquals(prepare(main, 4, 8), Seq.empty)
+    // `main` is declared in `app`, which depends on `core`: the search widens its use scope with module dependencies.
+    val entry = prepare(main, 5, 6).head
+    assertEquals(service.callHierarchyIncomingCalls(new CallHierarchyIncomingCallsParams(entry)).get(1, TimeUnit.MINUTES).asScala.toSeq, Seq.empty)
     val abstractArea = prepare(shape, 3, 7).head
     val overrides = service.callHierarchyOutgoingCalls(new CallHierarchyOutgoingCallsParams(abstractArea))
       .get(1, TimeUnit.MINUTES).asScala.toSeq

@@ -495,10 +495,9 @@ object ScalaPsiHost {
     // The inheritors of a class, from the stub index: case clauses and exhaustive matches list a sealed type's.
     "com.intellij.directClassInheritorsSearch", "com.intellij.classInheritorsSearch",
     "com.intellij.extendWordSelectionHandler", "com.intellij.basicWordSelectionFilter",
-    // Find usages: the references to an element, its overriders and implementations, and the use scope widened for
-    // sources shared between modules.
+    // Find usages: the references to an element, its overriders and implementations.
     "com.intellij.referencesSearch", "com.intellij.methodReferencesSearch", "com.intellij.definitionsSearch",
-    "com.intellij.overridingMethodsSearch", "com.intellij.useScopeEnlarger",
+    "com.intellij.overridingMethodsSearch",
     // Rename: the descriptions of elements in the conflicts the Java rename processors report ("method foo(): Int").
     "com.intellij.elementDescriptionProvider",
   )
