@@ -113,6 +113,28 @@ class EditingTest extends munit.FunSuite {
     } finally host.closeSource(file)
   }
 
+  test("a cancelled request cancels its running query and the queries it starts afterwards") {
+    val cancellation = new HostLock.RequestCancellation
+    val started = new java.util.concurrent.CountDownLatch(1)
+    val request = scala.concurrent.Future {
+      HostLock.cancelledBy(cancellation) {
+        val running = scala.util.Try(host.read {
+          started.countDown()
+          while (true) com.intellij.openapi.progress.ProgressManager.checkCanceled()
+        })
+        (running, scala.util.Try(host.read(42)))
+      }
+    }(using scala.concurrent.ExecutionContext.global)
+    assert(started.await(30, java.util.concurrent.TimeUnit.SECONDS), "the query did not start")
+
+    cancellation.cancel()
+
+    val (running, later) = scala.concurrent.Await.result(request, scala.concurrent.duration.Duration(30, "s"))
+    assert(running.failed.toOption.exists(_.isInstanceOf[com.intellij.openapi.progress.ProcessCanceledException]), running)
+    assert(later.failed.toOption.exists(_.isInstanceOf[com.intellij.openapi.progress.ProcessCanceledException]), later)
+    assertEquals(host.read(42), 42)
+  }
+
   test("a writer cancels a query between read acquisition and progress registration") {
     host.project
     val executor = Executors.newFixedThreadPool(2)
@@ -560,7 +582,11 @@ class EditingTest extends munit.FunSuite {
       val file = scalaFile("Action", original)
       try {
         val at = marked.indexOf("<caret>")
+        val tracker = com.intellij.psi.util.PsiModificationTracker.getInstance(host.project)
+        val modifications = tracker.getModificationCount
         val actions = host.codeActions(file, new TextRange(at, at))
+        // Previews change only copies: the source's cached diagnostics stay valid for the next request.
+        assertEquals(tracker.getModificationCount, modifications)
         val chosen = actions.find(_.title.startsWith(title)).getOrElse(fail(actions.toString))
         assertEquals(chosen.disabled, None)
         assertEquals(applyEdits(original, chosen.edits), expected)

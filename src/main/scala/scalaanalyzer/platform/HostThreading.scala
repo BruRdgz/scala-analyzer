@@ -1,5 +1,9 @@
 package scalaanalyzer.platform
 
+import com.intellij.openapi.progress.ProgressIndicator
+
+import java.util.concurrent.ConcurrentHashMap
+
 import scala.jdk.CollectionConverters.*
 
 /** Coordinates fair read/write actions, write intent and cancellation of active queries. */
@@ -76,6 +80,38 @@ private[scalaanalyzer] object HostLock {
   /** Cancels queries already registered with the host's progress manager. */
   def cancelQueries(): Unit = queries.forEach(_.cancel())
 
+  /**
+   * Cancellation shared by the queries of one client request: cancelling it cancels the query running for the
+   * request and every query the request starts afterwards.
+   */
+  final class RequestCancellation {
+    @volatile private var cancelled = false
+    private val running = ConcurrentHashMap.newKeySet[ProgressIndicator]()
+
+    def cancel(): Unit = {
+      cancelled = true
+      running.forEach(_.cancel())
+    }
+
+    /** Registers before reading the flag, so a concurrent `cancel` either sees the query or is seen by it. */
+    private[HostLock] def track(indicator: ProgressIndicator): Unit = {
+      running.add(indicator)
+      if (cancelled) indicator.cancel()
+    }
+
+    private[HostLock] def untrack(indicator: ProgressIndicator): Unit = running.remove(indicator)
+  }
+
+  private val requestCancellation = new ThreadLocal[RequestCancellation]
+
+  /** Runs `body` with its queries cancelled by `cancellation`. */
+  def cancelledBy[T](cancellation: RequestCancellation)(body: => T): T = {
+    val outer = requestCancellation.get()
+    requestCancellation.set(cancellation)
+    try body
+    finally requestCancellation.set(outer)
+  }
+
   /** A read without its own cancellation (the platform's `runReadAction`): the lock only. */
   def readLocked[T](body: => T): T =
     if (isReading || hasWriteIntent) body
@@ -106,12 +142,17 @@ private[scalaanalyzer] object HostLock {
         com.intellij.openapi.progress.ProgressManager.getInstance.runProcess((() => {
           // runProcess starts the indicator, resetting cancellation; only register it after that reset.
           queries.add(indicator)
+          val cancellation = Option(requestCancellation.get())
+          cancellation.foreach(_.track(indicator))
           try {
             // An intent owner may query PSI while preparing its own write, without taking a read lock.
             if (!hasWriteIntent && pendingWrites.get() > 0) indicator.cancel()
             indicator.checkCanceled()
             body
-          } finally queries.remove(indicator)
+          } finally {
+            cancellation.foreach(_.untrack(indicator))
+            queries.remove(indicator)
+          }
         }): com.intellij.openapi.util.Computable[T], indicator)
       }
     }

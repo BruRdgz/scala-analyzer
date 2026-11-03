@@ -12,6 +12,7 @@ import com.intellij.openapi.project.Project
 import com.intellij.openapi.util.{Key, UserDataHolderBase}
 import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.psi.{PsiElement, PsiManager}
+import com.intellij.psi.util.{CachedValue, CachedValueProvider, CachedValuesManager, PsiModificationTracker}
 import com.intellij.util.Processor
 import org.jetbrains.plugins.scala.lang.psi.api.ScalaFile
 import org.jetbrains.plugins.scala.lang.psi.impl.ScalaPsiElementFactory
@@ -66,6 +67,8 @@ final class ScalaPsiHost private[scalaanalyzer] (
   private val libraryRoots = new ConcurrentHashMap[Path, VirtualFile]()
   // The mounted JDK's home (written in the write lock).
   @volatile private var jdkHome: Option[Path] = None
+  // A file's problems until PSI changes: code actions reuse those the diagnostics computed for the same buffer.
+  private val diagnosticsCache = Key.create[CachedValue[Seq[Diagnostic]]]("scala-analyzer.diagnostics")
 
   /**
    * Runs `query` as the IDE's read actions run: concurrently with other queries, never during an edit. An edit that
@@ -399,6 +402,13 @@ final class ScalaPsiHost private[scalaanalyzer] (
    * @return current problems and available plugin fixes with UTF-16 source ranges
    */
   def diagnostics(file: ScalaFile): Seq[Diagnostic] = HostLock.query {
+    if (!file.isPhysical) collectDiagnostics(file)
+    else CachedValuesManager.getManager(project).getCachedValue(file, diagnosticsCache, () =>
+      CachedValueProvider.Result.create(collectDiagnostics(file), PsiModificationTracker.MODIFICATION_COUNT), false)
+  }
+
+  /** Runs the syntax check, the annotator and the inspections over the whole file. */
+  private def collectDiagnostics(file: ScalaFile): Seq[Diagnostic] = {
     val syntax = syntaxErrors(file)
     val annotator = new org.jetbrains.plugins.scala.annotator.ScalaAnnotator
     val annotations = AnnotationSessionImpl.computeWithSession(file, /* batchMode = */ false, annotator, { holder =>

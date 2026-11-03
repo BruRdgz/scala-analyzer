@@ -7,11 +7,10 @@ import com.intellij.codeInsight.intention.preview.IntentionPreviewInfo
 import com.intellij.lang.annotation.HighlightSeverity
 import com.intellij.modcommand.ModCommandService
 import com.intellij.openapi.progress.ProgressManager
-import com.intellij.openapi.util.Key
 import com.intellij.psi.{PsiAnnotationOwner, SyntaxTraverser}
 import com.intellij.psi.search.LocalSearchScope
 import com.intellij.psi.search.searches.ReferencesSearch
-import com.intellij.psi.util.{CachedValue, CachedValueProvider, CachedValuesManager, PsiModificationTracker, PsiTreeUtil}
+import com.intellij.psi.util.PsiTreeUtil
 import org.jetbrains.plugins.scala.codeInspection.declarationRedundancy.{DeleteUnusedElementFix, ScalaUnusedDeclarationInspection}
 import org.jetbrains.plugins.scala.codeInspection.cast.ScalaRedundantCastInspection
 import org.jetbrains.plugins.scala.lang.psi.api.base.patterns.ScReferencePattern
@@ -89,7 +88,6 @@ final class Inspections(descriptors: Seq[ExtensionBean]) {
     "ScalaUnusedSymbol", "ScalaUnusedExpression", "ScalaUnnecessarySemicolon", "RemoveRedundantReturn")
   private val tools = descriptors.filter(bean => supported(bean.attributes.getOrElse("shortName", "")))
   require(tools.map(_.attributes("shortName")).toSet == supported, "missing supported Scala inspections")
-  private val cache = Key.create[CachedValue[Seq[Diagnostic]]]("scala-analyzer.inspections")
 
   /**
    * Collects warnings and their native quick fixes for the current project PSI.
@@ -98,9 +96,7 @@ final class Inspections(descriptors: Seq[ExtensionBean]) {
    * @return inspection diagnostics against the current buffer
    */
   def diagnostics(file: ScalaFile): Seq[Diagnostic] =
-    if (!file.isPhysical) Seq.empty
-    else CachedValuesManager.getManager(file.getProject).getCachedValue(file, cache, () =>
-      CachedValueProvider.Result.create(collect(file), PsiModificationTracker.MODIFICATION_COUNT), false)
+    if (!file.isPhysical) Seq.empty else collect(file)
 
   /** Runs complete visitor lifecycles and preserves the plugin's problem ranges and messages. */
   private def collect(file: ScalaFile): Seq[Diagnostic] = {

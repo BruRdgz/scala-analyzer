@@ -11,7 +11,7 @@ import org.eclipse.lsp4j.services.*
 import scalaanalyzer.{LineColumn, ScalaPsiHost}
 import scalaanalyzer.build.ScalafmtFormatting
 import scalaanalyzer.language.{Completion, CompletionChoice, CompletionFollowUp, FileProblem, Fold, OutlineSymbol, ProblemSeverity, Rename, SignatureChoices, SourceSpan, TextChange, WorkspaceSymbolKind}
-import scalaanalyzer.platform.{CallLog, HostLog}
+import scalaanalyzer.platform.{CallLog, HostLock, HostLog}
 import scalaanalyzer.workspace.ProjectSession
 
 import java.net.URI
@@ -452,29 +452,44 @@ final class ScalaLanguageServer(
     }
   }
 
-  /** A request: answered in order on the documents thread; a failure is logged and answered as an error. */
+  /**
+   * A request: answered in order on the documents thread; a failure is logged and answered as an error. The client
+   * cancels the returned future (`$/cancelRequest`): a request still queued is then skipped, a running one cancelled.
+   */
   private def onDocuments[T](kind: String)(request: ProjectSession => T): CompletableFuture[T] = {
     val submitted = System.nanoTime()
-    CompletableFuture.supplyAsync(() =>
-      try timed(kind, submitted)(request(session.join()))
-      catch {
-        case _: ProcessCanceledException => throw requestError(ResponseErrorCode.RequestCancelled, "cancelled by a newer edit")
-        case e: DiffTooBigException =>
-          HostLog.warn(s"$kind: the change is too large to compare", e)
-          throw requestError(ResponseErrorCode.RequestFailed, "the change is too large to compare")
-        case e: Rename.Refused => throw requestError(ResponseErrorCode.RequestFailed, e.getMessage)
-        case e: ScalafmtFormatting.Failed =>
-          client.showMessage(new MessageParams(MessageType.Error, e.getMessage))
-          throw requestError(ResponseErrorCode.RequestFailed, e.getMessage)
-        case e: ProjectSession.Unavailable =>
-          HostLog.error(s"$kind rejected because the project session is unavailable", e)
-          throw requestError(ResponseErrorCode.RequestFailed, e.getMessage)
-        // A class the plugin needs and the host does not have is a LinkageError, not a NonFatal one: logged too.
-        case e @ (NonFatal(_) | _: LinkageError) =>
-          HostLog.error(s"$kind failed", e)
-          throw e
-      }, documents)
+    val answer = new CompletableFuture[T]
+    val cancellation = new HostLock.RequestCancellation
+    answer.whenComplete((_, _) => if (answer.isCancelled) cancellation.cancel())
+    documents.execute { () =>
+      if (answer.isCancelled) HostLog.debug(s"$kind: cancelled before it ran")
+      else
+        try answer.complete(timed(kind, submitted)(HostLock.cancelledBy(cancellation)(answerOf(kind, request(session.join())))))
+        catch { case error: Throwable => answer.completeExceptionally(error) }
+    }
+    answer
   }
+
+  /** Maps a request's failure to the error answered to the client, logging what is not an expected refusal. */
+  private def answerOf[T](kind: String, request: => T): T =
+    try request
+    catch {
+      case _: ProcessCanceledException => throw requestError(ResponseErrorCode.RequestCancelled, "cancelled by the client or a newer edit")
+      case e: DiffTooBigException =>
+        HostLog.warn(s"$kind: the change is too large to compare", e)
+        throw requestError(ResponseErrorCode.RequestFailed, "the change is too large to compare")
+      case e: Rename.Refused => throw requestError(ResponseErrorCode.RequestFailed, e.getMessage)
+      case e: ScalafmtFormatting.Failed =>
+        client.showMessage(new MessageParams(MessageType.Error, e.getMessage))
+        throw requestError(ResponseErrorCode.RequestFailed, e.getMessage)
+      case e: ProjectSession.Unavailable =>
+        HostLog.error(s"$kind rejected because the project session is unavailable", e)
+        throw requestError(ResponseErrorCode.RequestFailed, e.getMessage)
+      // A class the plugin needs and the host does not have is a LinkageError, not a NonFatal one: logged too.
+      case e @ (NonFatal(_) | _: LinkageError) =>
+        HostLog.error(s"$kind failed", e)
+        throw e
+    }
 
   /** Times `body` from submission, recording both queue wait and execution latency. */
   private def timed[T](kind: String, submitted: Long)(body: => T): T = {
