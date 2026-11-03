@@ -15,6 +15,7 @@ import java.nio.file.{Files, Path}
 import java.util.concurrent.{CancellationException, CompletableFuture, CompletionException, ConcurrentLinkedQueue, LinkedBlockingQueue, TimeUnit}
 
 import scala.jdk.CollectionConverters.*
+import scala.util.Using
 
 /**
  * Request latency as an editor sees it while the user types: the language server and a client connected through
@@ -24,7 +25,8 @@ import scala.jdk.CollectionConverters.*
  * pending from the previous one, sends the change, then asks for semantic tokens, highlights, code actions, inlay
  * hints, symbols and folding ranges. Right after the last keystroke it asks for a hover and a completion, which queue
  * behind that keystroke's requests (the latency felt after typing), waits for every answer and reverts the file. The
- * project's files are only read; edits stay in memory.
+ * project's files are only read; edits stay in memory. Before typing, the project's largest sources are opened one by
+ * one with the same requests, which find their caches empty.
  *
  * Export `Test/fullClasspath` and `Test/javaOptions` with sbt first, then run Java directly with those options and
  * that classpath: sbt, the benchmark and the project's build server together can exhaust memory.
@@ -42,6 +44,8 @@ object TypingBenchmark {
   private val MemberSelection = "\\.([A-Za-z_][A-Za-z0-9_]{3,})".r
   private val KeystrokeKinds = Seq("semanticTokens", "documentHighlight", "codeAction", "inlayHint", "documentSymbol", "foldingRange")
   private val AfterTypingKinds = Seq("hover after typing", "completion after typing")
+  // The largest source files, opened cold before the typed one: where a file's first analysis takes longest.
+  private val ColdFiles = 6
 
   private enum Outcome {
     case Answered(ms: Long)
@@ -144,15 +148,16 @@ object TypingBenchmark {
     server.initialized(new InitializedParams)
     val (_, openMs) = timed(awaitReady(states))
 
+    val onOpen = largestSources(projectDir, file).flatMap(openCold(server, _))
+
     val text = Files.readString(file)
     val lines = text.split("\n", -1)
     val endOfFile = new Position(lines.length - 1, lines.last.length)
     val requests = new Requests(server, new TextDocumentIdentifier(file.toUri.toString), endOfFile)
     val (hoverAt, completionAt) = existingMember(lines)
     requests.open(text)
-
-    // Not measured: the first requests on a file find its caches empty.
-    requests.awaitAll(requests.afterKeystroke(endOfFile))
+    // Not measured: the typed file's caches are filled first, as the cold files measure an empty start.
+    requests.awaitAll(requests.afterKeystroke(hoverAt))
     requests.samples.clear()
 
     val burstMs = (0 until bursts).map { _ =>
@@ -161,7 +166,8 @@ object TypingBenchmark {
       ms
     }
     val status = new GsonBuilder().setPrettyPrinting().create().toJson(server.status().get(1, TimeUnit.MINUTES))
-    writeReport(Path.of(reportPath), projectDir, file, (bursts, Typed.length, intervalMs), openMs, burstMs, requests.samples.asScala.toSeq, status)
+    writeReport(Path.of(reportPath), projectDir, file, (bursts, Typed.length, intervalMs), openMs, onOpen, burstMs,
+      requests.samples.asScala.toSeq, status)
     println(s"typing benchmark: report at $reportPath")
     // The platform keeps non-daemon threads running.
     sys.exit(0)
@@ -189,6 +195,23 @@ object TypingBenchmark {
       require(next.state != "failed", s"the server failed to open the project: ${next.message}")
       state = next.state
     }
+  }
+
+  /** The project's largest Scala sources under a `src` directory other than `typed`, largest first. */
+  private def largestSources(projectDir: Path, typed: Path): Seq[Path] =
+    Using.resource(Files.walk(projectDir))(_.iterator.asScala.toSeq)
+      .filter(path => path != typed && path.toString.endsWith(".scala") && path.toString.contains("/src/"))
+      .sortBy(path => (-Files.size(path), path.toString)).take(ColdFiles)
+
+  /** Opens `file` and sends the requests of one keystroke at its middle line, as an editor does on opening it. */
+  private def openCold(server: HostProtocol.LanguageServerWithStatus, file: Path): Seq[Sample] = {
+    val lines = Files.readAllLines(file).asScala
+    val middle = lines.size / 2
+    val caret = new Position(middle, lines.lift(middle).fold(0)(_.takeWhile(_.isWhitespace).length))
+    val requests = new Requests(server, new TextDocumentIdentifier(file.toUri.toString), new Position(lines.size, 0))
+    requests.open(Files.readString(file))
+    requests.awaitAll(requests.afterKeystroke(caret))
+    requests.samples.asScala.toSeq
   }
 
   /** A member selection (`.name`) from the middle of the file on: where hover and completion do real work. */
@@ -228,8 +251,8 @@ object TypingBenchmark {
   }
 
   private def writeReport(
-    reportPath: Path, projectDir: Path, file: Path, shape: (Int, Int, Long), openMs: Long, burstMs: Seq[Long],
-    samples: Seq[Sample], status: String,
+    reportPath: Path, projectDir: Path, file: Path, shape: (Int, Int, Long), openMs: Long, onOpen: Seq[Sample],
+    burstMs: Seq[Long], samples: Seq[Sample], status: String,
   ): Unit = {
     val (bursts, keystrokes, intervalMs) = shape
     def percentileOf(sorted: Seq[Long], p: Double) = sorted(math.min(sorted.size - 1, (p * sorted.size).toInt))
@@ -250,23 +273,28 @@ object TypingBenchmark {
     lines += s"- bursts: $bursts; keystrokes per burst: $keystrokes; interval: $intervalMs ms"
     lines += s"- waiting for the server to be ready: $openMs ms"
     lines += ""
-    lines += "| Request | answered | cancelled by us | rejected by server (stale) | failed | p50 ms | p95 ms | max ms |"
-    lines += "|---|---|---|---|---|---|---|---|"
-    for (kind <- KeystrokeKinds ++ AfterTypingKinds) {
-      val ofKind = samples.filter(_.kind == kind).map(_.outcome)
-      val answered = ofKind.collect { case Outcome.Answered(ms) => ms }
-      val counts = Seq(answered.size, ofKind.count(_ == Outcome.CancelledByUs), ofKind.count(_ == Outcome.RejectedByServer),
-        ofKind.count(_.isInstanceOf[Outcome.Failed]))
-      lines += s"| $kind | ${counts.mkString(" | ")} ${stats(answered)}"
+    /** Answered, cancelled and failed counts of each kind, with the answered latencies. */
+    def requestTable(title: String, kinds: Seq[String], of: Seq[Sample]): Unit = {
+      lines += s"| $title | answered | cancelled by us | rejected by server (stale) | failed | p50 ms | p95 ms | max ms |"
+      lines += "|---|---|---|---|---|---|---|---|"
+      for (kind <- kinds) {
+        val ofKind = of.filter(_.kind == kind).map(_.outcome)
+        val answered = ofKind.collect { case Outcome.Answered(ms) => ms }
+        val counts = Seq(answered.size, ofKind.count(_ == Outcome.CancelledByUs), ofKind.count(_ == Outcome.RejectedByServer),
+          ofKind.count(_.isInstanceOf[Outcome.Failed]))
+        lines += s"| $kind | ${counts.mkString(" | ")} ${stats(answered)}"
+      }
+      lines += ""
     }
-    lines += ""
+    requestTable("While typing", KeystrokeKinds ++ AfterTypingKinds, samples)
+    requestTable(s"First requests on ${onOpen.size / KeystrokeKinds.size} files opened cold", KeystrokeKinds, onOpen)
     lines += "| Burst, first keystroke to last answer | p50 ms | p95 ms | max ms |"
     lines += "|---|---|---|---|"
     lines += s"| ${burstMs.size} bursts ${stats(burstMs)}"
     lines += ""
     lines += "## Failures (first of each kind)"
     lines += ""
-    val failures = samples.collect { case Sample(kind, Outcome.Failed(message)) => kind -> message }.distinct
+    val failures = (onOpen ++ samples).collect { case Sample(kind, Outcome.Failed(message)) => kind -> message }.distinct
     if (failures.isEmpty) lines += "None."
     else for ((kind, message) <- failures.groupBy(_._1).map((_, all) => all.head).toSeq) lines += s"- $kind: $message"
     lines += ""

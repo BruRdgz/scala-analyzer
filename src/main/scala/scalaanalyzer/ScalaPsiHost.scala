@@ -355,9 +355,16 @@ final class ScalaPsiHost private[scalaanalyzer] (
   /** The plugin's organize-imports action, with edits against a copy of `file`. */
   def organizeImports(file: ScalaFile): CodeActions.Choice = read(actions.organizeImports(file))
 
-  /** Text actions for the selected range, preserving their annotator fixes and previewing on file copies. */
-  def codeActions(file: ScalaFile, range: TextRange): Seq[CodeActions.Choice] =
-    read(actions.collect(file, range, diagnostics(file)))
+  /**
+   * Text actions for the selected range, preserving their annotator fixes and previewing on file copies. Until the
+   * file's diagnostics are computed, only what the range touches is analyzed and inspection fixes are left out: the
+   * first request on an opened file does not wait for the whole file's analysis, and editors ask again when the
+   * diagnostics arrive.
+   */
+  def codeActions(file: ScalaFile, range: TextRange): Seq[CodeActions.Choice] = read {
+    val computed = Option(file.getUserData(diagnosticsCache)).filter(_.hasUpToDateValue).map(_.getValue)
+    actions.collect(file, range, computed.getOrElse(problemsAround(file, range)))
+  }
 
   /**
    * Collects parser errors accepted by the platform's highlighting filters.
@@ -408,20 +415,29 @@ final class ScalaPsiHost private[scalaanalyzer] (
   }
 
   /** Runs the syntax check, the annotator and the inspections over the whole file. */
-  private def collectDiagnostics(file: ScalaFile): Seq[Diagnostic] = {
-    val syntax = syntaxErrors(file)
+  private def collectDiagnostics(file: ScalaFile): Seq[Diagnostic] =
+    syntaxErrors(file) ++ annotatorProblems(file, SyntaxTraverser.psiTraverser(file)) ++ inspections.diagnostics(file)
+
+  /** The syntax and annotator problems of the elements `range` touches, without descending into the others. */
+  private def problemsAround(file: ScalaFile, range: TextRange): Seq[Diagnostic] = {
+    def touches(element: PsiElement) = element.getTextRange.intersects(range)
+    val touched = SyntaxTraverser.psiTraverser(file).expand(touches).filter(touches)
+    syntaxErrors(file).filter(_.range.intersects(range)) ++ annotatorProblems(file, touched)
+  }
+
+  /** Runs the plugin's annotator on `elements`, keeping the annotations that carry a message. */
+  private def annotatorProblems(file: ScalaFile, elements: SyntaxTraverser[PsiElement]): Seq[Diagnostic] = {
     val annotator = new org.jetbrains.plugins.scala.annotator.ScalaAnnotator
     val annotations = AnnotationSessionImpl.computeWithSession(file, /* batchMode = */ false, annotator, { holder =>
       val impl = holder.asInstanceOf[AnnotationHolderImpl]
-      SyntaxTraverser.psiTraverser(file).forEach(e => impl.runAnnotatorWithContext(e))
+      elements.forEach(e => impl.runAnnotatorWithContext(e))
       impl.asScala.toSeq
     })
-    val annotated = annotations.collect {
+    annotations.collect {
       case a if a.getMessage != null =>
         Diagnostic(a.getSeverity, new TextRange(a.getStartOffset, a.getEndOffset), a.getMessage,
           Option(a.getQuickFixes).toSeq.flatMap(_.asScala).map(f => f.textRange -> f.quickFix))
     }
-    syntax ++ annotated ++ inspections.diagnostics(file)
   }
 
   /**
