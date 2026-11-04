@@ -74,6 +74,7 @@ final class ScalaLanguageServer(
   @volatile private var watchesFiles = false
   @volatile private var languageRegistrations = Seq.empty[Registration]
   @volatile private var reportsProgress = false
+  @volatile private var refreshesCodeLenses = false
   @volatile private var state = new HostProtocol.ServerState("starting", "waiting for the client")
   private val startedAt = System.nanoTime()
   private val progressTokens = new AtomicInteger()
@@ -161,6 +162,13 @@ final class ScalaLanguageServer(
       finally send(new WorkDoneProgressEnd)
     }
 
+  /** Asks the client to request lenses again: the modules, and so the test suites, may have changed. */
+  private def refreshCodeLenses(): Unit =
+    if (refreshesCodeLenses) client.refreshCodeLenses().exceptionally { error =>
+      HostLog.warn("could not refresh code lenses", error)
+      null
+    }
+
   /** Imports the build again (see [[ProjectSession.importBuild]]), as progress and server state. */
   private[lsp] def importAgain(s: ProjectSession, reload: Boolean): Unit = {
     var importReturned = false
@@ -173,6 +181,7 @@ final class ScalaLanguageServer(
       }
       val snapshot = s.snapshot
       setState("ready", s"${snapshot.moduleCount} modules, ${snapshot.sourceFileCount} source files")
+      refreshCodeLenses()
     } catch {
       case error: Throwable =>
         val detail = Option(error.getMessage).filter(_.nonEmpty).getOrElse(error.getClass.getSimpleName)
@@ -218,6 +227,8 @@ final class ScalaLanguageServer(
     watchesFiles = workspaceCapabilities.flatMap(w => Option(w.getDidChangeWatchedFiles))
       .flatMap(w => Option(w.getDynamicRegistration)).exists(_.booleanValue)
     reportsProgress = windowCapabilities.flatMap(w => Option(w.getWorkDoneProgress)).exists(_.booleanValue)
+    refreshesCodeLenses = workspaceCapabilities.flatMap(w => Option(w.getCodeLens))
+      .flatMap(c => Option(c.getRefreshSupport)).exists(_.booleanValue)
     appliesEdits = workspaceCapabilities.flatMap(w => Option(w.getApplyEdit)).exists(_.booleanValue)
     showsDocuments = windowCapabilities.flatMap(w => Option(w.getShowDocument))
       .exists(_.isSupport)
@@ -336,6 +347,7 @@ final class ScalaLanguageServer(
           s"heap ${(heap.totalMemory - heap.freeMemory) / (1024 * 1024)} of ${heap.maxMemory / (1024 * 1024)} MB")
         setState("ready", s"${snapshot.moduleCount} modules, ${snapshot.sourceFileCount} source files")
         session.complete(opened)
+        refreshCodeLenses()
       } catch {
         case e: Throwable =>
           HostLog.error(s"opening the project at $root failed", e)
@@ -651,9 +663,15 @@ final class ScalaLanguageServer(
         }.asJava
       }
 
-    /** Returns the run lenses of test suites and their tests, resolved eagerly. */
+    /**
+     * Returns the run lenses of test suites and their tests, resolved eagerly.
+     *
+     * A client that can refresh lenses gets none until the project is open, then a refresh: an answer that waited
+     * for the import would make VS Code, which spaces lens requests by their past durations, slow for the session.
+     */
     override def codeLens(params: CodeLensParams): CompletableFuture[JavaList[? <: CodeLens]] =
-      onRead("codeLens", params.getTextDocument, JavaList.of[CodeLens]()) { (s, path) =>
+      if (refreshesCodeLenses && !session.isDone) CompletableFuture.completedFuture(JavaList.of[CodeLens]())
+      else onRead("codeLens", params.getTextDocument, JavaList.of[CodeLens]()) { (s, path) =>
         s.testLenses(path).map { lens =>
           val arguments = new JsonObject
           arguments.addProperty("target", lens.target)
