@@ -4,7 +4,7 @@ import com.intellij.psi.PsiFile
 
 import scalaanalyzer.{HostModule, LineColumn, ScalaPsiHost}
 import scalaanalyzer.build.{BspImport, BuildConnection, CompileSpec, CompilerDiagnostic, DocumentCompiler, ImportedModule, ScalafmtFormatting}
-import scalaanalyzer.language.{CodeActionResult, CompletionChoices, CompletionFollowUp, FileChanges, FileProblem, Fold, HierarchyCall, HierarchyItem, HierarchyTarget, InlineHint, Occurrence, OutlineSymbol, ProjectLanguageOperations, SemanticToken, SignatureChoices, SourceSpan, TextChange, WorkspaceSymbolMatch}
+import scalaanalyzer.language.{CodeActionResult, CompletionChoices, CompletionFollowUp, FileChanges, FileProblem, Fold, HierarchyCall, HierarchyItem, HierarchyTarget, InlineHint, Occurrence, OutlineSymbol, ProjectLanguageOperations, SemanticToken, SignatureChoices, SourceSpan, TestLens, TextChange, WorkspaceSymbolMatch}
 import scalaanalyzer.platform.{HostLock, HostLog}
 
 import java.nio.file.{Files, Path}
@@ -150,6 +150,9 @@ final class ProjectSession private (
    * @return `Seq[InlineHint]` within the range, or an empty sequence for non-Scala sources
    */
   def inlayHints(path: Path, start: LineColumn, end: LineColumn): Seq[InlineHint] = language.inlayHints(path, start, end)
+
+  /** Returns runnable suite and test selections with their owning BSP target identities. */
+  def testLenses(path: Path): Seq[TestLens] = language.testLenses(path)
 
   /**
    * Looks up signatures for the call surrounding a caret.

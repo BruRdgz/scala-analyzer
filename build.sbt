@@ -53,8 +53,9 @@ lazy val root = (project in file("."))
       if (!lib.isDirectory) sys.error(s"Scala plugin jars not found at $lib (set SCALA_PLUGIN_LIB)")
       // The plugin bundles its own Scala runtime; this build provides one.
       val main = (lib * "*.jar").get.filterNot(f => Set("scala-library.jar", "scala3-library_3.jar")(f.getName))
-      // Content modules the host uses: the structure view (document symbols).
-      val modules = Seq("scalaCommunity.structure-view.jar").map(lib / "modules" / _)
+      // Content modules for document symbols and test discovery.
+      val modules = Seq("scalaCommunity.structure-view.jar", "scalaCommunity.testing-support.jar",
+        "scalaCommunity.testing-support.munit.jar").map(lib / "modules" / _)
       modules.filterNot(_.isFile).foreach(m => sys.error(s"Scala plugin module jar not found: $m"))
       main ++ modules
     },

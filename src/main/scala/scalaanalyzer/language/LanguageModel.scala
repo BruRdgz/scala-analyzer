@@ -140,6 +140,17 @@ final case class CompletionFollowUp(changes: Seq[TextChange], caret: LineColumn)
 final case class InlineHint(at: LineColumn, text: String)
 
 /**
+ * A runnable test selection with its BSP target and source anchor.
+ *
+ * @param range start and exclusive end positions in zero-based lines and UTF-16 columns
+ * @param target BSP target identity of the source's module
+ * @param framework runner framework id: scalatest, specs2, utest or munit
+ * @param suite fully qualified suite class name
+ * @param testName plugin runner selection, absent when running the whole suite
+ */
+final case class TestLens(range: (LineColumn, LineColumn), target: String, framework: String, suite: String, testName: Option[String])
+
+/**
  * Ranked completion choices for one request.
  *
  * @param items candidates in plugin relevance order

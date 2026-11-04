@@ -205,7 +205,7 @@ final class ScalaLanguageServer(
     val textCapabilities = offered.flatMap(c => Option(c.getTextDocument))
     val scopesScalaFeatures = textCapabilities.exists { c =>
       Seq[DynamicRegistrationCapabilities](c.getSignatureHelp, c.getFormatting,
-        c.getRangeFormatting, c.getReferences, c.getCodeAction).forall { feature =>
+        c.getRangeFormatting, c.getReferences, c.getCodeAction, c.getCodeLens).forall { feature =>
         Option(feature).flatMap(f => Option(f.getDynamicRegistration)).exists(_.booleanValue)
       }
     }
@@ -246,6 +246,8 @@ final class ScalaLanguageServer(
       CodeActionKind.SourceOrganizeImports)
     capabilities.setCompletionProvider(new CompletionOptions(/* resolveProvider = */ false, completionTriggers))
     if (scopesScalaFeatures) {
+      val lenses = scalaOnly(new CodeLensRegistrationOptions)
+      lenses.setResolveProvider(false)
       capabilities.setInlayHintProvider(scalaOnly(new InlayHintRegistrationOptions))
       capabilities.setSelectionRangeProvider(scalaOnly(new SelectionRangeRegistrationOptions))
       capabilities.setImplementationProvider(scalaOnly(new ImplementationRegistrationOptions))
@@ -259,12 +261,13 @@ final class ScalaLanguageServer(
       val actions = scalaOnly(new CodeActionRegistrationOptions)
       actions.setCodeActionKinds(actionKinds)
       languageRegistrations = Seq(
-        "signatureHelp" -> signatures,
+        "codeLens" -> lenses, "signatureHelp" -> signatures,
         "formatting" -> scalaOnly(new DocumentFormattingRegistrationOptions),
         "rangeFormatting" -> scalaOnly(new DocumentRangeFormattingRegistrationOptions),
         "references" -> scalaOnly(new ReferenceRegistrationOptions), "codeAction" -> actions,
       ).map { (method, options) => new Registration(s"scala-analyzer-$method", s"textDocument/$method", options) }
     } else {
+      capabilities.setCodeLensProvider(new CodeLensOptions(false))
       capabilities.setInlayHintProvider(true)
       capabilities.setSelectionRangeProvider(true)
       capabilities.setSignatureHelpProvider(new SignatureHelpOptions(signatureTriggers, signatureRetriggers))
@@ -643,6 +646,20 @@ final class ScalaLanguageServer(
         val range = params.getRange
         s.inlayHints(path, lineColumn(range.getStart), lineColumn(range.getEnd)).map { hint =>
           new InlayHint(position(hint.at), LspEither.forLeft[String, JavaList[InlayHintLabelPart]](hint.text))
+        }.asJava
+      }
+
+    /** Returns the run lenses of test suites and their tests, resolved eagerly. */
+    override def codeLens(params: CodeLensParams): CompletableFuture[JavaList[? <: CodeLens]] =
+      onRead("codeLens", params.getTextDocument, JavaList.of[CodeLens]()) { (s, path) =>
+        s.testLenses(path).map { lens =>
+          val arguments = new JsonObject
+          arguments.addProperty("target", lens.target)
+          arguments.addProperty("framework", lens.framework)
+          arguments.addProperty("suite", lens.suite)
+          lens.testName.foreach(arguments.addProperty("testName", _))
+          val title = if (lens.testName.isDefined) "Run test" else "Run suite"
+          new CodeLens(range(lens.range), new Command(title, "scalaAnalyzer.runTest", JavaList.of[Object](arguments)), null)
         }.asJava
       }
 

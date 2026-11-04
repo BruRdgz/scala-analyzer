@@ -1,5 +1,6 @@
 package scalaanalyzer.lsp
 
+import com.google.gson.Gson
 import com.intellij.psi.PsiManager
 import org.eclipse.lsp4j.*
 import org.eclipse.lsp4j.jsonrpc.messages.ResponseErrorCode
@@ -109,7 +110,8 @@ class LanguageServerTest extends munit.FunSuite {
       val rangeFormatting = new RangeFormattingCapabilities
       val references = new ReferencesCapabilities
       val actions = new CodeActionCapabilities
-      Seq[DynamicRegistrationCapabilities](completion, signatures, formatting, rangeFormatting, references, actions)
+      val lenses = new CodeLensCapabilities
+      Seq[DynamicRegistrationCapabilities](completion, signatures, formatting, rangeFormatting, references, actions, lenses)
         .foreach(_.setDynamicRegistration(true))
       text.setCompletion(completion)
       text.setSignatureHelp(signatures)
@@ -117,6 +119,7 @@ class LanguageServerTest extends munit.FunSuite {
       text.setRangeFormatting(rangeFormatting)
       text.setReferences(references)
       text.setCodeAction(actions)
+      text.setCodeLens(lenses)
       capabilities.setTextDocument(text)
     }
     params.setCapabilities(capabilities)
@@ -238,6 +241,7 @@ class LanguageServerTest extends munit.FunSuite {
     val capabilities = implementation.initialize(params).get().getCapabilities
     assertEquals(capabilities.getTextDocumentSync.getLeft, TextDocumentSyncKind.Incremental)
     assert(capabilities.getHoverProvider.getLeft)
+    assertEquals(capabilities.getCodeLensProvider.getResolveProvider, java.lang.Boolean.FALSE)
     assert(capabilities.getInlayHintProvider.getLeft)
     assert(capabilities.getSelectionRangeProvider.getLeft)
     assertEquals(capabilities.getCompletionProvider.getTriggerCharacters.asScala.toSeq, Seq("."))
@@ -278,6 +282,7 @@ class LanguageServerTest extends munit.FunSuite {
     scalaSelector(capabilities.getSemanticTokensProvider)
     assertEquals(capabilities.getCompletionProvider.getTriggerCharacters.asScala.toSeq, Seq("."))
     assertEquals(capabilities.getCompletionProvider.getResolveProvider, java.lang.Boolean.FALSE)
+    assertEquals(capabilities.getCodeLensProvider, null)
     assertEquals(capabilities.getSignatureHelpProvider, null)
     assertEquals(capabilities.getDocumentFormattingProvider, null)
     assertEquals(capabilities.getDocumentRangeFormattingProvider, null)
@@ -295,14 +300,72 @@ class LanguageServerTest extends munit.FunSuite {
       scalaSelector(registration.getRegisterOptions)
       registration.getMethod -> gson.toJsonTree(registration.getRegisterOptions).getAsJsonObject
     }.toMap
-    assertEquals(methods.keySet, Set("textDocument/signatureHelp",
+    assertEquals(methods.keySet, Set("textDocument/codeLens", "textDocument/signatureHelp",
       "textDocument/formatting", "textDocument/rangeFormatting", "textDocument/references", "textDocument/codeAction"))
+    assertEquals(methods("textDocument/codeLens").get("resolveProvider").getAsBoolean, false)
     assertEquals(methods("textDocument/signatureHelp").getAsJsonArray("triggerCharacters").asScala.map(_.getAsString).toSeq,
       Seq("(", "[", ","))
     assertEquals(methods("textDocument/signatureHelp").getAsJsonArray("retriggerCharacters").asScala.map(_.getAsString).toSeq,
       Seq(","))
     assertEquals(methods("textDocument/codeAction").getAsJsonArray("codeActionKinds").asScala.map(_.getAsString).toSeq,
       Seq(CodeActionKind.QuickFix, CodeActionKind.RefactorRewrite, CodeActionKind.SourceOrganizeImports))
+  }
+
+  test("discovers suite and test code lenses with plugin runner selections and BSP target identities") {
+    case class Expected(line: Int, title: String, name: Option[String])
+    val cases = Seq(
+      ("ExampleFunSuite", "scalatest", Seq(
+        Expected(2, "Run suite", None), Expected(3, "Run test", Some("adds numbers")),
+        Expected(4, "Run test", Some("escaped \"name\"")))),
+      ("ExampleWordSpec", "scalatest", Seq(
+        Expected(2, "Run suite", None),
+        Expected(3, "Run test", Some("a calculator should add numbers\na calculator should subtract numbers")),
+        Expected(4, "Run test", Some("a calculator should add numbers")),
+        Expected(5, "Run test", Some("a calculator should subtract numbers")))),
+      ("ExampleFlatSpec", "scalatest", Seq(
+        Expected(2, "Run suite", None), Expected(3, "Run test", Some("a calculator should add numbers")))),
+      ("ExampleFunSpec", "scalatest", Seq(
+        Expected(2, "Run suite", None), Expected(3, "Run test", Some("a calculator adds numbers")),
+        Expected(4, "Run test", Some("a calculator adds numbers")))),
+      ("ExampleFreeSpec", "scalatest", Seq(
+        Expected(2, "Run suite", None), Expected(3, "Run test", Some("a calculator adds numbers")),
+        Expected(4, "Run test", Some("a calculator adds numbers")))),
+      ("ExamplePropSpec", "scalatest", Seq(
+        Expected(2, "Run suite", None), Expected(3, "Run test", Some("adds numbers")))),
+      ("ExampleFeatureSpec", "scalatest", Seq(
+        Expected(2, "Run suite", None), Expected(3, "Run test", Some("Feature: a calculator Scenario: adds numbers")),
+        Expected(4, "Run test", Some("Feature: a calculator Scenario: adds numbers")))),
+      ("ExampleRefSpec", "scalatest", Seq(
+        Expected(2, "Run suite", None), Expected(3, "Run test", Some("adds numbers")))),
+      ("ExampleMUnit", "munit", Seq(
+        Expected(2, "Run suite", None), Expected(3, "Run test", Some("adds numbers")))),
+      // Exact uTest paths require its IDE-dependent producer; object suite discovery remains available.
+      ("ExampleUTest", "utest", Seq(
+        Expected(4, "Run suite", None))),
+      ("ExampleSpecs2", "specs2", Seq(
+        Expected(2, "Run suite", None), Expected(4, "Run test", Some("add numbers")),
+        Expected(5, "Run test", Some("subtract numbers")))),
+    )
+    val target = fixture.toFile.toURI.toString + "#core/Test"
+    val actualByFile = cases.map { (name, framework, _) =>
+      val path = fixture.resolve(s"core/src/test/scala/core/$name.scala")
+      val lenses = server.getTextDocumentService.codeLens(new CodeLensParams(document(path))).get(2, TimeUnit.MINUTES).asScala.toSeq
+      val actual = lenses.map { lens =>
+        assertEquals(lens.getRange.getEnd.getLine, lens.getRange.getStart.getLine, name)
+        val command = lens.getCommand
+        assertEquals(command.getCommand, "scalaAnalyzer.runTest", name)
+        assertEquals(command.getArguments.size(), 1, name)
+        val argument = new Gson().toJsonTree(command.getArguments.get(0)).getAsJsonObject
+        assertEquals(argument.get("target").getAsString, target, name)
+        assertEquals(argument.get("framework").getAsString, framework, name)
+        assertEquals(argument.get("suite").getAsString, s"core.$name", name)
+        Expected(lens.getRange.getStart.getLine, command.getTitle, Option(argument.get("testName")).map(_.getAsString))
+      }
+      name -> actual
+    }
+    assertEquals(actualByFile, cases.map((name, _, expected) => name -> expected))
+    val ordinary = server.getTextDocumentService.codeLens(new CodeLensParams(document(main))).get(30, TimeUnit.SECONDS)
+    assert(ordinary.isEmpty)
   }
 
   test("publishes a document's problems, and new ones after a change") {

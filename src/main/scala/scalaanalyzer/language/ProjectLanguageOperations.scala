@@ -87,6 +87,23 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
     case _ => Seq.empty
   }
 
+  /** Test lenses retain the owning BSP target; non-build files cannot produce runnable selections. */
+  def testLenses(path: Path): Seq[TestLens] = host.read {
+    file(path) match {
+      case sourceFile: ScalaFile =>
+        host.modules.ofFile(sourceFile.getVirtualFile).toSeq.flatMap { module =>
+          module.spec.identity.toSeq.flatMap { target =>
+            val sourceDocument = document(sourceFile)
+            TestLenses.in(sourceFile, module.module).map { lens =>
+              TestLens(position(sourceDocument, lens.range.getStartOffset) -> position(sourceDocument, lens.range.getEndOffset),
+                target, lens.framework, lens.suite, lens.testName)
+            }
+          }
+        }
+      case _ => Seq.empty
+    }
+  }
+
   /** The signatures of the call around `at`. Only Scala files have them. */
   def signatures(path: Path, at: LineColumn): Option[SignatureChoices] = file(path) match {
     case sourceFile: ScalaFile => host.read(host.parameterInfo(sourceFile, offset(document(sourceFile), at))).map { found =>
