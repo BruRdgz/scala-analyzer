@@ -343,7 +343,8 @@ class LanguageServerTest extends munit.FunSuite {
         Expected(4, "Run test", Some("Feature: a calculator Scenario: adds numbers")))),
       ("ExampleRefSpec", "scalatest", Seq(
         Expected(2, "Run suite", None), Expected(3, "Run test", Some("adds numbers")))),
-      ("ExampleMUnit", "munit", Seq.empty),
+      ("ExampleMUnit", "munit", Seq(
+        Expected(2, "Run suite", None), Expected(3, "Run test", Some("adds numbers")))),
       // Exact uTest paths require its IDE-dependent producer; object suite discovery remains available.
       ("ExampleUTest", "utest", Seq(
         Expected(4, "Run suite", None))),
@@ -380,6 +381,8 @@ class LanguageServerTest extends munit.FunSuite {
       ("scalatest", "FailingSuite", None, "1 passed, 1 failed, 1 ignored", MessageType.Error),
       ("utest", "ExampleUTest", None, "1 passed, 0 failed, 0 ignored", MessageType.Info),
       ("specs2", "ExampleSpecs2", None, "2 passed, 0 failed, 0 ignored", MessageType.Info),
+      ("munit", "ExampleMUnit", Some("adds numbers"), "1 passed, 0 failed, 0 ignored", MessageType.Info),
+      ("munit", "FailingMUnit", None, "1 passed, 1 failed, 1 ignored", MessageType.Error),
     )
     cases.foreach { (framework, suite, name, expected, kind) =>
       Client.shown.clear()
@@ -398,7 +401,7 @@ class LanguageServerTest extends munit.FunSuite {
       val logs = Client.logged.asScala.drop(loggedBefore).map(_.getMessage).toSeq
       assert(logs.exists(_.contains("passed")), logs.mkString("\n"))
       assert(!logs.exists(_.contains("##teamcity[")), logs.mkString("\n"))
-      if (suite == "FailingSuite") assert(logs.exists(_.contains("deliberate failure")), logs.mkString("\n"))
+      if (suite.startsWith("Failing")) assert(logs.exists(_.contains("deliberate failure")), logs.mkString("\n"))
     }
   }
 

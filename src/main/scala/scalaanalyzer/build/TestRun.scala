@@ -1,7 +1,11 @@
 package scalaanalyzer.build
 
 import ch.epfl.scala.bsp4j.JvmEnvironmentItem
+import org.jetbrains.plugins.scala.testingSupport.scalaTest.ScalaTestRunner
+import org.jetbrains.plugins.scala.testingSupport.specs2.Specs2Runner
 import org.jetbrains.plugins.scala.testingSupport.uTest.UTestRunner
+
+import scalaanalyzer.munit.MUnitTestRunner
 
 import java.io.File
 import java.net.URI
@@ -120,24 +124,26 @@ object TestRun {
   private def path(value: String): Path =
     if (value.startsWith("file:")) Path.of(URI.create(value)) else Path.of(value)
 
-  /** The plugin's runner main class of each framework a lens can run; all of them take the same arguments. */
-  private val Runners = Map(
-    "scalatest" -> "org.jetbrains.plugins.scala.testingSupport.scalaTest.ScalaTestRunner",
-    "specs2" -> "org.jetbrains.plugins.scala.testingSupport.specs2.Specs2Runner",
-    "utest" -> "org.jetbrains.plugins.scala.testingSupport.uTest.UTestRunner",
+  /** The runner main class of each framework a lens can run: the plugin's, and ours for MUnit; all take the same arguments. */
+  private val Runners: Map[String, Class[?]] = Map(
+    "scalatest" -> classOf[ScalaTestRunner],
+    "specs2" -> classOf[Specs2Runner],
+    "utest" -> classOf[UTestRunner],
+    "munit" -> classOf[MUnitTestRunner],
   )
 
   /** The frameworks whose selections can run. */
   val Frameworks: Seq[String] = Runners.keys.toSeq.sorted
 
   private def command(selection: Selection, environment: Environment): Seq[String] = {
-    // Locate runners.jar through a main class without loading a target framework into the host JVM.
-    val runners = Path.of(classOf[UTestRunner].getProtectionDomain.getCodeSource.getLocation.toURI).toString
-    val classpath = environment.item.getClasspath.asScala.map(entry => path(entry).toString) :+ runners
+    val runner = Runners(selection.framework)
+    // The runner's jar joins the project's test classpath; loading its class does not link the framework it calls.
+    val runnerJar = Path.of(runner.getProtectionDomain.getCodeSource.getLocation.toURI).toString
+    val classpath = environment.item.getClasspath.asScala.map(entry => path(entry).toString) :+ runnerJar
     // A ScalaTest scope selects each of its tests by name, one per line.
     val names = selection.testName.toSeq.flatMap(_.split("\n")).flatMap(name => Seq("-testName", name))
     Seq(environment.java.toString) ++ environment.item.getJvmOptions.asScala ++
-      Seq("-cp", classpath.mkString(File.pathSeparator), Runners(selection.framework), "-s", selection.suite.replace("`", "")) ++
+      Seq("-cp", classpath.mkString(File.pathSeparator), runner.getName, "-s", selection.suite.replace("`", "")) ++
       names ++ Seq("-showProgressMessages", "true")
   }
 

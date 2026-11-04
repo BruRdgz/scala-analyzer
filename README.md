@@ -38,7 +38,7 @@ It exposes editor features through the **Language Server Protocol (LSP)** and im
 | Documentation | Markdown hover with declaration context, parameters, return values and linked references. |
 | Editing | Rename, organize imports, previewable quick fixes, intentions and surround actions. |
 | Formatting | Whole-file scalafmt or IntelliJ formatting; range formatting through IntelliJ. |
-| Tests | Run ScalaTest and specs2 suites/tests, and uTest suites, from code lenses; readable output and a result summary. |
+| Tests | Run ScalaTest, specs2 and MUnit suites/tests, and uTest suites, from code lenses; readable output and a result summary. |
 | Code structure | Semantic tokens, document highlights, outlines, folding and selection ranges. |
 
 See [known limitations](#known-limitations) for the supported boundaries of these features.
@@ -129,8 +129,8 @@ deliberately, so the server JDK must also be compatible with that project's test
 
 Results and failure details appear in the editor's output channel, with a summary notification when execution ends.
 One run is allowed at a time; cancelling the execute-command request kills its runner. Compilation reads saved files,
-not unsaved editor buffers. MUnit lenses are disabled: the plugin uses IntelliJ's JUnit runtime, which this host does
-not ship. Supporting MUnit needs a separate JUnit adapter or that runtime.
+not unsaved editor buffers. MUnit runs through the JUnit 4 it depends on, with scala-analyzer's own small runner: the
+plugin's needs IntelliJ's JUnit runtime.
 
 ### Troubleshooting
 

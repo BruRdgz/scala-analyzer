@@ -26,7 +26,21 @@ ThisBuild / scalaVersion := "3.9.0"
 // platform class files refer to IDE classes that are not on it, and the compiler crashes instead of reporting the error.
 ThisBuild / scalacOptions += "-Ximport-suggestion-timeout:0"
 
+// Runs MUnit suites in a project's test JVM, which gets only this jar: the project supplies JUnit.
+lazy val munitRunner = (project in file("munit-runner"))
+  .settings(
+    name := "scala-analyzer-munit-runner",
+    crossPaths := false,
+    autoScalaLibrary := false,
+    // As a jar, the host's distribution ships it and its tests pass it to test JVMs.
+    exportJars := true,
+    // Projects may test on an older JDK than the host's.
+    javacOptions ++= Seq("--release", "8"),
+    libraryDependencies += "junit" % "junit" % "4.13.2" % Provided,
+  )
+
 lazy val root = (project in file("."))
+  .dependsOn(munitRunner)
   .configs(Fixtures, Fixtures212, InlayPlatform)
   .settings(
     name := "scala-analyzer",
