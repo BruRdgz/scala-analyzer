@@ -1,4 +1,4 @@
-package scalaanalyzer.munit;
+package scalaanalyzer.munitrunner;
 
 import java.util.ArrayList;
 import java.util.List;

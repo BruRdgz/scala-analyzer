@@ -5,7 +5,7 @@ import org.jetbrains.plugins.scala.testingSupport.scalaTest.ScalaTestRunner
 import org.jetbrains.plugins.scala.testingSupport.specs2.Specs2Runner
 import org.jetbrains.plugins.scala.testingSupport.uTest.UTestRunner
 
-import scalaanalyzer.munit.MUnitTestRunner
+import scalaanalyzer.munitrunner.MUnitTestRunner
 
 import java.io.File
 import java.net.URI
