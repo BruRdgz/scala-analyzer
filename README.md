@@ -38,6 +38,7 @@ It exposes editor features through the **Language Server Protocol (LSP)** and im
 | Documentation | Markdown hover with declaration context, parameters, return values and linked references. |
 | Editing | Rename, organize imports, previewable quick fixes, intentions and surround actions. |
 | Formatting | Whole-file scalafmt or IntelliJ formatting; range formatting through IntelliJ. |
+| Tests | Run ScalaTest and specs2 suites/tests, and uTest suites, from code lenses; readable output and a result summary. |
 | Code structure | Semantic tokens, document highlights, outlines, folding and selection ranges. |
 
 See [known limitations](#known-limitations) for the supported boundaries of these features.
@@ -118,6 +119,18 @@ Project exclusion filters apply. Without a config, and for range requests, the I
 
 When the client supports dynamic file watchers, changes to sbt build definitions and source-file creation or deletion
 trigger a reimport. Unsaved source text is preserved.
+
+### Running tests
+
+Test lenses compile their BSP target and launch the Scala plugin's runner in a separate JVM. The build server must
+support `buildTarget/jvmTestEnvironment`; its classpath, JVM options, environment variables and working directory
+are used. The executable comes from the target's BSP Java home. When BSP omits it, the host's running JVM is used
+deliberately, so the server JDK must also be compatible with that project's tests.
+
+Results and failure details appear in the editor's output channel, with a summary notification when execution ends.
+One run is allowed at a time; cancelling the execute-command request kills its runner. Compilation reads saved files,
+not unsaved editor buffers. MUnit lenses are disabled: the plugin uses IntelliJ's JUnit runtime, which this host does
+not ship. Supporting MUnit needs a separate JUnit adapter or that runtime.
 
 ### Troubleshooting
 

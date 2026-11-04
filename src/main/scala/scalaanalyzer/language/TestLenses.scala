@@ -56,6 +56,8 @@ object TestLenses {
   private def runnable(suite: ScTypeDefinition, framework: Framework): Boolean = framework match {
     case Framework.ScalaTest =>
       !(suite.isInstanceOf[ScTrait] || suite.isInstanceOf[ScObject] || suite.hasModifierPropertyScala("abstract"))
+    // MUnit needs IntelliJ's JUnit runtime, which the host does not ship.
+    case Framework.MUnit => false
     case _ => true
   }
 

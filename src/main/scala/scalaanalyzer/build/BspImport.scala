@@ -137,15 +137,38 @@ final class BuildConnection private[scalaanalyzer] (
    *
    * @return compile success and the latest published compiler diagnostics by file
    */
-  def compile(): scalaanalyzer.build.CompileResult = {
+  def compile(): scalaanalyzer.build.CompileResult = compileTargets(scalaTargets.map(_.getId))
+
+  /** Compiles one known Scala target, retaining the same diagnostic and error handling as a build compile. */
+  def compile(target: String): scalaanalyzer.build.CompileResult = compileTargets(Seq(scalaTarget(target).getId))
+
+  private def compileTargets(ids: Seq[BuildTargetIdentifier]): scalaanalyzer.build.CompileResult = {
     val succeeded =
-      try await(server.buildTargetCompile(new CompileParams(scalaTargets.map(_.getId).asJava))).getStatusCode == StatusCode.OK
+      try await(server.buildTargetCompile(new CompileParams(ids.asJava))).getStatusCode == StatusCode.OK
       catch {
         // sbt answers a compile that failed with an error response instead of an ERROR status code; its problems were
         // published before the answer, like those of any compile.
         case e: java.util.concurrent.ExecutionException if e.getCause.isInstanceOf[org.eclipse.lsp4j.jsonrpc.ResponseErrorException] => false
       }
     scalaanalyzer.build.CompileResult(succeeded, client.snapshot())
+  }
+
+  private def scalaTarget(uri: String): BuildTarget = scalaTargets.find(_.getId.getUri == uri)
+    .getOrElse(throw new IllegalArgumentException(s"unknown Scala build target: $uri"))
+
+  /** Gets the test process environment and Java executable for one target. Callers serialize BSP operations. */
+  def testEnvironment(target: String): TestRun.Environment = {
+    if (!Option(capabilities.getJvmTestEnvironmentProvider).exists(_.booleanValue))
+      throw new IllegalStateException("the build server does not support buildTarget/jvmTestEnvironment")
+    val found = scalaTarget(target)
+    val items = await(server.jvmTestEnvironment(new JvmTestEnvironmentParams(java.util.List.of(found.getId)))).getItems.asScala
+    val environment = items.find(_.getTarget == found.getId)
+      .getOrElse(throw new IllegalStateException(s"build server sent no test JVM environment for $target"))
+    val scala = gson.fromJson(found.getData.asInstanceOf[JsonElement], classOf[ScalaBuildTarget])
+    // BSP may omit the target JDK. Use the host's running JVM deliberately, never an arbitrary java on PATH.
+    val javaHome = Option(scala.getJvmBuildTarget).flatMap(jvm => Option(jvm.getJavaHome))
+      .map(uri => Path.of(URI.create(uri))).getOrElse(Path.of(System.getProperty("java.home")))
+    TestRun.Environment(javaHome.resolve("bin").resolve("java"), environment)
   }
 
   /**
@@ -176,7 +199,7 @@ object BspImport {
   private val BspVersion = "2.1.0"
 
   /** The build server's interfaces the host calls. */
-  trait HostBuildServer extends BuildServer with ScalaBuildServer
+  trait HostBuildServer extends BuildServer with ScalaBuildServer with JvmBuildServer
 
   /**
    * Starts and initializes the BSP client process selected from a workspace's connection files.

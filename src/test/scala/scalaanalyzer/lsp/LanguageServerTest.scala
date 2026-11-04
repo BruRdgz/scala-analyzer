@@ -1,8 +1,9 @@
 package scalaanalyzer.lsp
 
-import com.google.gson.Gson
+import com.google.gson.{Gson, JsonObject}
 import com.intellij.psi.PsiManager
 import org.eclipse.lsp4j.*
+import org.eclipse.lsp4j.jsonrpc.ResponseErrorException
 import org.eclipse.lsp4j.jsonrpc.messages.ResponseErrorCode
 import org.eclipse.lsp4j.launch.LSPLauncher
 
@@ -15,7 +16,7 @@ import java.io.{ByteArrayInputStream, ByteArrayOutputStream, OutputStream, Piped
 import java.nio.file.{Files, Path}
 import java.time.Instant
 import java.util.{List as JavaList}
-import java.util.concurrent.{CompletableFuture, CountDownLatch, Executors, LinkedBlockingQueue, TimeUnit}
+import java.util.concurrent.{CompletableFuture, CountDownLatch, ExecutionException, Executors, LinkedBlockingQueue, TimeUnit}
 
 import scala.concurrent.duration.*
 import scala.jdk.CollectionConverters.*
@@ -45,6 +46,7 @@ class LanguageServerTest extends munit.FunSuite {
     val published = new LinkedBlockingQueue[PublishDiagnosticsParams]()
     val states = new LinkedBlockingQueue[HostProtocol.ServerState]()
     val logged = new LinkedBlockingQueue[MessageParams]()
+    val testProcesses = new LinkedBlockingQueue[java.lang.Long]()
     val shown = new LinkedBlockingQueue[MessageParams]()
     override def publishDiagnostics(params: PublishDiagnosticsParams): Unit = published.add(params)
     override def state(state: HostProtocol.ServerState): Unit = states.add(state)
@@ -52,7 +54,11 @@ class LanguageServerTest extends munit.FunSuite {
     override def showMessage(params: MessageParams): Unit = shown.add(params)
     override def showMessageRequest(params: ShowMessageRequestParams): CompletableFuture[MessageActionItem] =
       CompletableFuture.completedFuture(null)
-    override def logMessage(params: MessageParams): Unit = logged.add(params)
+    override def logMessage(params: MessageParams): Unit = {
+      logged.add(params)
+      val prefix = "test runner ready: "
+      if (params.getMessage.startsWith(prefix)) testProcesses.add(params.getMessage.stripPrefix(prefix).toLong)
+    }
     val applied = new LinkedBlockingQueue[ApplyWorkspaceEditParams]()
     val showed = new LinkedBlockingQueue[ShowDocumentParams]()
     override def applyEdit(params: ApplyWorkspaceEditParams): CompletableFuture[ApplyWorkspaceEditResponse] = {
@@ -337,8 +343,7 @@ class LanguageServerTest extends munit.FunSuite {
         Expected(4, "Run test", Some("Feature: a calculator Scenario: adds numbers")))),
       ("ExampleRefSpec", "scalatest", Seq(
         Expected(2, "Run suite", None), Expected(3, "Run test", Some("adds numbers")))),
-      ("ExampleMUnit", "munit", Seq(
-        Expected(2, "Run suite", None), Expected(3, "Run test", Some("adds numbers")))),
+      ("ExampleMUnit", "munit", Seq.empty),
       // Exact uTest paths require its IDE-dependent producer; object suite discovery remains available.
       ("ExampleUTest", "utest", Seq(
         Expected(4, "Run suite", None))),
@@ -366,6 +371,71 @@ class LanguageServerTest extends munit.FunSuite {
     assertEquals(actualByFile, cases.map((name, _, expected) => name -> expected))
     val ordinary = server.getTextDocumentService.codeLens(new CodeLensParams(document(main))).get(30, TimeUnit.SECONDS)
     assert(ordinary.isEmpty)
+  }
+
+  test("runs test selections through BSP and reports readable outcomes") {
+    val target = fixture.toFile.toURI.toString + "#core/Test"
+    val cases = Seq(
+      ("scalatest", "ExampleFunSuite", Some("escaped \"name\""), "1 passed, 0 failed, 0 ignored", MessageType.Info),
+      ("scalatest", "FailingSuite", None, "1 passed, 1 failed, 1 ignored", MessageType.Error),
+      ("utest", "ExampleUTest", None, "1 passed, 0 failed, 0 ignored", MessageType.Info),
+      ("specs2", "ExampleSpecs2", None, "2 passed, 0 failed, 0 ignored", MessageType.Info),
+    )
+    cases.foreach { (framework, suite, name, expected, kind) =>
+      Client.shown.clear()
+      val loggedBefore = Client.logged.size()
+      val argument = new JsonObject
+      argument.addProperty("target", target)
+      argument.addProperty("framework", framework)
+      argument.addProperty("suite", s"core.$suite")
+      name.foreach(argument.addProperty("testName", _))
+      server.getWorkspaceService.executeCommand(new ExecuteCommandParams("scalaAnalyzer.runTest", JavaList.of(argument)))
+        .get(3, TimeUnit.MINUTES)
+      val summary = Client.shown.poll(10, TimeUnit.SECONDS)
+      assert(summary != null, suite)
+      assertEquals(summary.getMessage, s"$suite: $expected")
+      assertEquals(summary.getType, kind)
+      val logs = Client.logged.asScala.drop(loggedBefore).map(_.getMessage).toSeq
+      assert(logs.exists(_.contains("passed")), logs.mkString("\n"))
+      assert(!logs.exists(_.contains("##teamcity[")), logs.mkString("\n"))
+      if (suite == "FailingSuite") assert(logs.exists(_.contains("deliberate failure")), logs.mkString("\n"))
+    }
+  }
+
+  test("cancels a running test JVM and rejects overlapping runs without blocking document requests") {
+    val argument = new JsonObject
+    argument.addProperty("target", fixture.toFile.toURI.toString + "#core/Test")
+    argument.addProperty("framework", "scalatest")
+    argument.addProperty("suite", "core.RunControlSuite")
+    val params = new ExecuteCommandParams("scalaAnalyzer.runTest", JavaList.of(argument))
+    val running = server.getWorkspaceService.executeCommand(params)
+    try {
+      val pid = Client.testProcesses.poll(1, TimeUnit.MINUTES)
+      assert(pid != null, "test runner did not start")
+      val child = ProcessHandle.of(pid).orElseThrow()
+      val error = intercept[ExecutionException] {
+        server.getWorkspaceService.executeCommand(params).get(10, TimeUnit.SECONDS)
+      }
+      assert(error.getCause.getMessage.contains("already in progress"))
+      val lenses = server.getTextDocumentService.codeLens(new CodeLensParams(document(main))).get(10, TimeUnit.SECONDS)
+      assert(lenses.isEmpty)
+      running.cancel(true)
+      child.onExit().get(10, TimeUnit.SECONDS)
+      assert(!child.isAlive)
+    } finally running.cancel(true)
+  }
+
+  test("rejects invalid runTest arguments") {
+    val argument = new JsonObject
+    argument.addProperty("suite", "core.ExampleFunSuite")
+    val error = intercept[ExecutionException] {
+      server.getWorkspaceService.executeCommand(new ExecuteCommandParams("scalaAnalyzer.runTest", JavaList.of(argument)))
+        .get(30, TimeUnit.SECONDS)
+    }
+    error.getCause match {
+      case response: ResponseErrorException => assertEquals(response.getResponseError.getCode, ResponseErrorCode.InvalidParams.getValue)
+      case other => fail(s"unexpected command failure: $other")
+    }
   }
 
   test("publishes a document's problems, and new ones after a change") {

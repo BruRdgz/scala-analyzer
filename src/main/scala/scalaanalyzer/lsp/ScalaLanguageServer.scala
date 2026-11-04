@@ -9,7 +9,7 @@ import org.eclipse.lsp4j.jsonrpc.messages.{Either as LspEither, Either3 as LspEi
 import org.eclipse.lsp4j.services.*
 
 import scalaanalyzer.{LineColumn, ScalaPsiHost}
-import scalaanalyzer.build.ScalafmtFormatting
+import scalaanalyzer.build.{ScalafmtFormatting, TestRun}
 import scalaanalyzer.language.{Completion, CompletionChoice, CompletionFollowUp, FileProblem, Fold, HierarchyItem, HierarchyTarget, OutlineSymbol, ProblemSeverity, Rename, SignatureChoices, SourceSpan, TextChange, WorkspaceSymbolKind}
 import scalaanalyzer.platform.{CallLog, HostLock, HostLog}
 import scalaanalyzer.workspace.ProjectSession
@@ -86,6 +86,7 @@ final class ScalaLanguageServer(
   private val builds = Executors.newSingleThreadExecutor(daemon("scala-analyzer-builds"))
   // At most one compile waits behind the running one; every compile includes all Scala targets.
   private val compileQueued = new AtomicBoolean()
+  private val testRuns = new TestRun
   private val diagnostics = new ScheduledThreadPoolExecutor(1, daemon("scala-analyzer-diagnostics"))
   diagnostics.setRemoveOnCancelPolicy(true)
   /** Keeps a pending computation's identity together with its cancellable scheduler handle. */
@@ -229,7 +230,7 @@ final class ScalaLanguageServer(
     val capabilities = new ServerCapabilities
     capabilities.setTextDocumentSync(TextDocumentSyncKind.Incremental)
     capabilities.setHoverProvider(true)
-    capabilities.setExecuteCommandProvider(new ExecuteCommandOptions(java.util.List.of(CompleteInsertion)))
+    capabilities.setExecuteCommandProvider(new ExecuteCommandOptions(java.util.List.of(CompleteInsertion, RunTest)))
     capabilities.setDefinitionProvider(true)
     capabilities.setTypeDefinitionProvider(true)
     capabilities.setWorkspaceSymbolProvider(true)
@@ -367,6 +368,7 @@ final class ScalaLanguageServer(
     documents.shutdownNow()
     reads.shutdownNow()
     builds.shutdownNow()
+    testRuns.close()
     pendingDiagnostics.synchronized {
       diagnostics.shutdownNow()
       pendingDiagnostics.clear()
@@ -1069,6 +1071,38 @@ final class ScalaLanguageServer(
       }
     }
 
+  /** Starts the run of a lens's selection; the request completes when the run ends. */
+  private def executeTest(params: ExecuteCommandParams): CompletableFuture[AnyRef] = testSelection(params) match {
+    case None => CompletableFuture.failedFuture(requestError(ResponseErrorCode.InvalidParams,
+      s"$RunTest: expected one object with target, framework (${TestRun.Frameworks.mkString(", ")}), suite and an optional testName"))
+    case Some(selection) =>
+      try testRuns.start(selection, () => session.join().prepareTestRun(selection.target),
+        line => client.logMessage(new MessageParams(MessageType.Info, line)), showTestResult)
+      catch {
+        case e: IllegalStateException => CompletableFuture.failedFuture(requestError(ResponseErrorCode.RequestFailed, e.getMessage))
+      }
+  }
+
+  /** Reads the argument the code lens gave; lsp4j hands it over as JSON. */
+  private def testSelection(params: ExecuteCommandParams): Option[TestRun.Selection] =
+    Option(params.getArguments).map(_.asScala.toSeq) match {
+      case Some(Seq(json: JsonObject)) =>
+        def string(name: String): Option[String] = Option(json.get(name)).collect {
+          case value: JsonPrimitive if value.isString && !value.getAsString.isBlank => value.getAsString
+        }
+        for {
+          target <- string("target")
+          framework <- string("framework").filter(TestRun.Frameworks.contains)
+          suite <- string("suite")
+        } yield TestRun.Selection(target, framework, suite, string("testName"))
+      case _ => None
+    }
+
+  private def showTestResult(result: TestRun.Result): Unit = {
+    val kind = if (result.failed) MessageType.Error else if (result.ignored) MessageType.Warning else MessageType.Info
+    client.showMessage(new MessageParams(kind, result.summary))
+  }
+
   // ---- Workspace -------------------------------------------------------------------------------------------------
 
   /** Workspace-level commands, symbol queries and build/source watch notifications. */
@@ -1076,8 +1110,9 @@ final class ScalaLanguageServer(
     /** Configuration changes are not applied; module settings come from the imported build. */
     override def didChangeConfiguration(params: DidChangeConfigurationParams): Unit = ()
 
-    /** Applies a completion insert handler or rejects an unknown command as invalid parameters. */
+    /** Executes a test selection or completion insert handler; unknown commands are invalid parameters. */
     override def executeCommand(params: ExecuteCommandParams): CompletableFuture[AnyRef] = params.getCommand match {
+      case RunTest => executeTest(params)
       case CompleteInsertion =>
         // lsp4j hands the arguments over as JSON: the ones completionItem gave.
         val arguments = params.getArguments.asScala.toSeq.collect { case json: JsonPrimitive => json }
@@ -1118,6 +1153,9 @@ final class ScalaLanguageServer(
     }
   }
 }
+
+/** Runs the suite or test selection carried by a code lens. */
+private val RunTest = "scalaAnalyzer.runTest"
 
 /** Replays insertion after the client has inserted a completion item's lookup text. */
 private val CompleteInsertion = "scalaAnalyzer.completeInsertion"

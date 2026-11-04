@@ -3,7 +3,7 @@ package scalaanalyzer.workspace
 import com.intellij.psi.PsiFile
 
 import scalaanalyzer.{HostModule, LineColumn, ScalaPsiHost}
-import scalaanalyzer.build.{BspImport, BuildConnection, CompileSpec, CompilerDiagnostic, DocumentCompiler, ImportedModule, ScalafmtFormatting}
+import scalaanalyzer.build.{BspImport, BuildConnection, CompileSpec, CompilerDiagnostic, DocumentCompiler, ImportedModule, ScalafmtFormatting, TestRun}
 import scalaanalyzer.language.{CodeActionResult, CompletionChoices, CompletionFollowUp, FileChanges, FileProblem, Fold, HierarchyCall, HierarchyItem, HierarchyTarget, InlineHint, Occurrence, OutlineSymbol, ProjectLanguageOperations, SemanticToken, SignatureChoices, SourceSpan, TestLens, TextChange, WorkspaceSymbolMatch}
 import scalaanalyzer.platform.{HostLock, HostLog}
 
@@ -609,6 +609,15 @@ final class ProjectSession private (
     buildProblems.set(compiledProblems)
     (previousProblems.keySet ++ compiledProblems.keySet)
       .filter(path => previousProblems.get(path) != compiledProblems.get(path) && files.containsKey(path))
+  }
+
+  /** Compiles a test target and captures its environment under the BSP guard, without taking a host lock. */
+  def prepareTestRun(target: String): TestRun.Environment = buildLock.synchronized {
+    ensureUsable()
+    val compiled = build.compile(target)
+    buildProblems.set(compiled.diagnostics)
+    if (!compiled.succeeded) throw new IllegalStateException(s"compilation failed for $target; see compiler diagnostics")
+    build.testEnvironment(target)
   }
 
   /**
