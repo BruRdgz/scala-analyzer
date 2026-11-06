@@ -19,23 +19,26 @@ import scala.collection.mutable
 import scala.jdk.CollectionConverters.*
 
 /**
- * Stores stub-index entries for project sources and decompiled Scala libraries.
+ * Stores stub-index postings for project sources and decompiled Scala libraries.
  *
- * Source entries refer to the file's existing PSI. Library entries are read from stub trees so their syntax
+ * Source postings refer to the file's existing PSI. Library postings are read from stub trees so their syntax
  * trees can remain unloaded. Java library classes are counted during library indexing but resolved elsewhere.
  *
- * Callers protect queries with the host read lock and updates with its write lock: the entry, key and per-file
- * maps must change together. Remove a file's previous entries before indexing it again. Publishing or removing
+ * Callers protect queries with the host read lock and updates with its write lock: the posting, key and per-file
+ * maps must change together. Remove a file's previous postings before indexing it again. Publishing or removing
  * a file advances the modification tracker exposed by `stubIndex`.
  */
 final class SymbolIndex {
   /** Pairs cached file identity with PSI so scope checks avoid navigating each element. */
   private final case class IndexedElement(file: VirtualFile, psi: PsiElement)
 
+  /** One entry of a file's contribution: `element` is stored under `key` in the index named `indexName`. */
+  private final case class Posting(indexName: String, key: AnyRef, element: IndexedElement)
+
   private val elements = new ConcurrentHashMap[(String, AnyRef), java.util.List[IndexedElement]]()
   private val keys = new ConcurrentHashMap[String, java.util.Set[AnyRef]]()
-  /** Tracks each file's index-name, normalized-key and element postings for removal. */
-  private val entriesByFile = new ConcurrentHashMap[PsiFile, Vector[(String, AnyRef, IndexedElement)]]()
+  /** Remembers each file's postings so they can be removed when the file is reindexed or dropped. */
+  private val entriesByFile = new ConcurrentHashMap[PsiFile, Vector[Posting]]()
   private val tracker = new SimpleModificationTracker
 
   /** Normalizes CharSequence keys to strings so lookups compare their content. */
@@ -166,6 +169,8 @@ final class SymbolIndex {
    * otherwise publishes entries referring to the file's existing PSI and returns `true`.
    *
    * @param file Scala or Java project-source PSI whose declarations should be indexed
+   * @return `true` if the file was indexed; `false` if its stubs did not align with its syntax tree, in which
+   *         case nothing was published
    */
   def indexSourceFile(file: PsiFile): Boolean = {
     val registry = StubElementRegistryService.Companion.getInstance()
@@ -199,29 +204,36 @@ final class SymbolIndex {
     paired
   }
 
-  /** Collects postings with available stub serializers, then publishes the file and advances the tracker. */
+  /** Publishes the file's postings, skipping stubs without a registered serializer, and advances the tracker. */
   private def record(file: PsiFile, stubsWithElements: Seq[(StubElement[?], PsiElement)]): Unit = {
     val registry = StubElementRegistryService.Companion.getInstance()
-    val occurrenceBuilder = Vector.newBuilder[(String, AnyRef, IndexedElement)]
     val virtualFile = file.getViewProvider.getVirtualFile
+    val collected = Vector.newBuilder[Posting]
 
     for ((stub, psi) <- stubsWithElements; serializer <- Option(registry.getStubSerializer(stub.getElementType))) {
       val element = IndexedElement(virtualFile, psi)
       val sink = new IndexSink {
+        // `K` is unbounded here, so this only boxes; the platform's index keys are Strings and Integers.
         override def occurrence[Psi <: PsiElement, K](key: StubIndexKey[K, Psi], value: K): Unit =
-          occurrenceBuilder += ((key.getName, normalizeKey(value.asInstanceOf[AnyRef]), element))
+          collected += Posting(key.getName, normalizeKey(value.asInstanceOf[AnyRef]), element)
       }
+
       // The element-type registry pairs this serializer with the stub; its erased API loses their shared type.
       serializer.asInstanceOf[ObjectStubSerializer[StubElement[?], ?]].indexStub(stub, sink)
     }
 
-    val fileOccurrences = occurrenceBuilder.result()
+    val postings = collected.result()
 
-    for ((indexName, key, element) <- fileOccurrences) {
-      elements.computeIfAbsent((indexName, key), _ => new CopyOnWriteArrayList[IndexedElement]()).add(element)
-      keys.computeIfAbsent(indexName, _ => ConcurrentHashMap.newKeySet[AnyRef]()).add(key)
+    for (posting <- postings) {
+      elements
+        .computeIfAbsent((posting.indexName, posting.key), _ => new CopyOnWriteArrayList[IndexedElement]())
+        .add(posting.element)
+      keys
+        .computeIfAbsent(posting.indexName, _ => ConcurrentHashMap.newKeySet[AnyRef]())
+        .add(posting.key)
     }
-    entriesByFile.put(file, fileOccurrences)
+
+    entriesByFile.put(file, postings)
     tracker.incModificationCount()
   }
 
@@ -234,20 +246,22 @@ final class SymbolIndex {
    * @param file source or library PSI file used when indexing its entries
    */
   def removeFile(file: PsiFile): Unit = {
-    val fileOccurrences = entriesByFile.remove(file)
+    val postings = entriesByFile.remove(file)
 
-    if (fileOccurrences != null) {
-      for ((indexName, key, element) <- fileOccurrences) {
-        val postings = elements.get((indexName, key))
+    if (postings != null) {
+      for (posting <- postings) {
+        val entryKey = (posting.indexName, posting.key)
+        val remaining = elements.get(entryKey)
 
-        if (postings != null) {
-          postings.remove(element)
-          if (postings.isEmpty) {
-            elements.remove((indexName, key))
-            keys.get(indexName).remove(key)
+        if (remaining != null) {
+          remaining.remove(posting.element)
+          if (remaining.isEmpty) {
+            elements.remove(entryKey)
+            keys.get(posting.indexName).remove(posting.key)
           }
         }
       }
+
       tracker.incModificationCount()
     }
   }
