@@ -9,13 +9,13 @@ import scala.collection.mutable.ArrayBuffer
 
 class TestRunTest extends munit.FunSuite {
   test("decodes TeamCity values without confusing escaped delimiters with attribute boundaries") {
-    val (kind, fields) = TestRun.message("##teamcity[testFailed name='it |'works|' |[x|]' message='a||b|nc|rd' details='stack'error = 'true']")
+    val TestRun.TeamCityMessage(kind, fields) = TestRun.message("##teamcity[testFailed name='it |'works|' |[x|]' message='a||b|nc|rd' details='stack'error = 'true']")
     assertEquals(kind, "testFailed")
     assertEquals(fields("name"), "it 'works' [x]")
     assertEquals(fields("message"), "a|b\nc\rd")
     intercept[IllegalArgumentException](TestRun.message("##teamcity[testFailed name='unfinished]"))
     val stack = "at Suite.test(Suite.scala:1)|n" * 20000
-    assertEquals(TestRun.message(s"##teamcity[testFailed name='long' details='$stack']")._2("details").length, stack.length - 20000)
+    assertEquals(TestRun.message(s"##teamcity[testFailed name='long' details='$stack']").attributes("details").length, stack.length - 20000)
   }
 
   test("counts terminal outcomes once across runner event conventions and preserves readable failures") {

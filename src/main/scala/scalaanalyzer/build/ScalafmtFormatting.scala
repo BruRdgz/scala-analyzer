@@ -14,8 +14,9 @@ import org.scalafmt.interfaces.{RepositoryPackage, RepositoryPackageDownloader, 
 
 import scalaanalyzer.platform.HostLog
 
-import java.io.{OutputStream, OutputStreamWriter, PrintWriter, Writer}
+import java.io.{File, OutputStream, OutputStreamWriter, PrintWriter, Writer}
 import java.nio.file.{Files, Path}
+
 import scala.jdk.CollectionConverters.*
 import scala.util.control.NonFatal
 
@@ -41,11 +42,13 @@ object ScalafmtFormatting {
   def configFor(root: Path, file: Path): Option[Path] = {
     val workspace = root.toAbsolutePath.normalize()
     var directory = file.toAbsolutePath.normalize().getParent
+
     while (directory != null && directory.startsWith(workspace)) {
       val config = directory.resolve(".scalafmt.conf")
       if (Files.isRegularFile(config)) return Some(config)
       directory = directory.getParent
     }
+
     Option(workspace.resolve(".scalafmt.conf")).filter(Files.isRegularFile(_))
   }
 }
@@ -61,6 +64,7 @@ object ScalafmtFormatting {
 final class ScalafmtFormatting(cache: Path) extends AutoCloseable {
   import ScalafmtFormatting.Failed
 
+  /** Turns scalafmt errors into [[Failed]] and sends its informational reports to the host log. */
   private val reporter = new ScalafmtReporter {
     override def error(file: Path, message: String): Unit = throw new Failed(s"$file: $message")
     override def error(file: Path, cause: Throwable): Unit = throw new Failed(s"$file: ${cause.getMessage}", cause)
@@ -73,10 +77,13 @@ final class ScalafmtFormatting(cache: Path) extends AutoCloseable {
     override def downloadOutputStreamWriter(): OutputStreamWriter =
       new OutputStreamWriter(OutputStream.nullOutputStream())
   }
+
+  /** Resolves formatter artifacts through `download` instead of the dynamic library's own downloader. */
   private val downloader = new RepositoryPackageDownloaderFactory {
     override def create(reporter: ScalafmtReporter, properties: RepositoryProperties): RepositoryPackageDownloader =
       (_, version, _, packages) => download(version, packages.asScala.toSeq)
   }
+
   private val formatter = new ScalafmtDynamic(downloader).withReporter(reporter).withRespectVersion(true)
     .withRespectProjectFilters(true)
 
@@ -107,9 +114,10 @@ final class ScalafmtFormatting(cache: Path) extends AutoCloseable {
   }
 
   /** Resolves the formatter's runtime artifacts from Maven Central, using the state cache before downloading. */
-  private def download(version: String, packages: Seq[RepositoryPackage]): java.lang.Iterable[java.io.File] = {
+  private def download(version: String, packages: Seq[RepositoryPackage]): java.lang.Iterable[File] = {
     // As in the plugin's ScalafmtDynamicDownloader: old scalafmt breaks with Scala 2.13.12 and newer.
     val legacy = ScalafmtVersion.parse(version).exists(_ < ScalafmtVersion(3, 8, 1))
+
     Files.createDirectories(cache)
     val settings = new IvySettings
     settings.setDefaultCache(cache.toFile)
@@ -120,17 +128,20 @@ final class ScalafmtFormatting(cache: Path) extends AutoCloseable {
     central.setRoot("https://repo.maven.apache.org/maven2/")
     settings.addResolver(central)
     settings.setDefaultResolver("central")
+
     val ivy = new Ivy
     var cacheOnly = true
     ivy.getLoggerEngine.pushLogger(new AbstractMessageLogger {
       override def log(message: String, level: Int): Unit = {
         ProgressManager.checkCanceled()
+        // Messages of the cache-only attempt stay at debug level; warnings surface once downloading has started.
         if (!cacheOnly && level <= Message.MSG_WARN) HostLog.warn(message) else HostLog.debug(message)
       }
       override def rawlog(message: String, level: Int): Unit = log(message, level)
       override protected def doProgress(): Unit = ProgressManager.checkCanceled()
       override protected def doEndProgress(message: String): Unit = ()
     })
+
     try {
       ivy.setSettings(settings)
       ivy.bind()
@@ -161,6 +172,10 @@ final class ScalafmtFormatting(cache: Path) extends AutoCloseable {
     } finally ivy.getLoggerEngine.popLogger()
   }
 
-  /** Clears formatter sessions and class-loader caches after any active format call finishes. */
+  /**
+   * Clears formatter sessions and class-loader caches.
+   *
+   * Waits for an active `format` call to finish, because both synchronize on this instance.
+   */
   override def close(): Unit = synchronized(formatter.clear())
 }

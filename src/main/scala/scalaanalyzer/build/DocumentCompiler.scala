@@ -9,13 +9,14 @@ import java.io.File
 import java.lang.reflect.{InvocationHandler, Method, Proxy}
 import java.net.URLClassLoader
 import java.nio.file.{Files, Path}
-import java.util.Comparator
+import java.util.{Comparator, Optional}
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.locks.ReentrantReadWriteLock
 
 import scala.collection.mutable
 import scala.jdk.CollectionConverters.*
 import scala.util.Using
+import scala.util.control.NonFatal
 
 /**
  * Compiles current document text with a Scala 3 module's own compiler.
@@ -25,7 +26,10 @@ import scala.util.Using
  * this instance after use; close waits for in-flight compilations. Scala 2 diagnostics come from the build instead.
  */
 final class DocumentCompiler extends AutoCloseable {
+  /** Compiler class loaders keyed by the compiler jars they were built from. */
   private val loaders = new ConcurrentHashMap[Seq[Path], URLClassLoader]()
+
+  /** Compilations hold the read side; `close` takes the write side, so `closed` only changes with none in flight. */
   private val lifecycle = new ReentrantReadWriteLock(true)
   private var closed = false
 
@@ -40,26 +44,32 @@ final class DocumentCompiler extends AutoCloseable {
    * @param text current document contents
    * @return compiler diagnostics, including run-level errors at the start of the document
    * @throws UnsupportedOperationException when the module uses Scala 2
-   * @throws java.lang.IllegalStateException when this compiler has been closed
+   * @throws IllegalStateException when this compiler has been closed
    */
   def compile(spec: CompileSpec, fileName: String, text: String): Seq[CompilerDiagnostic] = {
     if (!spec.scalaVersion.startsWith("3."))
       throw new UnsupportedOperationException(
-        s"document compilation needs a Scala 3 module (its compiler's Java interface); this one is on Scala ${spec.scalaVersion}")
+        "document compilation needs a Scala 3 module (its compiler's Java interface); " +
+          s"this one is on Scala ${spec.scalaVersion}")
+
     val readLock = lifecycle.readLock()
+
     readLock.lock()
     try {
       if (closed) throw new IllegalStateException("document compiler is closed")
+
       val loader = loaders.computeIfAbsent(spec.compilerJars,
         jars => new URLClassLoader(jars.map(_.toUri.toURL).toArray, ClassLoader.getPlatformClassLoader))
       val workDir = Files.createTempDirectory("scala-analyzer-document")
+
       try {
         val source = workDir.resolve(fileName)
         Files.writeString(source, text)
         val output = Files.createDirectory(workDir.resolve("classes"))
+        val classpath = (spec.classpath :+ spec.classDirectory).mkString(File.pathSeparator)
         val args =
-          Seq("-classpath", (spec.classpath :+ spec.classDirectory).mkString(File.pathSeparator), "-d", output.toString) ++
-            highlightingOptions(spec) :+ source.toString
+          Seq("-classpath", classpath, "-d", output.toString) ++ highlightingOptions(spec) :+ source.toString
+
         runCompiler(loader, args)
       } finally {
         Using.resource(Files.walk(workDir))(_.sorted(Comparator.reverseOrder()).forEach(Files.delete))
@@ -76,15 +86,17 @@ final class DocumentCompiler extends AutoCloseable {
    */
   override def close(): Unit = {
     val writeLock = lifecycle.writeLock()
+
     writeLock.lock()
     try {
       if (!closed) {
         closed = true
         var failure: Option[Throwable] = None
+
         loaders.values().asScala.foreach { loader =>
           try loader.close()
           catch {
-            case scala.util.control.NonFatal(error) =>
+            case NonFatal(error) =>
               failure match {
                 case Some(first) => first.addSuppressed(error)
                 case None => failure = Some(error)
@@ -102,11 +114,15 @@ final class DocumentCompiler extends AutoCloseable {
   /** Applies the plugin's pre-code-generation stop and the Scala 3.3+ unused-import diagnostic option. */
   private def highlightingOptions(spec: CompileSpec): Seq[String] = {
     val stopAfter =
-      if (spec.scalacOptions.exists(_.startsWith("-Ystop-after:"))) Seq.empty else Seq("-Ystop-after:repeatableAnnotations")
+      if (spec.scalacOptions.exists(_.startsWith("-Ystop-after:"))) Seq.empty
+      else Seq("-Ystop-after:repeatableAnnotations")
     val unusedImports =
-      if (atLeast3_3(spec.scalaVersion) && !spec.scalacOptions.exists(o => o.startsWith("-Wunused:") && (o.contains("imports") || o.contains("all"))))
-        Seq("-Wunused:imports")
+      if (
+        atLeast3_3(spec.scalaVersion) &&
+        !spec.scalacOptions.exists(o => o.startsWith("-Wunused:") && (o.contains("imports") || o.contains("all")))
+      ) Seq("-Wunused:imports")
       else Seq.empty
+
     spec.scalacOptions ++ stopAfter ++ unusedImports
   }
 
@@ -129,16 +145,26 @@ final class DocumentCompiler extends AutoCloseable {
     val reporter: InvocationHandler = (proxy: AnyRef, method: Method, args: Array[AnyRef]) => method.getName match {
       case "report" =>
         val diagnostic = args(0)
-        val position = call(diagnostic, diagnosticInterface, "position").asInstanceOf[java.util.Optional[AnyRef]]
+        // The reflective calls return `Object`: the interface's `Optional<SourcePosition>` and `String` are restored
+        // by these casts, and its `int` level arrives boxed, which `asInstanceOf[Int]` unboxes.
+        val position = call(diagnostic, diagnosticInterface, "position").asInstanceOf[Optional[AnyRef]]
         val level = severity(call(diagnostic, diagnosticInterface, "level").asInstanceOf[Int])
         val message = call(diagnostic, diagnosticInterface, "message").asInstanceOf[String]
-        // A problem without a position is about the run, not the document. An error (e.g. a bad option) explains why
-        // the document has no other problems, so it is reported at the start of the file; anything else (the
-        // compiler's "N errors found" summary is a warning) is only logged.
+
         /** Reads compiler coordinates, locating a positionless run error at the document start. */
         def at(line: String, column: String): LineColumn =
           if (position.isEmpty) LineColumn(0, 0)
-          else LineColumn(call(position.get, positionInterface, line).asInstanceOf[Int], call(position.get, positionInterface, column).asInstanceOf[Int])
+          else {
+            // The position's `int` coordinates arrive boxed from the reflective call, so the casts only unbox them.
+            LineColumn(
+              call(position.get, positionInterface, line).asInstanceOf[Int],
+              call(position.get, positionInterface, column).asInstanceOf[Int],
+            )
+          }
+
+        // A problem without a position is about the run, not the document. An error (e.g. a bad option) explains why
+        // the document has no other problems, so it is reported at the start of the file; anything else (the
+        // compiler's "N errors found" summary is a warning) is only logged.
         if (position.isPresent || level == HighlightSeverity.ERROR)
           reported += CompilerDiagnostic(level, at("startLine", "startColumn"), at("endLine", "endColumn"), message)
         else HostLog.debug(s"compiler: $message")
@@ -153,13 +179,14 @@ final class DocumentCompiler extends AutoCloseable {
     val process = mainModule.getMethod("process", classOf[Array[String]], reporterInterface, callbackInterface)
     val thread = Thread.currentThread
     val previousLoader = thread.getContextClassLoader
+
     thread.setContextClassLoader(loader)
     try {
       val compiler = mainModule.getField("MODULE$").get(null)
       val simpleReporter = Proxy.newProxyInstance(loader, Array(reporterInterface), reporter)
       process.invoke(compiler, args.toArray, simpleReporter, null)
-    }
-    finally thread.setContextClassLoader(previousLoader)
+    } finally thread.setContextClassLoader(previousLoader)
+
     reported.toSeq
   }
 

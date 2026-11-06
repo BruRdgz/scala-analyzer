@@ -19,7 +19,12 @@ import scala.jdk.CollectionConverters.*
 import scala.util.Using
 import scala.util.control.NonFatal
 
-/** Executes one test selection at a time, away from document requests and host locks. */
+/**
+ * Executes one test selection at a time, away from document requests and host locks.
+ *
+ * A single daemon thread prepares and runs the selection. `active` is guarded by this instance's lock; a run's
+ * process is guarded by the run's own lock, and its cancellation flag is volatile.
+ */
 final class TestRun extends AutoCloseable {
   import TestRun.*
 
@@ -32,17 +37,32 @@ final class TestRun extends AutoCloseable {
   })
   private var active: Option[Run] = None
 
-  /** Runs after preparation, completing only after process exit; cancellation terminates the runner and its children. */
+  /**
+   * Starts a test selection on the run thread: it prepares the environment, then launches the runner.
+   *
+   * Throws `IllegalStateException` if a run is already in progress. Cancelling the returned future terminates the
+   * runner and its child processes. A run that fails to prepare or launch reports the failure through `log` and
+   * `finished`; `finished` is not called after cancellation.
+   *
+   * @param selection suite, and optionally tests, to run
+   * @param prepare supplies the runner's environment; called on the run thread, before the process starts
+   * @param log receives the runner's output lines and test outcomes, from the run thread
+   * @param finished receives the final summary once the runner exits, or a failed result if the run could not complete
+   * @return a future that completes with `null` after the runner process has exited and the run is no longer active
+   */
   def start(selection: Selection, prepare: () => Environment, log: String => Unit,
             finished: Result => Unit): CompletableFuture[AnyRef] = synchronized {
     if (active.nonEmpty) throw new IllegalStateException("a test run is already in progress")
+
     val run = new Run
+
     active = Some(run)
     run.answer.whenComplete((_, _) => if (run.answer.isCancelled) run.cancel())
     executor.execute(() => execute(run, selection, prepare, log, finished))
     run.answer
   }
 
+  /** Prepares and launches the run on the executor thread, then always cancels it, clears `active` and completes it. */
   private def execute(run: Run, selection: Selection, prepare: () => Environment,
                       log: String => Unit, finished: Result => Unit): Unit = {
     try {
@@ -69,23 +89,31 @@ final class TestRun extends AutoCloseable {
     }
   }
 
+  /** Logs and reports a failed preparation or launch as a failed result. */
   private def reportFailure(selection: Selection, error: Throwable, log: String => Unit, finished: Result => Unit): Unit = {
     val message = s"${selection.suite}: test run failed: ${Option(error.getMessage).getOrElse(error.toString)}"
     log(message)
     finished(Result(message, failed = true))
   }
 
-  /** Cancels the current process; an outstanding BSP preparation finishes under the session's serialization guard. */
+  /**
+   * Cancels the current run and shuts down the run thread.
+   *
+   * Cancelling terminates the runner and its children; an outstanding BSP preparation finishes under the session's
+   * serialization guard.
+   */
   override def close(): Unit = synchronized {
     active.foreach(_.cancel())
     executor.shutdown()
   }
 
+  /** One run: the future returned to the caller, its cancellation flag and its runner process. */
   private final class Run {
     val answer = new CompletableFuture[AnyRef]
     @volatile var cancelled = false
     private var process: Option[Process] = None
 
+    /** Starts the runner in the environment's working directory unless the run was already cancelled. */
     def launch(command: Seq[String], environment: JvmEnvironmentItem): Option[Process] = synchronized {
       if (cancelled) None
       else {
@@ -97,8 +125,10 @@ final class TestRun extends AutoCloseable {
       }
     }
 
+    /** Blocks until the launched runner, if any, has exited. */
     def awaitExit(): Unit = process.foreach(_.waitFor())
 
+    /** Marks the run cancelled and forcibly ends the runner and its descendants. */
     def cancel(): Unit = synchronized {
       cancelled = true
       process.foreach { child =>
@@ -111,20 +141,38 @@ final class TestRun extends AutoCloseable {
 
 /** Runner arguments and the small subset of TeamCity output needed for readable test results. */
 object TestRun {
-  /** A lens's selection. Names retain the plugin's escaped encoding until its runner parses them. */
+  /**
+   * A lens's selection. Names retain the plugin's escaped encoding until its runner parses them.
+   *
+   * @param target BSP target URI of the module that holds the suite
+   * @param framework test framework, one of [[Frameworks]]
+   * @param suite suite name passed to the runner; backticks are removed first
+   * @param testName names of the tests to run, one per line, or `None` for the whole suite
+   */
   final case class Selection(target: String, framework: String, suite: String, testName: Option[String])
 
-  /** BSP test environment plus the target JDK, or deliberately the host JVM when BSP omits it. */
+  /**
+   * BSP test environment plus the target JDK, or deliberately the host JVM when BSP omits it.
+   *
+   * @param java path of the `java` executable that launches the runner
+   * @param item the environment BSP reported: working directory, environment variables, JVM options and classpath
+   */
   final case class Environment(java: Path, item: JvmEnvironmentItem)
 
-  /** Final user-facing summary; ignored tests warrant a warning rather than an all-passed notification. */
+  /**
+   * Final user-facing summary; ignored tests warrant a warning rather than an all-passed notification.
+   *
+   * @param summary one-line outcome message
+   * @param failed `true` if the run failed or any test failed
+   * @param ignored `true` if the run completed and at least one test was ignored
+   */
   final case class Result(summary: String, failed: Boolean = false, ignored: Boolean = false)
 
-  // As the plugin's BSP adapter: servers use both file URIs and native paths for these environment fields.
+  /** Reads a server path that is either a file URI or a native path, as the plugin's BSP adapter does. */
   private def path(value: String): Path =
     if (value.startsWith("file:")) Path.of(URI.create(value)) else Path.of(value)
 
-  /** The runner main class of each framework a lens can run: the plugin's, and ours for MUnit; all take the same arguments. */
+  /** Runner main class per framework (the plugin's, and ours for MUnit); all take the same arguments. */
   private val Runners: Map[String, Class[?]] = Map(
     "scalatest" -> classOf[ScalaTestRunner],
     "specs2" -> classOf[Specs2Runner],
@@ -132,9 +180,10 @@ object TestRun {
     "munit" -> classOf[MUnitTestRunner],
   )
 
-  /** The frameworks whose selections can run. */
+  /** The frameworks whose selections can run, sorted by name. */
   val Frameworks: Seq[String] = Runners.keys.toSeq.sorted
 
+  /** Builds the runner's command line: the JVM, its options and classpath, then the runner's arguments. */
   private def command(selection: Selection, environment: Environment): Seq[String] = {
     val runner = Runners(selection.framework)
     // The runner's jar joins the project's test classpath; loading its class does not link the framework it calls.
@@ -142,32 +191,56 @@ object TestRun {
     val classpath = environment.item.getClasspath.asScala.map(entry => path(entry).toString) :+ runnerJar
     // A ScalaTest scope selects each of its tests by name, one per line.
     val names = selection.testName.toSeq.flatMap(_.split("\n")).flatMap(name => Seq("-testName", name))
+
     Seq(environment.java.toString) ++ environment.item.getJvmOptions.asScala ++
       Seq("-cp", classpath.mkString(File.pathSeparator), runner.getName, "-s", selection.suite.replace("`", "")) ++
       names ++ Seq("-showProgressMessages", "true")
   }
 
   // Possessive runs of unescaped characters: Java's regex recurses on each repetition, and failure details are long.
+  /** Matches the body of a quoted TeamCity attribute value. */
   private val Value = """[^|']*+(?:\|.[^|']*+)*+"""
+
+  /** Matches a whole TeamCity service message, capturing its kind and its attribute list. */
   private val Message = ("""##teamcity\[(\w+)((?:\s*\w+\s*=\s*'""" + Value + """')*+)\s*]""").r
+
+  /** Matches one `name='value'` attribute, capturing the name and the still-escaped value. */
   private val Attribute = ("""(\w+)\s*=\s*'(""" + Value + """)'""").r
+
+  /** Matches one `|`-escape, capturing the escaped character. */
   private val Escape = """\|(.)""".r
 
-  /** Decodes a TeamCity service message as the plugin's runners escape it (`TestRunnerUtil.escapeString`). */
-  private[build] def message(text: String): (String, Map[String, String]) = text match {
+  /** A decoded TeamCity service message: its kind (such as `testFailed`) and its unescaped attributes. */
+  private[build] final case class TeamCityMessage(kind: String, attributes: Map[String, String])
+
+  /**
+   * Decodes a TeamCity service message as the plugin's runners escape it (`TestRunnerUtil.escapeString`).
+   *
+   * @param text a whole `##teamcity[...]` line; anything else is rejected with `IllegalArgumentException`
+   * @return the message kind and its attributes, unescaped
+   */
+  private[build] def message(text: String): TeamCityMessage = text match {
     case Message(kind, attributes) =>
-      kind -> Attribute.findAllMatchIn(attributes).map(m => m.group(1) -> unescape(m.group(2))).toMap
+      TeamCityMessage(kind, Attribute.findAllMatchIn(attributes).map(m => m.group(1) -> unescape(m.group(2))).toMap)
     case _ => throw new IllegalArgumentException(s"malformed TeamCity message: $text")
   }
 
+  /** Replaces TeamCity `|` escapes with the characters they stand for; `|n` and `|r` become line breaks. */
   private def unescape(value: String): String = Escape.replaceAllIn(value, m => Matcher.quoteReplacement(m.group(1) match {
     case "n" => "\n"
     case "r" => "\r"
     case escaped => escaped
   }))
 
-  /** Tracks terminal outcomes by runner node identity; failure/ignored events may or may not precede testFinished. */
+  /**
+   * Tracks terminal outcomes by runner node identity; failure/ignored events may or may not precede testFinished.
+   *
+   * Not thread-safe: one run thread feeds it lines in order.
+   *
+   * @param log receives output lines, test outcomes and the first stack lines of failures
+   */
   private[build] final class Report(log: String => Unit) {
+    /** Progress of one test: `Running` until a terminal outcome is seen. */
     private enum Outcome {
       case Running, Passed, Failed, Ignored
     }
@@ -175,13 +248,21 @@ object TestRun {
 
     private val outcomes = mutable.Map.empty[String, Outcome]
     private var runnerError = false
-    // Keep failures readable in the output channel; the first eight stack lines identify the assertion and caller.
+    /** Stack lines logged per failure: enough to identify the assertion and caller, short enough to stay readable. */
     private val StackLines = 8
 
+    /**
+     * Consumes one line of runner output.
+     *
+     * Plain lines go to `log` unless empty. TeamCity messages update the recorded outcomes and log what they report;
+     * a message that starts like TeamCity output but is malformed throws `IllegalArgumentException`.
+     *
+     * @param text one line of runner output, without its terminator
+     */
     def line(text: String): Unit = {
       if (!text.startsWith("##teamcity[")) { if (text.nonEmpty) log(text) }
       else {
-        val (kind, fields) = message(text)
+        val TeamCityMessage(kind, fields) = message(text)
         val name = fields.getOrElse("name", "test")
         val id = fields.getOrElse("nodeId", fields.getOrElse("flowId", "") + ":" + name)
         kind match {
@@ -201,18 +282,31 @@ object TestRun {
       }
     }
 
+    /** Records a failed or ignored test and logs it with the start of its details. */
     private def finish(id: String, name: String, outcome: Outcome, fields: Map[String, String]): Unit = {
       outcomes(id) = outcome
       log(s"$name: ${outcome.toString.toLowerCase}${fields.get("message").fold("")(": " + _)}")
       fields.get("details").foreach(_.linesIterator.take(StackLines).foreach(log))
     }
 
+    /**
+     * Summarizes the outcomes recorded so far once the runner has exited.
+     *
+     * The run counts as failed when the runner exited abnormally, reported an error message, left a test running or
+     * produced no test outcome at all.
+     *
+     * @param suite suite name; the summary uses the part after its last dot
+     * @param exit runner process exit code
+     * @return the summary; `failed` also holds when any test failed, `ignored` when any test was ignored
+     */
     def result(suite: String, exit: Int): Result = {
       val name = suite.split('.').last
+
       if (exit != 0 || runnerError || outcomes.values.exists(_ == Running) || outcomes.isEmpty)
         Result(s"$name: test run failed (runner exit $exit; no complete test results)", failed = true)
       else {
         def count(outcome: Outcome): Int = outcomes.values.count(_ == outcome)
+
         Result(s"$name: ${count(Passed)} passed, ${count(Failed)} failed, ${count(Ignored)} ignored",
           failed = count(Failed) > 0, ignored = count(Ignored) > 0)
       }
