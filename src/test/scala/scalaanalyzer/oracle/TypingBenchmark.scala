@@ -4,12 +4,11 @@ import com.google.gson.GsonBuilder
 import org.eclipse.lsp4j.*
 import org.eclipse.lsp4j.jsonrpc.ResponseErrorException
 import org.eclipse.lsp4j.jsonrpc.messages.ResponseErrorCode
-import org.eclipse.lsp4j.launch.LSPLauncher
 
 import scalaanalyzer.{HostConfig, ScalaPsiHost}
-import scalaanalyzer.lsp.{HostProtocol, ScalaLanguageServer}
+import scalaanalyzer.lsp.{HostProtocol, LocalConnection, ScalaLanguageServer}
 
-import java.io.{File, PipedInputStream, PipedOutputStream}
+import java.io.File
 import java.lang.reflect.Proxy
 import java.nio.file.{Files, Path}
 import java.util.concurrent.{CancellationException, CompletableFuture, CompletionException, ConcurrentLinkedQueue, LinkedBlockingQueue, TimeUnit}
@@ -140,7 +139,7 @@ object TypingBenchmark {
     ))
 
     val states = new LinkedBlockingQueue[HostProtocol.ServerState]()
-    val server = connect(stateClient(states), new ScalaLanguageServer(host))
+    val server = LocalConnection.connect(stateClient(states), new ScalaLanguageServer(host))
     val params = new InitializeParams
     params.setWorkspaceFolders(java.util.List.of(new WorkspaceFolder(projectDir.toUri.toString, projectDir.getFileName.toString)))
     params.setCapabilities(new ClientCapabilities)
@@ -171,20 +170,6 @@ object TypingBenchmark {
     println(s"typing benchmark: report at $reportPath")
     // The platform keeps non-daemon threads running.
     sys.exit(0)
-  }
-
-  /** A server for `client`, connected to it as an editor connects. */
-  private def connect(client: HostProtocol.Client, implementation: ScalaLanguageServer): HostProtocol.LanguageServerWithStatus = {
-    val toServer = new PipedOutputStream
-    val toClient = new PipedOutputStream
-    val serverSide = new LSPLauncher.Builder[HostProtocol.Client]().setLocalService(implementation)
-      .setRemoteInterface(classOf[HostProtocol.Client]).setInput(new PipedInputStream(toServer)).setOutput(toClient).create()
-    implementation.connect(serverSide.getRemoteProxy)
-    serverSide.startListening()
-    val clientSide = new LSPLauncher.Builder[HostProtocol.LanguageServerWithStatus]().setLocalService(client)
-      .setRemoteInterface(classOf[HostProtocol.LanguageServerWithStatus]).setInput(new PipedInputStream(toClient)).setOutput(toServer).create()
-    clientSide.startListening()
-    clientSide.getRemoteProxy
   }
 
   private def awaitReady(states: LinkedBlockingQueue[HostProtocol.ServerState]): Unit = {

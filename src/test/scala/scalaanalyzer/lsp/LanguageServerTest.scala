@@ -5,14 +5,13 @@ import com.intellij.psi.PsiManager
 import org.eclipse.lsp4j.*
 import org.eclipse.lsp4j.jsonrpc.ResponseErrorException
 import org.eclipse.lsp4j.jsonrpc.messages.ResponseErrorCode
-import org.eclipse.lsp4j.launch.LSPLauncher
 
 import scalaanalyzer.TestHost
 import scalaanalyzer.language.{ChangeEngine}
 import scalaanalyzer.platform.{HostLock, HostLog}
 import scalaanalyzer.workspace.{ProjectSession}
 
-import java.io.{ByteArrayInputStream, ByteArrayOutputStream, OutputStream, PipedInputStream, PipedOutputStream}
+import java.io.{ByteArrayInputStream, ByteArrayOutputStream, OutputStream}
 import java.nio.file.{Files, Path}
 import java.time.Instant
 import java.util.{List as JavaList}
@@ -71,20 +70,8 @@ class LanguageServerTest extends munit.FunSuite {
     }
   }
 
-  /** A server for `client`, connected to it as an editor connects (the server's own messages included). */
   private def connect(client: RecordingClient, implementation: ScalaLanguageServer = new ScalaLanguageServer(TestHost.host))
-      : HostProtocol.LanguageServerWithStatus = {
-    val toServer = new PipedOutputStream
-    val toClient = new PipedOutputStream
-    val serverSide = new LSPLauncher.Builder[HostProtocol.Client]().setLocalService(implementation)
-      .setRemoteInterface(classOf[HostProtocol.Client]).setInput(new PipedInputStream(toServer)).setOutput(toClient).create()
-    implementation.connect(serverSide.getRemoteProxy)
-    serverSide.startListening()
-    val clientSide = new LSPLauncher.Builder[HostProtocol.LanguageServerWithStatus]().setLocalService(client)
-      .setRemoteInterface(classOf[HostProtocol.LanguageServerWithStatus]).setInput(new PipedInputStream(toClient)).setOutput(toServer).create()
-    clientSide.startListening()
-    clientSide.getRemoteProxy
-  }
+      : HostProtocol.LanguageServerWithStatus = LocalConnection.connect(client, implementation)
 
   private val Client = new RecordingClient
   private lazy val implementation = new ScalaLanguageServer(TestHost.host)
@@ -1510,9 +1497,12 @@ class LanguageServerTest extends munit.FunSuite {
       assertEquals(item.getTextEdit.getLeft.getNewText, "Counter")
       assertEquals(item.getCommand, null)
     } finally {
-      plain.shutdown().get(30, TimeUnit.SECONDS)
-      plain.exit()
-      releaseModules()
+      // Even when shutdown fails, the fixture's modules are released, or every later test fails to import them.
+      try plain.shutdown().get(30, TimeUnit.SECONDS)
+      finally {
+        plain.exit()
+        releaseModules()
+      }
     }
   }
 
