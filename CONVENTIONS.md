@@ -21,8 +21,11 @@ Methods that are a single expression or a `match` (normalizers, dispatch tables)
 
 ## Data
 
-- A tuple with more than two fields, or one passed between methods, becomes a private `case class` next to its
-  owner. Positional tuples of two fields with an obvious meaning may stay.
+- A tuple with more than two fields, or one of any size that is returned from or passed between methods, becomes
+  a private `case class` next to its owner. A two-field tuple used only inside one expression (a `zip`, a map
+  entry, a `for` pattern) may stay.
+- Imports: when a pass touches a file's imports, it leaves the whole block sorted within its groups (`com`/`org`,
+  then `java`, then `scala`), one blank line between groups.
 - Use one word per concept across the code base. In the indexes, a *posting* is one index entry of one file.
 - Every `asInstanceOf` has a comment saying why it is sound. Do not add casts to silence the compiler.
 

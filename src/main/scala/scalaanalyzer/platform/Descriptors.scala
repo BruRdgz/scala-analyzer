@@ -82,9 +82,9 @@ object Descriptors {
 
     for {
       jar <- jars
-      (_, bytes) <- xmlEntries(jar) if new String(bytes, StandardCharsets.UTF_8).contains("<extensionPoint ")
+      entry <- xmlEntries(jar) if new String(entry.bytes, StandardCharsets.UTF_8).contains("<extensionPoint ")
       // Some jars ship XML that is not a descriptor (or not well-formed on its own); those declare no extension points.
-      doc <- Try(factory.newDocumentBuilder().parse(new ByteArrayInputStream(bytes))).toOption.toSeq
+      doc <- Try(factory.newDocumentBuilder().parse(new ByteArrayInputStream(entry.bytes))).toOption.toSeq
       nodes = doc.getElementsByTagName("extensionPoint")
       i <- 0 until nodes.getLength
       // getElementsByTagName returns only element nodes.
@@ -163,8 +163,8 @@ object Descriptors {
 
     for {
       jar <- scalaPluginJars
-      (_, bytes) <- xmlEntries(jar) if new String(bytes, StandardCharsets.UTF_8).contains("<extensions")
-      doc <- Try(factory.newDocumentBuilder().parse(new ByteArrayInputStream(bytes))).toOption.toSeq
+      entry <- xmlEntries(jar) if new String(entry.bytes, StandardCharsets.UTF_8).contains("<extensions")
+      doc <- Try(factory.newDocumentBuilder().parse(new ByteArrayInputStream(entry.bytes))).toOption.toSeq
       blocks = doc.getElementsByTagName("extensions")
       b <- 0 until blocks.getLength
       // getElementsByTagName returns only element nodes.
@@ -190,12 +190,15 @@ object Descriptors {
     }
   }
 
+  /** One `.xml` file inside a jar: its path within the jar and its raw content. */
+  private final case class XmlEntry(name: String, bytes: Array[Byte])
+
   /** Reads XML entries from one jar while closing its zip file after the bytes have been collected. */
-  private def xmlEntries(jar: Path): Seq[(String, Array[Byte])] =
+  private def xmlEntries(jar: Path): Seq[XmlEntry] =
     Using.resource(new ZipFile(jar.toFile)) { zip =>
       zip.entries().asScala.filter(_.getName.endsWith(".xml")).map { entry =>
         val bytes = Using.resource(zip.getInputStream(entry))(_.readAllBytes())
-        entry.getName -> bytes
+        XmlEntry(entry.getName, bytes)
       }.toVector
     }
 }

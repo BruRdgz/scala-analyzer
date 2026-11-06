@@ -73,7 +73,7 @@ final class LibraryClassFinder(project: Project, files: LibraryFileSystem, modul
 
     for {
       root <- files.classRoots
-      case (dir, topLevel :: innerNames) <- packageDirectories(root, segments)
+      case PackageSplit(dir, topLevel :: innerNames) <- packageDirectories(root, segments)
       file <- Option(dir.findChild(topLevel + ".class")) if scope.contains(file)
       javaFile <- Option(psiManager.findFile(file)).collect { case f: PsiJavaFile => f }
       top <- javaFile.getClasses.find(_.getName == topLevel)
@@ -83,12 +83,15 @@ final class LibraryClassFinder(project: Project, files: LibraryFileSystem, modul
     } yield cls
   }
 
+  /** A qualified name split into an existing package `directory` and the `classPath` segments left below it. */
+  private final case class PackageSplit(directory: VirtualFile, classPath: List[String])
+
   /** Every split of `segments` into an existing package directory under `root` and a non-empty class path. */
-  private def packageDirectories(root: VirtualFile, segments: List[String]): List[(VirtualFile, List[String])] =
+  private def packageDirectories(root: VirtualFile, segments: List[String]): List[PackageSplit] =
     segments match {
       case Nil => Nil
       case head :: tail =>
-        val here = List(root -> segments)
+        val here = List(PackageSplit(root, segments))
         Option(root.findChild(head)).filter(_.isDirectory) match {
           case Some(sub) => here ++ packageDirectories(sub, tail)
           case None => here
