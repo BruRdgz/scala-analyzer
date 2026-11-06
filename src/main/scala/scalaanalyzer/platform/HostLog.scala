@@ -3,8 +3,11 @@ package scalaanalyzer.platform
 import java.io.{PrintWriter, StringWriter}
 import java.time.{Instant, ZoneId}
 import java.time.format.DateTimeFormatter
+import java.util.ArrayDeque
 import java.util.concurrent.{ConcurrentHashMap, CopyOnWriteArrayList}
 import java.util.concurrent.atomic.AtomicLong
+
+import scala.util.control.NonFatal
 
 /**
  * Collects host, language-server and platform log messages.
@@ -24,7 +27,8 @@ object HostLog {
    * @param message text including the rendered stack trace when a cause was supplied
    */
   final case class Entry(time: Instant, level: Level, message: String) {
-    override def toString: String = s"${HostLog.TimeFormat.format(time)} ${level.toString.toUpperCase.padTo(5, ' ')} $message"
+    override def toString: String =
+      s"${HostLog.TimeFormat.format(time)} ${level.toString.toUpperCase.padTo(5, ' ')} $message"
   }
 
   private val TimeFormat = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS").withZone(ZoneId.systemDefault())
@@ -36,7 +40,8 @@ object HostLog {
 
   private val sinks = new CopyOnWriteArrayList[Entry => Unit]()
   private val counts = new ConcurrentHashMap[Level, AtomicLong]()
-  private val recent = new java.util.ArrayDeque[Entry]()
+  /** Newest warnings and errors, at most `RecentProblems`; every access holds this deque's monitor. */
+  private val recent = new ArrayDeque[Entry]()
 
   /**
    * Registers a sink for accepted messages.
@@ -105,7 +110,10 @@ object HostLog {
   /**
    * Counts accepted messages since process startup.
    *
+   * Messages below the threshold in force when they were logged are not counted.
+   *
    * @param level severity to count
+   * @return number of accepted messages of that severity
    */
   def count(level: Level): Long = Option(counts.get(level)).fold(0L)(_.get)
 
@@ -125,16 +133,18 @@ object HostLog {
         s"$message\n$trace".stripTrailing
       }
       val entry = Entry(Instant.now(), level, text)
+
       counts.computeIfAbsent(level, _ => new AtomicLong()).incrementAndGet()
       if (level.ordinal >= Level.Warn.ordinal) recent.synchronized {
         recent.addLast(entry)
         if (recent.size > RecentProblems) recent.removeFirst()
       }
+
       if (sinks.isEmpty) System.err.println(entry)
       else sinks.forEach { sink =>
         // A sink that fails (a client gone) cannot log its own failure: it goes to stderr, the entry with it.
         try sink(entry)
-        catch { case scala.util.control.NonFatal(e) => System.err.println(s"$entry\n(log sink failed: $e)") }
+        catch { case NonFatal(e) => System.err.println(s"$entry\n(log sink failed: $e)") }
       }
     }
 }

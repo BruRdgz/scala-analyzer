@@ -1,5 +1,11 @@
 package scalaanalyzer.platform
 
+import com.intellij.codeInsight.InferredAnnotationsManager
+import com.intellij.openapi.diagnostic.DefaultLogger
+import com.intellij.openapi.vfs.{VirtualFile, VirtualFileSet}
+import com.intellij.psi.{PsiAnnotation, PsiModifierListOwner}
+import com.intellij.util.Processor
+
 import java.lang.reflect.{InvocationHandler, Method, Proxy}
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
@@ -14,6 +20,7 @@ import scala.jdk.CollectionConverters.*
  */
 object CallLog {
   private val counts = new ConcurrentHashMap[String, AtomicInteger]()
+
   /**
    * Enables counting of answered calls for adapter-surface tests.
    *
@@ -68,12 +75,25 @@ object CallLog {
  *
  * @param category platform logger category included in diagnostics
  */
-final class HostLogger(category: String) extends com.intellij.openapi.diagnostic.DefaultLogger(category) {
+final class HostLogger(category: String) extends DefaultLogger(category) {
+  /**
+   * Records the error in [[CallLog]] and [[HostLog]] without throwing.
+   *
+   * @param message error text
+   * @param t failure to render, or null when absent
+   * @param details platform-supplied extra details; not logged
+   */
   override def error(message: String, t: Throwable, details: String*): Unit = {
     CallLog.hit(s"LOGGED ERROR $category")
     HostLog.error(s"[$category] $message", t)
   }
 
+  /**
+   * Writes the warning to [[HostLog]].
+   *
+   * @param message warning text
+   * @param t failure to render, or null when absent
+   */
   override def warn(message: String, t: Throwable): Unit = HostLog.warn(s"[$category] $message", t)
 }
 
@@ -97,12 +117,14 @@ private val Unanswered: Any => AnyRef = _ => NotAnswered
 def tableProxy[T](iface: Class[T], label: String)(answer: PartialFunction[(String, Array[AnyRef]), AnyRef]): T = {
   val handler: InvocationHandler = (proxy: AnyRef, m: Method, args0: Array[AnyRef]) => {
     val args = if (args0 == null) Array.empty[AnyRef] else args0
+
     m.getName match {
       case "hashCode" if args.isEmpty => Integer.valueOf(System.identityHashCode(proxy))
       case "equals" if args.length == 1 => java.lang.Boolean.valueOf(proxy eq args(0))
       case "toString" if args.isEmpty => s"Host$label"
       case name =>
         val answered = answer.applyOrElse((name, args), Unanswered)
+
         if (answered ne NotAnswered) {
           CallLog.answered(s"$label.$name")
           answered
@@ -112,6 +134,7 @@ def tableProxy[T](iface: Class[T], label: String)(answer: PartialFunction[(Strin
         } else CallLog.unsupported(s"$label.$name")
     }
   }
+
   iface.cast(Proxy.newProxyInstance(iface.getClassLoader, Array[Class[?]](iface), handler))
 }
 
@@ -127,19 +150,38 @@ def dispatch(answer: PartialFunction[(String, Array[AnyRef]), AnyRef]): Dispatch
   (method: String, args0: Array[AnyRef]) => {
     val args = if (args0 == null) Array.empty[AnyRef] else args0
     val answered = answer.applyOrElse((method, args), Unanswered)
+
     if (answered ne NotAnswered) {
       CallLog.answered(method)
       answered
     } else CallLog.unsupported(method)
   }
 
-/** The host has no annotation inference engine; declared annotations remain in PSI. */
-private[scalaanalyzer] final class HostInferredAnnotationsManager extends com.intellij.codeInsight.InferredAnnotationsManager {
-  override def findInferredAnnotations(owner: com.intellij.psi.PsiModifierListOwner): Array[com.intellij.psi.PsiAnnotation] = {
+/**
+ * The host has no annotation inference engine; declared annotations remain in PSI.
+ *
+ * Every lookup is recorded in [[CallLog]] and finds no inferred annotation.
+ */
+private[scalaanalyzer] final class HostInferredAnnotationsManager extends InferredAnnotationsManager {
+  /**
+   * Finds no inferred annotations.
+   *
+   * @param owner annotated element; not inspected
+   * @return an empty array
+   */
+  override def findInferredAnnotations(owner: PsiModifierListOwner): Array[PsiAnnotation] = {
     CallLog.hit("InferredAnnotationsManager.findInferredAnnotations")
-    com.intellij.psi.PsiAnnotation.EMPTY_ARRAY
+    PsiAnnotation.EMPTY_ARRAY
   }
-  override def findInferredAnnotation(owner: com.intellij.psi.PsiModifierListOwner, name: String): com.intellij.psi.PsiAnnotation = {
+
+  /**
+   * Finds no inferred annotation.
+   *
+   * @param owner annotated element; not inspected
+   * @param name annotation name; not inspected
+   * @return null
+   */
+  override def findInferredAnnotation(owner: PsiModifierListOwner, name: String): PsiAnnotation = {
     CallLog.hit("InferredAnnotationsManager.findInferredAnnotation")
     null
   }
@@ -210,27 +252,34 @@ final class ServiceTable(label: String) {
     }
 }
 
-/** The platform's compact set looks up the VFS manager even for files without ids; the host keeps files directly. */
-private[scalaanalyzer] final class HostVirtualFileSet(private var files: java.util.Set[com.intellij.openapi.vfs.VirtualFile])
-    extends java.util.AbstractSet[com.intellij.openapi.vfs.VirtualFile] with com.intellij.openapi.vfs.VirtualFileSet {
+/**
+ * A virtual-file set that retains the files directly.
+ *
+ * The platform's compact set looks up the VFS manager even for files without ids; the host keeps files directly.
+ * Freezing replaces the backing set with an unmodifiable view, so later mutations throw.
+ *
+ * @param files initial backing set; replaced by an unmodifiable view when the set is frozen
+ */
+private[scalaanalyzer] final class HostVirtualFileSet(private var files: java.util.Set[VirtualFile])
+    extends java.util.AbstractSet[VirtualFile] with VirtualFileSet {
 
   /** Creates an initially empty set that retains virtual-file identities directly. */
   def this() = this(new java.util.LinkedHashSet)
 
-  override def iterator(): java.util.Iterator[com.intellij.openapi.vfs.VirtualFile] = files.iterator()
+  override def iterator(): java.util.Iterator[VirtualFile] = files.iterator()
   override def size(): Int = files.size
   override def contains(o: Object): Boolean = files.contains(o)
-  override def add(file: com.intellij.openapi.vfs.VirtualFile): Boolean = files.add(file)
+  override def add(file: VirtualFile): Boolean = files.add(file)
   override def remove(o: Object): Boolean = files.remove(o)
 
   /** Freezes the set and returns this same view. */
-  override def freezed(): java.util.Set[com.intellij.openapi.vfs.VirtualFile] = {
+  override def freezed(): java.util.Set[VirtualFile] = {
     freeze()
     this
   }
 
   /** Prevents further mutations by replacing the backing set with an unmodifiable view. */
   override def freeze(): Unit = files = java.util.Collections.unmodifiableSet(files)
-  override def process(processor: com.intellij.util.Processor[? >: com.intellij.openapi.vfs.VirtualFile]): Boolean =
+  override def process(processor: Processor[? >: VirtualFile]): Boolean =
     files.asScala.forall(processor.process)
 }

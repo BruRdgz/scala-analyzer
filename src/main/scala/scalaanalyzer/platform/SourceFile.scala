@@ -25,7 +25,7 @@ final class SourceFile(val path: Path, fileType: FileType, text: String)
   /**
    * Exposes the supplied source path to the virtual-file API.
    *
-   * @return `String` representation of `path`, without normalization or canonicalization
+   * @return `path` rendered as supplied, without normalization or canonicalization
    */
   override def getPath: String = path.toString
 

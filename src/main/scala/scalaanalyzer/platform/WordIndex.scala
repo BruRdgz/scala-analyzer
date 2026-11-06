@@ -34,7 +34,9 @@ final case class WordQuery(words: Seq[IdIndexEntry], accepts: Int => Boolean)
  * @param project host project used to create file content for the platform indexers
  */
 final class WordIndex(project: Project) {
+  /** Forward direction: each indexed file's words with the combined context mask recorded for each. */
   private val wordsByFile = new ConcurrentHashMap[VirtualFile, java.util.Map[IdIndexEntry, Integer]]()
+  /** Reverse direction: the indexed files containing each word, kept in step with `wordsByFile`. */
   private val filesByWord = new ConcurrentHashMap[IdIndexEntry, java.util.Set[VirtualFile]]()
 
   /**
@@ -87,7 +89,7 @@ final class WordIndex(project: Project) {
    *
    * @param word index key to look up
    * @param file indexed virtual-file identity
-   * @return `Option[Int]` containing the combined context mask, or `None` if the file or key is absent
+   * @return the combined context mask, or `None` if the file or key is absent
    */
   def occurrences(word: IdIndexEntry, file: VirtualFile): Option[Int] =
     Option(wordsByFile.get(file))
@@ -101,7 +103,7 @@ final class WordIndex(project: Project) {
    *
    * @param word index key to look up
    * @param scope scope that every returned file must belong to
-   * @return `Seq[VirtualFile]` of distinct candidate files, in unspecified order
+   * @return distinct candidate files, in unspecified order
    */
   def filesWith(word: IdIndexEntry, scope: GlobalSearchScope): Seq[VirtualFile] =
     Option(filesByWord.get(word)).fold(Seq.empty[VirtualFile]) { candidates =>
@@ -116,7 +118,7 @@ final class WordIndex(project: Project) {
    *
    * @param queries required word groups, each with its own occurrence-context predicate
    * @param scope scope that every returned file must belong to
-   * @return `Seq[VirtualFile]` of distinct candidates satisfying all queries, in unspecified order
+   * @return distinct candidate files satisfying all queries, in unspecified order
    */
   def filesWithAll(queries: Seq[WordQuery], scope: GlobalSearchScope): Seq[VirtualFile] = {
     val firstWord = queries.headOption.flatMap(_.words.headOption)

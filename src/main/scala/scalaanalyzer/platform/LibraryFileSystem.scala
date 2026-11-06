@@ -9,6 +9,7 @@ import java.nio.file.{FileSystem, FileSystems, Files, Path}
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 
+import scala.collection.mutable
 import scala.jdk.CollectionConverters.*
 import scala.util.Using
 import scala.util.control.NonFatal
@@ -19,15 +20,18 @@ import scala.util.control.NonFatal
  * Mounted contents must remain unchanged: there is no persistence, refresh or event delivery.
  * The owner must close this instance after use. It owns archives and alternate-JDK file systems it opens,
  * while borrowing the running JVM's shared `jrt:` file system.
+ *
+ * Mounting and closing are serialized on this instance's monitor, which also guards the owned file systems and the
+ * closed flag; lookups do not take it. Mounting after close fails with `IllegalStateException`.
  */
 final class LibraryFileSystem extends DeprecatedVirtualFileSystem with AutoCloseable {
-  /** Root name (shown in paths) → root directory. Insertion order is classpath order. */
+  /** Root name (shown in paths) → root directory. Insertion order is classpath order; iterate under its monitor. */
   private val roots = java.util.Collections.synchronizedMap(new java.util.LinkedHashMap[String, LibraryFile]())
   /** One VirtualFile per nio path, so PSI caches keyed by VirtualFile see stable identities. */
   private val files = new ConcurrentHashMap[Path, LibraryFile]()
   private val ids = new AtomicInteger()
   /** Zip and alternate JDK file systems opened by this instance; the current JDK's shared jrt is borrowed. */
-  private val ownedFileSystems = scala.collection.mutable.LinkedHashSet.empty[FileSystem]
+  private val ownedFileSystems = mutable.LinkedHashSet.empty[FileSystem]
   /** Each source archive is opened once even when several of its directories are mounted. */
   private val sourceArchives = new ConcurrentHashMap[Path, FileSystem]()
   /** Filename index across class and source roots, invalidated by mounts and rebuilt on demand. */
@@ -41,6 +45,7 @@ final class LibraryFileSystem extends DeprecatedVirtualFileSystem with AutoClose
    *
    * @param jar archive to keep open until this file system is closed
    * @return the mounted root directory
+   * @throws IllegalStateException if this file system is closed
    */
   def mountJar(jar: Path): VirtualFile = synchronized {
     ensureOpen()
@@ -58,6 +63,7 @@ final class LibraryFileSystem extends DeprecatedVirtualFileSystem with AutoClose
    * @param archive source jar or JDK source ZIP to keep open until close
    * @param directory directory within the archive, or empty for its root
    * @return the mounted source root
+   * @throws IllegalStateException if this file system is closed
    */
   def mountSources(archive: Path, directory: String = ""): VirtualFile = synchronized {
     ensureOpen()
@@ -79,6 +85,7 @@ final class LibraryFileSystem extends DeprecatedVirtualFileSystem with AutoClose
    *
    * @param javaHome JDK installation directory
    * @return module roots sorted by module path
+   * @throws IllegalStateException if this file system is closed
    */
   def mountJdk(javaHome: Path): Seq[VirtualFile] = synchronized {
     ensureOpen()
@@ -95,12 +102,14 @@ final class LibraryFileSystem extends DeprecatedVirtualFileSystem with AutoClose
    * Closes owned file systems and clears mounted-file caches.
    *
    * Closing is idempotent and leaves the JVM's borrowed JRT file system open. All owned systems are attempted
-   * in reverse acquisition order; later failures are suppressed on the first. Mounted files must no longer be used.
+   * in reverse acquisition order; later failures are suppressed on the first, which is rethrown after all state is
+   * cleared. Mounted files must no longer be used.
    */
   override def close(): Unit = synchronized {
     if (!closed) {
       closed = true
       var failure: Option[Throwable] = None
+
       ownedFileSystems.toVector.reverse.foreach { fileSystem =>
         try fileSystem.close()
         catch {
@@ -111,6 +120,7 @@ final class LibraryFileSystem extends DeprecatedVirtualFileSystem with AutoClose
             }
         }
       }
+
       ownedFileSystems.clear()
       sourceArchives.clear()
       files.clear()
@@ -164,6 +174,7 @@ final class LibraryFileSystem extends DeprecatedVirtualFileSystem with AutoClose
     var index = byName
     if (index == null) {
       val all = Vector.newBuilder[VirtualFile]
+
       /** Collects a file and its descendants. */
       def visit(file: VirtualFile): Unit = {
         ProgressManager.checkCanceled()
@@ -180,16 +191,28 @@ final class LibraryFileSystem extends DeprecatedVirtualFileSystem with AutoClose
 
   /** Adds a stable root identity and invalidates the cached filename index. */
   private def mount(name: String, rootPath: Path, sources: Boolean): VirtualFile = {
-    val root = new LibraryFile(this, ids.incrementAndGet(), rootPath, parent = null, rootName = name, sourcesRoot = sources)
+    val root =
+      new LibraryFile(this, ids.incrementAndGet(), rootPath, parent = null, rootName = name, sourcesRoot = sources)
     files.put(rootPath, root)
     roots.put(name, root)
     byName = null
     root
   }
 
-  /** Reuses the virtual-file identity for a path already reached through another lookup. */
+  /**
+   * Returns the single file for `path`, creating it on first lookup.
+   *
+   * Reuses the virtual-file identity for a path already reached through another lookup.
+   *
+   * @param parent directory the file is created under; ignored when the file already exists
+   * @param path underlying archive or JRT path
+   * @return the file registered for `path`
+   */
   private[scalaanalyzer] def child(parent: LibraryFile, path: Path): LibraryFile =
-    files.computeIfAbsent(path, p => new LibraryFile(this, ids.incrementAndGet(), p, parent, rootName = null, sourcesRoot = false))
+    files.computeIfAbsent(
+      path,
+      p => new LibraryFile(this, ids.incrementAndGet(), p, parent, rootName = null, sourcesRoot = false),
+    )
 
   /**
    * Resolves a virtual path within a mounted root.
@@ -199,7 +222,10 @@ final class LibraryFileSystem extends DeprecatedVirtualFileSystem with AutoClose
    */
   override def findFileByPath(path: String): VirtualFile = {
     val separator = path.indexOf("!/")
-    val (rootName, entry) = if (separator < 0) (path, "") else (path.substring(0, separator), path.substring(separator + 2))
+    val (rootName, entry) =
+      if (separator < 0) (path, "")
+      else (path.substring(0, separator), path.substring(separator + 2))
+
     roots.get(rootName) match {
       case null => null
       case root => if (entry.isEmpty) root else root.findFileByRelativePath(entry)
@@ -257,10 +283,13 @@ final class LibraryFile private[scalaanalyzer] (
    */
   def entry: String = if (parent == null) "" else root.nioPath.relativize(nioPath).toString.stripSuffix("/")
 
+  /** Whether the underlying path is a directory, probed once on first use. */
   private lazy val directory = Files.isDirectory(nioPath)
 
   override def getName: String = if (parent == null) rootName else nioPath.getFileName.toString.stripSuffix("/")
   override def getFileSystem: LibraryFileSystem = fs
+
+  /** The root name for a root, otherwise `<root name>!/<entry>`, the form `findFileByPath` resolves. */
   override def getPath: String =
     if (parent == null) rootName
     else {
@@ -279,6 +308,7 @@ final class LibraryFile private[scalaanalyzer] (
       entries.iterator().asScala.map(p => p.getFileName.toString.stripSuffix("/") -> fs.child(this, p)).toMap
     }
 
+  /** Lists the children sorted by name; empty for a file. */
   override def getChildren: Array[VirtualFile] =
     childrenByName.toVector.sortBy(_._1).map(_._2: VirtualFile).toArray
 
@@ -286,6 +316,7 @@ final class LibraryFile private[scalaanalyzer] (
 
   override def contentsToByteArray(): Array[Byte] = Files.readAllBytes(nioPath)
   override def getInputStream: InputStream = Files.newInputStream(nioPath)
+  /** Rejects writes: library files are read-only. */
   override def getOutputStream(requestor: AnyRef, newModificationStamp: Long, newTimeStamp: Long): OutputStream =
     throw new UnsupportedOperationException(s"library files are read-only: $getPath")
   // Library contents do not change while mounted, so a constant stamp is accurate.
