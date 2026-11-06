@@ -1,10 +1,10 @@
 // The Scala plugin and platform 263.x are class file 69: compiling against them (javac) and running them needs JDK 25.
 val requiredJavaVersion = 25
 
-val platformVersion = "263.7307.44"
+val platformVersion = "263.7307.200"
 
 // The intellij-scala revision the host is built and tested against (branch idea263.x).
-val scalaPluginRevision = "491569803c6c3c2f93a0bda51490425fda237fc0"
+val scalaPluginRevision = "d2b6e2aed33eaa02ab4b0c4a0db7fe5f3db1202f"
 
 // The Scala plugin's own jars, built from intellij-scala with `sbt packageArtifactZip`.
 val scalaPluginLib = settingKey[File]("Directory with the Scala plugin's jars (Scala/lib)")
