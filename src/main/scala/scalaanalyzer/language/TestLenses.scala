@@ -28,10 +28,17 @@ import scala.jdk.CollectionConverters.*
  * uTest has suite lenses only: its test paths are private to its producer.
  */
 object TestLenses {
-  /** A suite, or one of its tests, anchored to a source range; `testName` keeps the runner's encoding. */
+  /**
+   * A suite, or one of its tests, anchored to a source range.
+   *
+   * @param range source range of the suite's or test's name when it has one, else of the whole element
+   * @param framework id of the test framework: `scalatest`, `specs2`, `utest` or `munit`
+   * @param suite qualified name of the suite
+   * @param testName the test's name in the runner's encoding, or `None` for a lens that runs the whole suite
+   */
   final case class Lens(range: TextRange, framework: String, suite: String, testName: Option[String])
 
-  /** The frameworks' own `apply` looks them up as IDE extensions, which the host does not register. */
+  /** The frameworks and their suite detectors; `apply` would look them up as IDE extensions, which the host lacks. */
   private enum Framework(val id: String, val detector: AbstractTestFramework) {
     case ScalaTest extends Framework("scalatest", new ScalaTestTestFramework)
     case Specs2 extends Framework("specs2", new Specs2TestFramework)
@@ -39,13 +46,24 @@ object TestLenses {
     case MUnit extends Framework("munit", new MUnitTestFramework)
   }
 
-  /** Returns the lenses of a file in document order; `module` owns the file. */
+  /**
+   * Finds the runnable suites of a file and their tests.
+   *
+   * Runs under a cancellable host read. Every type definition, nested ones included, is checked against the
+   * supported frameworks; a suite with no recognized framework, or one the IDE would not offer to run, has no lens.
+   *
+   * @param file Scala file to scan
+   * @param module module that owns the file
+   * @return a suite lens for each runnable suite, plus a lens for each of its tests whose name is static, ordered by
+   *         start offset
+   */
   def in(file: ScalaFile, module: Module): Seq[Lens] = HostLock.query {
     PsiTreeUtil.findChildrenOfType(file, classOf[ScTypeDefinition]).asScala.toSeq
       .flatMap(suite => frameworkOf(suite).filter(runnable(suite, _)).toSeq.flatMap(lenses(suite, _, module)))
       .sortBy(_.range.getStartOffset)
   }
 
+  /** The first framework whose detector recognizes the suite. */
   private def frameworkOf(suite: ScTypeDefinition): Option[Framework] = Framework.values.find {
     // uTest detection of a class suite reads the library version from IDE services the host lacks.
     case Framework.UTest => suite.isInstanceOf[ScObject] && Framework.UTest.detector.isTestClass(suite: PsiElement)
@@ -59,6 +77,7 @@ object TestLenses {
     case _ => true
   }
 
+  /** The suite's own lens followed by one lens per test whose name the runner can select. */
   private def lenses(suite: ScTypeDefinition, framework: Framework, module: Module): Seq[Lens] = {
     // A test whose name is not static has no lens: running it by an empty name would run the whole suite.
     val tests = testLocations(suite, framework).flatMap { element =>
@@ -67,6 +86,7 @@ object TestLenses {
     Lens(anchor(suite), framework.id, suite.qualifiedName, None) +: tests
   }
 
+  /** The elements the framework's finder anchors the suite's tests to; none for uTest. */
   private def testLocations(suite: ScTypeDefinition, framework: Framework): Seq[PsiElement] = framework match {
     case Framework.ScalaTest => ScalaTestTestLocationsFinder.calculateTestLocations(suite)
     case Framework.Specs2 => Specs2TestLocationsFinder.calculateTestLocations(suite)
@@ -74,6 +94,7 @@ object TestLenses {
     case Framework.UTest => Seq.empty
   }
 
+  /** The runner's name for the test at `element`, or none when it has no static name. */
   private def testName(element: PsiElement, suite: ScTypeDefinition, framework: Framework, module: Module): Option[String] =
     framework match {
       case Framework.ScalaTest => scalaTestName(element, suite, module)
@@ -97,6 +118,7 @@ object TestLenses {
       case _ => None
     }
 
+  /** The plugin's single-test finder over the suite's template body, or none when the suite has no body. */
   private def legacyFinder(element: PsiElement, suite: ScTypeDefinition): Option[ScalaTestSingleTestLocationFinderOld] =
     suite.extendsBlock.templateBody.map(new ScalaTestSingleTestLocationFinderOld(element, suite, _))
 

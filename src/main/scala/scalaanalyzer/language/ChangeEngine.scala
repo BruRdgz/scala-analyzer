@@ -28,7 +28,10 @@ import scala.util.Using
  * in one slot for the whole project (`PsiToDocumentSynchronizer.mySyncDocument`), copies included.
  */
 object ChangeEngine {
+  /** Monitor that makes previews take turns, as described above. */
   private val changesInTurn = new Object
+
+  /** Holds the resources of the preview running on this thread, so copies made by ModCommands are released with it. */
   private val copyResources = new ThreadLocal[Using.Manager]
 
   /**
@@ -84,7 +87,8 @@ object ChangeEngine {
           copyResources.set(resources)
           try {
             resources(listenTo(copy))
-            // Insert handlers position the caret explicitly; inserting a closing delimiter must leave it before that delimiter.
+            // Insert handlers position the caret explicitly; inserting a closing delimiter must leave it before
+            // that delimiter.
             val editor = resources(new RequestEditor(document, copy.getProject, 0, caretRightBiased = false))
             inPreviewSession(editor.editor)(change(file.getText, copy, modify))
           } finally copyResources.set(previous)
@@ -93,7 +97,15 @@ object ChangeEngine {
     }
   }
 
-  /** ModCommand creates further copies; their documents need the same commit listeners as the preview's file. */
+  /**
+   * Copies a file for the platform's ModCommand pipeline during a preview.
+   *
+   * ModCommand creates further copies; their documents need the same commit listeners as the preview's file. The
+   * copy keeps a Scala file's attached Scala features and is released with the running preview.
+   *
+   * @param original file the ModCommand wants to copy
+   * @return the listened-to copy, or `null` when no preview is running on the calling thread
+   */
   private[scalaanalyzer] def copyForModCommand(original: PsiFile): PsiFile = original match {
     case file if copyResources.get() != null =>
       val resources = copyResources.get()
@@ -177,21 +189,33 @@ object ChangeEngine {
    */
   def format(file: ScalaFile, range: Option[TextRange], indentSize: Int, useTabs: Boolean): Result = HostLock.query {
     require(indentSize > 0, "the indent size must be positive")
+
     val manager = CodeStyleSettingsManager.getInstance(file.getProject)
     val settings = manager.getCurrentSettings.clone()
+
     // Configured whole-file scalafmt requests are handled before this IntelliJ-formatter entry point.
     settings.getCustomSettings(classOf[ScalaCodeStyleSettings]).FORMATTER = ScalaCodeStyleSettings.INTELLIJ_FORMATTER
     val indent = settings.getCommonSettings(ScalaLanguage.INSTANCE).getIndentOptions
     indent.TAB_SIZE = indentSize
     indent.INDENT_SIZE = indentSize
     indent.USE_TAB_CHARACTER = useTabs
+
     manager.computeWithLocalSettings(settings, _ => run(file) { copy =>
       val selected = range.getOrElse(copy.getTextRange)
       CodeStyleManager.getInstance(copy.getProject).reformatText(copy, selected.getStartOffset, selected.getEndOffset)
     }._1)
   }
 
-  /** Refines word hunks into character edits and joins touching changes while retaining unchanged whitespace. */
+  /**
+   * Computes the edits that turn one text into another.
+   *
+   * Refines word hunks into character edits and joins touching changes while retaining unchanged whitespace.
+   * Cancellation propagates from the platform's comparison.
+   *
+   * @param original text the edits apply to
+   * @param changed text the edits produce
+   * @return replacements against `original`, sorted, disjoint and non-touching; empty when the texts are equal
+   */
   private[scalaanalyzer] def diff(original: String, changed: String): Seq[Edit] = {
     val cancel: CancellationChecker = () => ProgressManager.checkCanceled()
     val edits = for {

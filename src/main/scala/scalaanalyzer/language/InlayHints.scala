@@ -36,9 +36,11 @@ object InlayHints {
     override def showExclusiveRangeHint: Boolean = false
   }
 
+  /** The plugin's hint-collecting pass class, whose private result buffer is read reflectively. */
   private val PassClass = Class.forName("org.jetbrains.plugins.scala.codeInsight.implicits.ImplicitHintsPass")
 
   // The pass exposes collection but keeps its results private, with no accessor before editor rendering.
+  /** The pass's private `hints` field. */
   private val CollectedHints = {
     val field = PassClass.getDeclaredField("hints")
     field.setAccessible(true)
@@ -47,13 +49,20 @@ object InlayHints {
 
   // The public setter rebinds IDE shortcuts and fails without KeymapManager. A field write is smaller than
   // adding the absent keymap API and adapters solely for those shortcuts; the host only needs the enabled flag.
+  /** The plugin's private implicit-hints enabled flag, written reflectively. */
   private val Enabled = {
     val field = ImplicitHints.getClass.getDeclaredField("_enabled")
     field.setAccessible(true)
     field
   }
 
-  /** Sets the plugin's implicit-hints flag without registering the IDE keymap services it otherwise requires. */
+  /**
+   * Sets the plugin's implicit-hints flag without registering the IDE keymap services it otherwise requires.
+   *
+   * The flag lives in the plugin's `ImplicitHints` singleton, so it applies to every file and request.
+   *
+   * @param enabled whether the plugin's pass should produce implicit argument and conversion hints
+   */
   private[scalaanalyzer] def setImplicitHintsEnabled(enabled: Boolean): Unit = Enabled.setBoolean(ImplicitHints, enabled)
 
   /**
@@ -67,7 +76,9 @@ object InlayHints {
   def in(file: ScalaFile): Seq[InlayHint] = HostLock.query {
     Using.resource(new RequestEditor(file.getViewProvider.getDocument, file.getProject, 0)) { editor =>
       val pass = HostImplicitHintsPass.create(editor.editor, file, Settings)
+
       pass.doCollectInformation(ProgressManager.getInstance.getProgressIndicator)
+
       val ordinary = collected(pass).map(hint => InlayHint(hint.position.getOffset(hint.element) + hint.offsetDelta, text(hint)))
       (ordinary ++ methodChains(pass)).sortBy(_.offset)
     }
@@ -87,9 +98,12 @@ object InlayHints {
       val hints = group.hints.asScala.toSeq
       // As regenerateMethodChainHints does, omit the last hint after an annotated type mismatch.
       val shown = if (AnnotatorHints.in(group.outer).nonEmpty) hints.dropRight(1) else hints
+
       if (shown.size < 2) Seq.empty
       // Blank templates only pad the IDE's vertical alignment; they have no label to show in LSP.
-      else shown.filterNot(_.parts.forall(_.string.isBlank)).map(hint => InlayHint(hint.offset, hint.parts.map(_.string).mkString))
+      else shown
+        .filterNot(_.parts.forall(_.string.isBlank))
+        .map(hint => InlayHint(hint.offset, hint.parts.map(_.string).mkString))
     }
 
   /** Reads the plugin pass's private result buffer, rejecting an unexpected runtime shape. */

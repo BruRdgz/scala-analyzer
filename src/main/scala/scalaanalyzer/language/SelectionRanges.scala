@@ -17,10 +17,13 @@ import scala.util.Using
 /**
  * Computes successive Extend Selection steps using the platform's registered handlers.
  *
- * As in SelectWordHandler, each
- * step searches from the caret's leaf and stops at the first ancestor offering a strict expansion of the selection.
+ * As in SelectWordHandler, each step searches from the caret's leaf and stops at the first ancestor offering a
+ * strict expansion of the selection.
  */
 object SelectionRanges {
+  /** Where one expansion step starts: the PSI element to search from and the offset the handlers are asked about. */
+  private final case class StartPoint(element: PsiElement, offset: Int)
+
   /**
    * Expands a caret position into successively larger selection ranges.
    *
@@ -47,22 +50,27 @@ object SelectionRanges {
   private def next(file: ScalaFile, editor: Editor, caret: Caret, selection: TextRange): Option[TextRange] = {
     ProgressManager.checkCanceled()
     val offset = adjustedOffset(editor.getDocument.getCharsSequence, caret)
-    startElement(file, editor, caret, offset).flatMap { (element, cursor) =>
-      val smallest = smallestExpansion(otherTree(file, element, cursor), cursor, editor, selection)
+    startElement(file, editor, caret, offset).flatMap { start =>
+      val smallest = smallestExpansion(otherTree(file, start.element, start.offset), start.offset, editor, selection)
       Option.when(smallest.contains(selection) && smallest != selection)(smallest)
     }
   }
 
   /** Starts at the caret's leaf or preceding token, skipping whitespace that cannot expand. */
-  private def startElement(file: ScalaFile, editor: Editor, caret: Caret, offset: Int): Option[(PsiElement, Int)] = {
+  private def startElement(file: ScalaFile, editor: Editor, caret: Caret, offset: Int): Option[StartPoint] = {
     val leaf = elementAt(file, offset)
     val element = leaf match {
       case _: PsiWhiteSpace if offset > 0 && !elementAt(file, offset - 1).isInstanceOf[PsiWhiteSpace] => elementAt(file, offset - 1)
       case _ => leaf
     }
+
     element match {
-      case space: PsiWhiteSpace if SelectWordUtil.canWhiteSpaceBeExpanded(space, offset, caret, editor) => Some(space -> offset)
-      case _ => followingContent(element).map(found => found -> (if (found eq element) offset else found.getTextRange.getStartOffset))
+      case space: PsiWhiteSpace if SelectWordUtil.canWhiteSpaceBeExpanded(space, offset, caret, editor) =>
+        Some(StartPoint(space, offset))
+      case _ =>
+        followingContent(element).map { found =>
+          StartPoint(found, if (found eq element) offset else found.getTextRange.getStartOffset)
+        }
     }
   }
 
@@ -70,17 +78,20 @@ object SelectionRanges {
   private def smallestExpansion(element: PsiElement, cursor: Int, editor: Editor, selection: TextRange): TextRange = {
     val text = editor.getDocument.getCharsSequence
     var smallest = new TextRange(0, text.length)
+
     SelectWordUtil.processRanges(element, text, cursor, editor, range => {
       val expands = range.contains(selection) && range != selection && smallest.contains(range)
       if (expands) smallest = range
       expands
     })
+
     smallest
   }
 
   /** Moves the handler lookup one code unit left at token ends, whitespace boundaries and selection ends. */
   private def adjustedOffset(text: CharSequence, caret: Caret): Int = {
     val offset = caret.getOffset
+
     /** Keeps character access deferred until the caret is known to have a preceding code unit. */
     def favoursPrevious: Boolean = {
       val previous = text.charAt(offset - 1)

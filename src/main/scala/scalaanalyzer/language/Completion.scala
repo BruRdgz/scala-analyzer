@@ -3,9 +3,9 @@ package scalaanalyzer.language
 import com.intellij.codeInsight.completion.*
 import com.intellij.codeInsight.completion.impl.CompletionSorterImpl
 import com.intellij.codeInsight.intention.preview.IntentionPreviewUtils
+import com.intellij.codeInsight.lookup.{Classifier, Lookup, LookupElement, LookupElementBuilder, LookupElementPresentation, LookupElementRenderer, WeighingContext}
 import com.intellij.modcommand.{ActionContext, ModCommandExecutor, ModNavigate}
 import com.intellij.modcompletion.ModCompletionItem
-import com.intellij.codeInsight.lookup.{Classifier, Lookup, LookupElement, LookupElementBuilder, LookupElementPresentation, LookupElementRenderer, WeighingContext}
 import com.intellij.openapi.editor.Editor
 import com.intellij.openapi.editor.impl.DocumentImpl
 import com.intellij.openapi.progress.{ProcessCanceledException, ProgressManager}
@@ -93,11 +93,24 @@ object Completion {
    */
   final case class Inserted(result: ChangeEngine.Result, caret: Int)
 
-  /** The platform service keeps the current completion in a field; host requests complete on several threads. */
+  /**
+   * The application's `CompletionService`, registered by `HostBootstrap`, with the current completion kept per thread.
+   *
+   * The platform service keeps the current completion in a field; host requests complete on several threads, so each
+   * thread sees only the completion it is running.
+   */
   private[scalaanalyzer] final class Service extends BaseCompletionService {
+    /** The completion running on this thread, set only while `performCompletion` executes. */
     private val current = new ThreadLocal[CompletionProcess]
+
+    /** Returns the completion running on the calling thread, or null outside `performCompletion`. */
     override def getCurrentCompletion: CompletionProcess = current.get()
-    override def performCompletion(parameters: CompletionParameters, consumer: Consumer[? >: CompletionResult]): Unit = {
+
+    /** Performs the completion as the calling thread's current one, clearing it afterwards. */
+    override def performCompletion(
+      parameters: CompletionParameters,
+      consumer: Consumer[? >: CompletionResult],
+    ): Unit = {
       current.set(parameters.getProcess)
       try super.performCompletion(parameters, consumer)
       finally current.remove()
@@ -117,9 +130,11 @@ object Completion {
    */
   def complete(file: PsiFile, offset: Int, limit: Int = MaxSuggestions): Suggestions = HostLock.query {
     completionResults(file, file.getText, offset) { results =>
-      // The lookup renders visible items lazily. One more successful rendering determines whether the list is incomplete.
+      // The lookup renders visible items lazily.
+      // One more successful rendering determines whether the list is incomplete.
       val suggestions = sort(results).iterator.flatMap(result => rendered(result, offset))
       val items = suggestions.take(limit).toVector
+
       Suggestions(items, incomplete = suggestions.hasNext)
     }
   }
@@ -127,8 +142,9 @@ object Completion {
   /**
    * Previews the insert handler of a previously chosen suggestion.
    *
-   * The input file must already contain the lookup text in place of the typed prefix. The candidate is found again
-   * using its original prefix and identity; a missing lookup or candidate produces no follow-up.
+   * Runs under a cancellable read without changing the source. The input file must already contain the lookup text in
+   * place of the typed prefix. The candidate is found again using its original prefix and identity; a missing lookup
+   * or candidate produces no follow-up.
    *
    * @param file Scala or Java file containing the inserted lookup text
    * @param start UTF-16 start offset of that text
@@ -141,26 +157,43 @@ object Completion {
     HostLock.query {
       val end = start + lookup.length
       val text = file.getText
+
       if (!text.startsWith(lookup, start)) None
       else {
         // The suggestion is found again where it was made: in the text with the typed prefix, not the lookup string.
         val typed = text.substring(0, start) + prefixText + text.substring(end)
         val offset = start + prefixText.length
+
         completionResults(file, typed, offset) { results =>
           val chosen = results.find(result => result.getLookupElement.getLookupString == lookup &&
             rendered(result, offset).exists(_.identity == identity))
+
           chosen.map(handle(file, _, results, new TextRange(start, end), Lookup.NORMAL_SELECT_CHAR))
         }
       }
     }
 
-  /** Previews the best matching suggestion and its insert handler, as the plugin's completion tests do. */
+  /**
+   * Previews the best matching suggestion and its insert handler, as the plugin's completion tests do.
+   *
+   * Runs under a cancellable read without changing the source: the typed prefix before `offset` is replaced by the
+   * chosen lookup string on a copy of the file. Throws `IllegalArgumentException` if no suggestion offers `lookup`.
+   *
+   * @param file Scala or Java source being completed
+   * @param offset caret offset in UTF-16 code units, at the end of the typed prefix
+   * @param lookup lookup string to choose; the first suggestion in ranked order with it among its lookup strings wins
+   * @param completionChar character that confirms the choice, such as `Lookup.NORMAL_SELECT_CHAR`
+   * @return the previewed result of the chosen suggestion's insert handler
+   */
   private[scalaanalyzer] def choose(file: PsiFile, offset: Int, lookup: String, completionChar: Char): Inserted =
     HostLock.query {
       completionResults(file, file.getText, offset) { results =>
-        val chosen = sort(results).find(_.getLookupElement.getAllLookupStrings.contains(lookup))
+        val chosen = sort(results)
+          .find(_.getLookupElement.getAllLookupStrings.contains(lookup))
           .getOrElse(throw new IllegalArgumentException(s"no suggestion for $lookup"))
-        handle(file, chosen, results, new TextRange(offset - chosen.getPrefixMatcher.getPrefix.length, offset), completionChar)
+        val prefix = new TextRange(offset - chosen.getPrefixMatcher.getPrefix.length, offset)
+
+        handle(file, chosen, results, prefix, completionChar)
       }
     }
 
@@ -168,31 +201,39 @@ object Completion {
   private def handle(file: PsiFile, chosen: CompletionResult, results: Vector[CompletionResult], prefix: TextRange,
                      completionChar: Char): Inserted = {
     val element = chosen.getLookupElement
+
     val (changed, editor) = ChangeEngine.run(file) { copy =>
       val document = copy.getViewProvider.getDocument
+
       document.replaceString(prefix.getStartOffset, prefix.getEndOffset, element.getLookupString)
+
       val editor = IntentionPreviewUtils.getPreviewEditor
+
       editor.getCaretModel.moveToOffset(prefix.getStartOffset + element.getLookupString.length)
       runHandler(copy, editor, element, results.map(_.getLookupElement).toArray, prefix, completionChar)
+
       // Keep the caret model until postponed formatting has updated its offset in ChangeEngine.
       editor
     }
+
     Inserted(changed, editor.getCaretModel.getOffset)
   }
 
-  /** Runs an insert handler on the copy using the lookup's offsets, candidates and completion character. */
+  /** Runs a `ModCommand` item's command, else the legacy `handleInsert`, on the copy with the lookup's context. */
   private def runHandler(copy: PsiFile, editor: Editor, element: LookupElement, elements: Array[LookupElement],
                          prefix: TextRange, completionChar: Char): Unit = {
     val start = prefix.getStartOffset
     val document = copy.getViewProvider.getDocument
     val tail = editor.getCaretModel.getOffset
     val modItem = element.as(classOf[CompletionItemLookupElement])
+
     if (modItem != null) {
       val mode = if (completionChar == Lookup.REPLACE_SELECT_CHAR) ModCompletionItem.InsertionMode.OVERWRITE
                  else ModCompletionItem.InsertionMode.INSERT
       // Compute against the queried snapshot, before its prefix was replaced on the preview copy.
       val action = ActionContext.from(null, copy.getOriginalFile).withOffset(start).withSelection(prefix)
       val command = modItem.computeCommand(action, new ModCompletionItem.InsertionContext(mode, completionChar))
+
       // ModCommand completion consumes its prefix before applying the computed update, as LookupImpl does.
       document.deleteString(start, tail)
       PsiDocumentManager.getInstance(copy.getProject).commitDocument(document)
@@ -204,14 +245,17 @@ object Completion {
       }
       return
     }
+
     val identifierEnd = CompletionInitializationContext.calcDefaultIdentifierEnd(editor, tail)
     val offsets = new OffsetMap(document)
+
     try {
       offsets.addOffset(CompletionInitializationContext.START_OFFSET, start)
       offsets.addOffset(CompletionInitializationContext.SELECTION_END_OFFSET, tail)
       offsets.addOffset(CompletionInitializationContext.IDENTIFIER_END_OFFSET, identifierEnd)
       // Replacing (Tab) also removes the rest of the identifier the caret was in.
-      if (completionChar == Lookup.REPLACE_SELECT_CHAR && identifierEnd > tail) document.deleteString(tail, identifierEnd)
+      if (completionChar == Lookup.REPLACE_SELECT_CHAR && identifierEnd > tail)
+        document.deleteString(tail, identifierEnd)
       val context = new InsertionContext(offsets, completionChar, elements, copy, editor, false)
       context.commitDocument()
       element.handleInsert(context)
@@ -239,15 +283,18 @@ object Completion {
 
     val element = result.getLookupElement
     val presentation = new LookupElementPresentation
+
     element.renderElement(presentation)
     // The cheap rendering leaves out Scala's types and signatures: they come from the expensive renderer.
     Option(element.getExpensiveRenderer).foreach { renderer =>
       // The API types the renderer existentially; its contract is to render this very element.
       renderer.asInstanceOf[LookupElementRenderer[LookupElement]].renderElement(element, presentation)
     }
+
     val label = text(presentation.getItemText).getOrElse(element.getLookupString)
     val tail = text(presentation.getTailText)
     val typeText = text(presentation.getTypeText)
+
     Suggestion(
       label = label,
       tail = tail,
@@ -276,6 +323,7 @@ object Completion {
       item.isClassName || item.prefixCompletion || item.shouldImport || item.elementToImport.nonEmpty ||
       item.someSmartCompletion || item.isInSimpleString || item.isInInterpolatedString ||
       item.isNamedParameterOrAssignment || item.isInStableElementPattern || item.getLookupString.contains("`")
+
     !changesText && (item.getPsiElement match {
       case function: ScFunction =>
         // classOf gets its type argument brackets.
@@ -286,12 +334,14 @@ object Completion {
     })
   }
 
-  /** Supplies contributor results while their dummy-identifier copy and offset translations remain alive. */
+  /** Completes `text` at `offset` and passes the results to `use` while the dummy-identifier copy remains alive. */
   private def completionResults[T](file: PsiFile, text: String, offset: Int)(use: Vector[CompletionResult] => T): T =
     Using.Manager { resources =>
       require(offset >= 0 && offset <= text.length, s"completion offset outside the text: $offset")
       ProgressManager.checkCanceled()
-      // Other text than the file's, or a file of the plugin's PSI factory (which has no document), is completed on a copy.
+
+      // Other text than the file's, or a file of the plugin's PSI factory (which has no document),
+      // is completed on a copy.
       val asIs = file.isPhysical && text == file.getText
       val document = if (asIs) file.getViewProvider.getDocument else new DocumentImpl(text)
       val editor = resources(new RequestEditor(document, file.getProject, offset))
@@ -299,17 +349,23 @@ object Completion {
       val init = new CompletionInitializationContext(editor.editor, editor.editor.getCaretModel.getCurrentCaret,
         file.getLanguage, initializationFile, CompletionType.BASIC, 1)
       releasing(resources)(init.getOffsetMap.dispose())
-      CompletionContributor.forLanguageHonorDumbness(file.getLanguage, file.getProject, editor.editor).asScala.foreach { contributor =>
-        ProgressManager.checkCanceled()
-        contributor.beforeCompletion(init)
-      }
+
+      CompletionContributor.forLanguageHonorDumbness(file.getLanguage, file.getProject, editor.editor)
+        .asScala
+        .foreach { contributor =>
+          ProgressManager.checkCanceled()
+          contributor.beforeCompletion(init)
+        }
+
       val copied = dummyIdentifierCopy(file, text, init, offset, resources)
-      val translator = new OffsetTranslator(document, initializationFile, copied.getOffsets.getDocument, init.getStartOffset,
-        init.getSelectionEndOffset, init.getDummyIdentifier)
+      val translator = new OffsetTranslator(document, initializationFile, copied.getOffsets.getDocument,
+        init.getStartOffset, init.getSelectionEndOffset, init.getDummyIdentifier)
       releasing(resources)(Disposer.dispose(translator))
+
       val parameters = CompletionInitializationUtil.createCompletionParameters(init, () => false, copied)
       val results = Vector.newBuilder[CompletionResult]
       CompletionService.getCompletionService.performCompletion(parameters, result => results += result)
+
       use(results.result())
     }.get
 
@@ -317,13 +373,16 @@ object Completion {
   private def dummyIdentifierCopy(file: PsiFile, text: String, init: CompletionInitializationContext, offset: Int,
                                   resources: Using.Manager): OffsetsInFile = {
     val dummy = init.getDummyIdentifier
-    val copy = resources(new TemporaryCopy(file, text.substring(0, init.getStartOffset) + dummy + text.substring(init.getSelectionEndOffset))).file
+    val copyText = text.substring(0, init.getStartOffset) + dummy + text.substring(init.getSelectionEndOffset)
+    val copy = resources(new TemporaryCopy(file, copyText)).file
     val offsets = new OffsetMap(copy.getViewProvider.getDocument)
     releasing(resources)(offsets.dispose())
+
     for (key <- init.getOffsetMap.getAllOffsets.asScala) {
       val at = init.getOffsetMap.getOffset(key)
       offsets.addOffset(key, if (at > offset || at == offset && key.isMovableToRight) at + dummy.length else at)
     }
+
     new OffsetsInFile(copy, offsets)
   }
 
@@ -335,12 +394,15 @@ object Completion {
 
   /** Creates completion-only PSI through the file factory without the write access required by PsiFile.copy. */
   private final class TemporaryCopy(original: PsiFile, text: String) extends AutoCloseable {
+    /** The parsed copy of `text`; `original` is its original file. */
     val file: PsiFile = PsiFileFactory.getInstance(original.getProject)
       .createFileFromText(original.getName, original.getLanguage, text, false, false)
+
     file match {
       case source: PsiFileImpl => source.setOriginalFile(original)
       case other => throw new IllegalStateException(s"completion copy is not a source file: ${other.getClass.getName}")
     }
+
     // Module scopes come from the original file; Scala features are plain user data, set before the tree is parsed.
     original match {
       case scala: ScalaFile => ScalaFeatures.setAttachedScalaFeatures(file, ScalaFeatures.forPsiOrDefault(scala))
@@ -349,13 +411,16 @@ object Completion {
 
     /** Drops the temporary copy's view-provider cache entry. */
     override def close(): Unit =
-      PsiManagerEx.getInstanceEx(original.getProject).getFileManager.setViewProvider(file.getViewProvider.getVirtualFile, null)
+      PsiManagerEx.getInstanceEx(original.getProject)
+        .getFileManager
+        .setViewProvider(file.getViewProvider.getVirtualFile, null)
   }
 
-  /** Each result keeps the sorter of the contributor that made it: results are ordered within their sorter's group. */
+  /** Orders results within each contributor's sorter group; groups keep their first-seen order. */
   private def sort(results: Vector[CompletionResult]): Vector[CompletionResult] = {
     val byElement = results.map(result => result.getLookupElement -> result).toMap
     val context = weighingContext(byElement)
+
     results.map(sorterOf).distinct.flatMap { sorter =>
       // Sorters are compared by value: contributors make equal ones for each result.
       val group = results.filter(sorterOf(_) == sorter)
@@ -365,8 +430,10 @@ object Completion {
   }
 
   /** Orders items through the classifier chain, removing failed items with their partial weights. */
-  private def classified(sorter: CompletionSorterImpl, elements: Vector[LookupElement], context: ProcessingContext): Vector[LookupElement] = {
+  private def classified(sorter: CompletionSorterImpl, elements: Vector[LookupElement],
+                         context: ProcessingContext): Vector[LookupElement] = {
     val classifier = sorter.buildClassifier(Classifier.empty[LookupElement]())
+
     val weighed = elements.filter { element =>
       ProgressManager.checkCanceled()
       try {
@@ -381,14 +448,19 @@ object Completion {
           false
       }
     }
+
     classifier.classify(weighed.asJava, context).asScala.toVector
   }
 
   /** What a failure report needs to find the element: its kind, and where its PSI is (or is not). */
   private def describe(element: LookupElement): String = {
     val psi = Option(element.getPsiElement)
-    val file = psi.flatMap(e => Option(e.getContainingFile)).fold("no file")(f => s"in ${f.getName} (${f.getClass.getSimpleName})")
-    s"${element.getLookupString} (${element.getClass.getSimpleName}; ${psi.fold("no PSI")(e => s"${e.getClass.getSimpleName}, valid ${e.isValid}, $file")})"
+    val file = psi
+      .flatMap(e => Option(e.getContainingFile))
+      .fold("no file")(f => s"in ${f.getName} (${f.getClass.getSimpleName})")
+    val psiText = psi.fold("no PSI")(e => s"${e.getClass.getSimpleName}, valid ${e.isValid}, $file")
+
+    s"${element.getLookupString} (${element.getClass.getSimpleName}; $psiText)"
   }
 
   /** Requires the plugin's sorter implementation because the host reproduces its classifier ordering. */
@@ -400,25 +472,41 @@ object Completion {
   /** The weighing inputs the IDE's lookup arranger supplies before the user types again. */
   private def weighingContext(byElement: Map[LookupElement, CompletionResult]): ProcessingContext = {
     val context = new ProcessingContext
+
     context.put(CompletionLookupArranger.PREFIX_CHANGES, Integer.valueOf(0))
     context.put(CompletionLookupArranger.WEIGHING_CONTEXT, new WeighingContext {
       override def itemMatcher(item: LookupElement): PrefixMatcher = byElement(item).getPrefixMatcher
       override def itemPattern(item: LookupElement): String = itemMatcher(item).getPrefix
     })
+
     context
   }
 
-  /** Stable tie-break fields for suggestions with equal platform weights. */
-  private def sourceOrder(element: LookupElement): (String, String, Int, String) = {
+  /** Tie-break key of a suggestion; keys compare by lookup string, file path, text offset, then signature. */
+  private final case class TieBreak(lookup: String, path: String, offset: Int, signature: String)
+
+  private object TieBreak {
+    given Ordering[TieBreak] = Ordering.by(key => (key.lookup, key.path, key.offset, key.signature))
+  }
+
+  /** Stable tie-break key for suggestions with equal platform weights. */
+  private def sourceOrder(element: LookupElement): TieBreak = {
     val psi = Option(element.getPsiElement)
-    val path = psi.flatMap(e => Option(e.getContainingFile)).map(_.getViewProvider.getVirtualFile.getPath).getOrElse("")
+    val path = psi
+      .flatMap(e => Option(e.getContainingFile))
+      .map(_.getViewProvider.getVirtualFile.getPath)
+      .getOrElse("")
     // Synthetic functions (the standard library's operators) have no source: their signature tells overloads apart.
     val signature = psi match {
       case Some(function: ScSyntheticFunction) =>
-        function.paramClauses.map(_.map(_.paramType.canonicalText).mkString("(", ",", ")")).mkString + function.retType.canonicalText
+        val parameters = function.paramClauses
+          .map(_.map(_.paramType.canonicalText).mkString("(", ",", ")"))
+          .mkString
+        parameters + function.retType.canonicalText
       case _ => ""
     }
-    (element.getLookupString, path, psi.fold(-1)(_.getTextOffset), signature)
+
+    TieBreak(element.getLookupString, path, psi.fold(-1)(_.getTextOffset), signature)
   }
 
   /** Maps the suggestion's PSI element to the closest host completion category. */

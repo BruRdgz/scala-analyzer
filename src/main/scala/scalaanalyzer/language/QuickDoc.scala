@@ -14,12 +14,12 @@ import scala.collection.mutable.{ArrayBuffer, LinkedHashMap}
  * Retains declaration context, documentation blocks and grouped sections; the hover supplies its signature separately.
  */
 object QuickDoc {
-
   /**
    * Converts documentation content and sections from the plugin's HTML output.
    *
-   * This expects the generator's `content` and `sections` fragments. IDE-only links are omitted while their labels
-   * remain; HTTP and HTTPS links are retained.
+   * This expects the generator's `content` and `sections` fragments, and also reads its `bottom` fragment as the
+   * declaration's location. The conversion only parses `html`: it needs no PSI and holds no lock. IDE-only links are
+   * omitted while their labels remain; HTTP and HTTPS links are retained.
    *
    * @param html quick-documentation HTML produced by the plugin
    * @param codeLanguage default language of code blocks without an explicit language attribute
@@ -27,17 +27,22 @@ object QuickDoc {
    */
   def toMarkdown(html: String, codeLanguage: String = "scala"): Option[String] = {
     val converter = new Converter(codeLanguage)
+
     new ParserDelegator().parse(new StringReader(html), converter, true)
+
     converter.markdown
   }
 
   /** Characters Markdown gives a meaning to, which prose must not trigger. */
   private val MarkdownSignificant = "\\*_[]<>#`"
 
+  /** The non-breaking space, which parsed text turns into a plain space. */
   private val NonBreakingSpace = '\u00a0'
+
+  /** Section titles whose paragraphs are separate entries and whose entries always render as a bullet list. */
   private val ListedSections = Set("Params", "Parameters", "Type parameters", "Throws", "See also")
 
-  /** The generator's content and section fragments that survive conversion. */
+  /** The generator's fragments that survive conversion (content, location and sections); the rest is `Outside`. */
   private enum Region {
     case Outside, Location, Content, Sections
   }
@@ -45,10 +50,17 @@ object QuickDoc {
   /** Tracks one HTML list's marker style and ordered-list numbering. */
   private final class ListLevel(val ordered: Boolean, val indent: Int) {
     var items = 0
+
+    /** Column where the current item's text and continuation lines start. */
     var contentIndent = indent
   }
 
-  /** Collects an HTML table independently of its surrounding paragraph or section cell. */
+  /**
+   * Collects an HTML table independently of its surrounding paragraph or section cell.
+   *
+   * `parent` is the buffer that resumes when the table ends, `cells` holds the row being read and `rows` the
+   * completed ones.
+   */
   private final class Table(val parent: StringBuilder) {
     val rows = ArrayBuffer.empty[Vector[String]]
     val cells = ArrayBuffer.empty[String]
@@ -61,38 +73,67 @@ object QuickDoc {
 
   /** Converts the documentation generator's HTML fragments to Markdown as the parser visits them. */
   private final class Converter(codeLanguage: String) extends HTMLEditorKit.ParserCallback {
+    /** The documentation body. */
     private val content = new StringBuilder
+
+    /** The declaration's location, from the generator's `bottom` fragment. */
     private val location = new StringBuilder
+
+    /** Entries per section title, in the order the titles were first seen. */
     private val sections = LinkedHashMap.empty[String, ArrayBuffer[String]]
+
+    /** Open tables, innermost first. */
     private var tables = List.empty[Table]
+
+    /** The fragment the parser is inside. */
     private var region = Region.Outside
-    // Tags like the region's own opened inside it (a table in the content): their end does not end the region.
+
+    /** Depth of tags like the region's own opened inside it (a table in the content): their end does not end it. */
     private var nestedInRegion = 0
-    // Where the current text goes: `content`, a section's name or entry, or a buffer nobody reads (outside the doc's parts).
+
+    /** Where the current text goes: a fragment, a section's name or entry, a table cell, or a buffer nobody reads. */
     private var out = new StringBuilder
 
+    /** Open lists, innermost first. */
     private var lists = List.empty[ListLevel]
+
+    /** The text of the open `<pre>` block. */
     private var pre = Option.empty[StringBuilder]
-    // A Markdown code block names its language (`<code class="language-java">`); a wiki one ({{{ }}}) is Scala.
+
+    /** The language the open block names with `<code class="language-java">`, else `codeLanguage`. */
     private var preLanguage = codeLanguage
+
+    /** The text of the open inline `<code>` span, outside any `<pre>`. */
     private var code = Option.empty[StringBuilder]
+
+    /** One entry per open link, innermost first: its Markdown target, or none for a link that is omitted. */
     private var linkTargets = List.empty[Option[String]]
 
+    /** The title of the section row being read; empty until its name cell is complete. */
     private var sectionName = ""
+
+    /** The entries of the section row being read. */
     private val sectionEntries = ArrayBuffer.empty[String]
 
     /** The assembled Markdown, absent when the selected fragments contain no text. */
     def markdown: Option[String] = {
       val context = Option(location.toString.trim).filter(_.nonEmpty).map("**Defined in:** " + _)
-      val renderedSections = sections.iterator.map((name, entries) => sectionBlock(name, entries.toSeq)).mkString("\n\n")
+      val renderedSections = sections.iterator
+        .map((name, entries) => sectionBlock(name, entries.toSeq))
+        .mkString("\n\n")
       val parts = context.toSeq ++ Seq(content.toString.trim, renderedSections).filter(_.nonEmpty)
+
       Option.when(parts.nonEmpty)(parts.mkString("\n\n"))
     }
 
+    /** Opens the fragment or Markdown construct `tag` starts; outside the selected fragments only fragments open. */
     override def handleStartTag(tag: HTML.Tag, attributes: MutableAttributeSet, pos: Int): Unit = tag match {
-      case HTML.Tag.DIV if hasClass(attributes, "content") && region == Region.Outside => enter(Region.Content, content)
-      case HTML.Tag.DIV if hasClass(attributes, "bottom") && region == Region.Outside => enter(Region.Location, location)
-      case HTML.Tag.TABLE if hasClass(attributes, "sections") && region == Region.Outside => enter(Region.Sections, new StringBuilder)
+      case HTML.Tag.DIV if hasClass(attributes, "content") && region == Region.Outside =>
+        enter(Region.Content, content)
+      case HTML.Tag.DIV if hasClass(attributes, "bottom") && region == Region.Outside =>
+        enter(Region.Location, location)
+      case HTML.Tag.TABLE if hasClass(attributes, "sections") && region == Region.Outside =>
+        enter(Region.Sections, new StringBuilder)
       case _ if region == Region.Outside => ()
       case HTML.Tag.TABLE =>
         endParagraph()
@@ -117,7 +158,9 @@ object QuickDoc {
         out.append("*")
       case HTML.Tag.CODE | HTML.Tag.TT if pre.isEmpty => code = Some(new StringBuilder)
       case HTML.Tag.CODE =>
-        attribute(attributes, HTML.Attribute.CLASS).collect { case s"language-$language" => language }.foreach(preLanguage = _)
+        attribute(attributes, HTML.Attribute.CLASS)
+          .collect { case s"language-$language" => language }
+          .foreach(preLanguage = _)
       case HTML.Tag.PRE =>
         endParagraph()
         pre = Some(new StringBuilder)
@@ -131,7 +174,8 @@ object QuickDoc {
         out.append("#" * (tag.toString.last - '0')).append(' ')
       case HTML.Tag.A =>
         // The IDE's own links (psi_element://) open nothing in an editor.
-        val target = attribute(attributes, HTML.Attribute.HREF).filter(_.matches("(?i)https?://.*"))
+        val target = attribute(attributes, HTML.Attribute.HREF)
+          .filter(_.matches("(?i)https?://.*"))
           .map(_.replace("\\", "%5C").replace("(", "%28").replace(")", "%29").replace(" ", "%20"))
         target.foreach { _ =>
           indentContinuation()
@@ -141,6 +185,7 @@ object QuickDoc {
       case _ =>
     }
 
+    /** Closes the Markdown construct or fragment `tag` ends; ignored outside the selected fragments. */
     override def handleEndTag(tag: HTML.Tag, pos: Int): Unit = tag match {
       case _ if region == Region.Outside => ()
       case HTML.Tag.TD | HTML.Tag.TH if tables.nonEmpty => tables.head.cells += out.toString.trim
@@ -167,6 +212,7 @@ object QuickDoc {
       case _ =>
     }
 
+    /** Renders `<br>` in a fragment as a newline in a code block, `<br>` in a table cell, else a hard break. */
     override def handleSimpleTag(tag: HTML.Tag, attributes: MutableAttributeSet, pos: Int): Unit =
       if (tag == HTML.Tag.BR && region != Region.Outside) {
         pre match {
@@ -176,8 +222,10 @@ object QuickDoc {
         }
       }
 
+    /** Appends text verbatim to the open code block, collapsed to the open code span, or as escaped prose. */
     override def handleText(data: Array[Char], pos: Int): Unit = {
       val text = new String(data).replace(NonBreakingSpace, ' ')
+
       (pre, code) match {
         case (Some(block), _) => block.append(text)
         case (None, Some(span)) => span.append(collapseSpaces(text))
@@ -193,7 +241,7 @@ object QuickDoc {
     private def hasClass(attributes: MutableAttributeSet, name: String): Boolean =
       attribute(attributes, HTML.Attribute.CLASS).exists(_.split("\\s+").contains(name))
 
-    /** The outer HTML tag whose closing ends the current content or sections fragment. */
+    /** The outer HTML tag whose closing ends the current content, location or sections fragment. */
     private def regionTag: Option[HTML.Tag] = region match {
       case Region.Content | Region.Location => Some(HTML.Tag.DIV)
       case Region.Sections => Some(HTML.Tag.TABLE)
@@ -230,6 +278,7 @@ object QuickDoc {
       val spaced = collapseSpaces(text)
       val atLineStart = out.isEmpty || out.last == '\n' || out.last == ' '
       val trimmed = if (atLineStart) spaced.stripLeading else spaced
+
       if (trimmed.nonEmpty) indentContinuation()
       trimmed.foreach { character =>
         if (MarkdownSignificant.contains(character)) out.append('\\')
@@ -256,8 +305,10 @@ object QuickDoc {
       val fence = codeFence(text, minimum = 1)
       // A code span's edge backtick would join the fence.
       val padding = if (text.startsWith("`") || text.endsWith("`")) " " else ""
+
       indentContinuation()
       out.append(fence).append(padding).append(text).append(padding).append(fence)
+
       code = None
     }
 
@@ -267,8 +318,10 @@ object QuickDoc {
       val fence = codeFence(text, minimum = 3)
       val indent = " " * lists.headOption.fold(0)(_.contentIndent)
       val blockText = s"$fence$preLanguage\n$text\n$fence"
+
       out.append(blockText.linesIterator.map(indent + _).mkString("\n"))
       endParagraph()
+
       pre = None
     }
 
@@ -298,14 +351,15 @@ object QuickDoc {
       val table = tables.head
       tables = tables.tail
       out = table.parent
+
       if (table.rows.nonEmpty) {
         val width = table.rows.map(_.size).max
         val rows = if (table.hasHeader) table.rows.toSeq else Vector.fill(width)("") +: table.rows.toSeq
         val rendered = rows.map { row =>
-          row.padTo(width, "").map(_.replace("|", "\\|").replace("\n", "<br>"))
-            .mkString("| ", " | ", " |")
+          row.padTo(width, "").map(_.replace("|", "\\|").replace("\n", "<br>")).mkString("| ", " | ", " |")
         }
         val separator = Vector.fill(width)("---").mkString("| ", " | ", " |")
+
         out.append((Seq(rendered.head, separator) ++ rendered.tail).mkString("\n"))
         endParagraph()
       }
@@ -316,6 +370,7 @@ object QuickDoc {
       val listed = ListedSections(name) || entries.size > 1
       val body = if (listed) entries.map(entry => "- " + entry.replace("\n", "\n  ")).mkString("\n")
                  else entries.mkString("\n\n")
+
       s"### $name\n\n$body"
     }
   }

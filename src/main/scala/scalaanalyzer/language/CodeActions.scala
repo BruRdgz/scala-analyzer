@@ -7,8 +7,9 @@ import com.intellij.modcommand.{ActionContext, ModCommandExecutor}
 import com.intellij.openapi.progress.ProcessCanceledException
 import com.intellij.openapi.util.TextRange
 import org.jetbrains.plugins.scala.ScalaBundle
-import org.jetbrains.plugins.scala.editor.importOptimizer.ScalaImportOptimizer
 import org.jetbrains.plugins.scala.autoImport.quickFix.{MemberToImport, PrefixPackageToImport, ScalaImportTypeFix}
+import org.jetbrains.plugins.scala.codeInspection.declarationRedundancy.ScalaOptimizeImportsFix
+import org.jetbrains.plugins.scala.editor.importOptimizer.ScalaImportOptimizer
 import org.jetbrains.plugins.scala.lang.psi.ScImportsHolder
 import org.jetbrains.plugins.scala.lang.psi.api.ScalaFile
 import org.jetbrains.plugins.scala.lang.psi.api.base.ScReference
@@ -21,7 +22,7 @@ import scala.util.control.NonFatal
 
 /** Preview-backed code actions and import fixes exposed by the host. */
 object CodeActions {
-  // These require the desktop rename UI or an inspection profile even to check availability.
+  /** Intentions that require the desktop rename UI or an inspection profile even to check availability. */
   private val UnavailableIntentions = Set(
     "org.jetbrains.plugins.scala.codeInsight.intention.declarations.ChangeAccessModifierIntention",
     "org.jetbrains.plugins.scala.codeInsight.intention.expression.RemoveUnnecessaryParenthesesIntention",
@@ -80,7 +81,11 @@ final class CodeActions(intentionClasses: Seq[String], descriptorClasses: Seq[St
     Using.resource(new RequestEditor(file.getViewProvider.getDocument, project, range.getStartOffset)) { request =>
       val editor = request.editor
       val intentions = intentionClasses.filterNot(CodeActions.UnavailableIntentions).map { name =>
-        Candidate(name, () => Class.forName(name).getConstructor().newInstance().asInstanceOf[IntentionAction], "refactor.rewrite")
+        // `intentionClasses` holds the intention implementations registered in the plugin descriptors.
+        Candidate(
+          name,
+          () => Class.forName(name).getConstructor().newInstance().asInstanceOf[IntentionAction],
+          "refactor.rewrite")
       }
       val fixes = problems.flatMap(_.fixes).collect {
         case (fixRange, fix) if fixRange.intersects(range) || fixRange.containsOffset(range.getStartOffset) =>
@@ -103,7 +108,7 @@ final class CodeActions(intentionClasses: Seq[String], descriptorClasses: Seq[St
               previewEditor.getSelectionModel.setSelection(range.getStartOffset, range.getEndOffset)
               val commandAction = action.asModCommandAction()
               // The desktop import fix delegates to a UI processor and supplies no preview; reuse our optimizer path.
-              if (action.isInstanceOf[org.jetbrains.plugins.scala.codeInspection.declarationRedundancy.ScalaOptimizeImportsFix]) {
+              if (action.isInstanceOf[ScalaOptimizeImportsFix]) {
                 new ScalaImportOptimizer().processFile(copy).run()
                 IntentionPreviewInfo.DIFF
               } else Inspections.previewFix(action, copy).getOrElse {
@@ -126,7 +131,9 @@ final class CodeActions(intentionClasses: Seq[String], descriptorClasses: Seq[St
             Option.when(available)(Choice(title, candidate.kind, Seq.empty, Some("This action is unavailable in the headless host.")))
         }
       }
+
       val surrounded = if (range.isEmpty) Seq.empty else descriptorClasses.flatMap { name =>
+        // `descriptorClasses` holds the surround-descriptor implementations registered in the plugin descriptors.
         val descriptor = Class.forName(name).getConstructor().newInstance().asInstanceOf[SurroundDescriptor]
         val elements = descriptor.getElementsToSurround(file, range.getStartOffset, range.getEndOffset)
         if (elements.isEmpty) Seq.empty else descriptor.getSurrounders.toSeq.flatMap { surrounder =>
@@ -151,16 +158,21 @@ final class CodeActions(intentionClasses: Seq[String], descriptorClasses: Seq[St
           }
         }
       }
+
       (typeImports(file, range, problems) ++ choices ++ surrounded).distinct
     }
   }
 
   /** Offer each type-import candidate separately; the LSP client replaces the IDE's import chooser. */
   private def typeImports(file: ScalaFile, range: TextRange, problems: Seq[Diagnostic]): Seq[Choice] = {
-    val references = problems.filter(p => p.range.intersects(range) || p.range.containsOffset(range.getStartOffset))
-      .flatMap(p => Option(file.findReferenceAt(p.range.getStartOffset))).collect {
+    val references = problems
+      .filter(p => p.range.intersects(range) || p.range.containsOffset(range.getStartOffset))
+      .flatMap(p => Option(file.findReferenceAt(p.range.getStartOffset)))
+      .collect {
         case reference: ScReference if reference.qualifier.isEmpty && reference.multiResolveScala(false).isEmpty => reference
-      }.distinct
+      }
+      .distinct
+
     references.flatMap { reference =>
       ScalaImportTypeFix.getTypesToImport(reference).map { target =>
         val title = ScalaBundle.message("import.with", target.qualifiedName)

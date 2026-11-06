@@ -9,7 +9,8 @@ enum ProblemSeverity { case Error, Warning, Information }
 
 /** Symbol categories returned by workspace navigation operations. */
 enum WorkspaceSymbolKind {
-  case EnumMember, Enum, Interface, Module, Class, Constructor, Function, Method, Field, Property, Namespace, Variable, Constant, Object
+  case EnumMember, Enum, Interface, Module, Class, Constructor, Function, Method, Field, Property, Namespace, Variable,
+    Constant, Object
 }
 
 /**
@@ -59,7 +60,12 @@ final case class SourceSpan(path: Path, range: (LineColumn, LineColumn))
  * @param container containing package or class when available
  * @param location source range of the symbol's name
  */
-final case class WorkspaceSymbolMatch(name: String, kind: WorkspaceSymbolKind, container: Option[String], location: SourceSpan)
+final case class WorkspaceSymbolMatch(
+  name: String,
+  kind: WorkspaceSymbolKind,
+  container: Option[String],
+  location: SourceSpan,
+)
 
 /**
  * A replacement within a document snapshot.
@@ -148,7 +154,13 @@ final case class InlineHint(at: LineColumn, text: String)
  * @param suite fully qualified suite class name
  * @param testName plugin runner selection, absent when running the whole suite
  */
-final case class TestLens(range: (LineColumn, LineColumn), target: String, framework: String, suite: String, testName: Option[String])
+final case class TestLens(
+  range: (LineColumn, LineColumn),
+  target: String,
+  framework: String,
+  suite: String,
+  testName: Option[String],
+)
 
 /**
  * Ranked completion choices for one request.
@@ -266,8 +278,13 @@ final case class HierarchyTarget(uri: String, offset: Int, name: String, library
  * @param selectionRange declaration name range in the same file
  * @param target identity used to resolve subsequent requests
  */
-final case class HierarchyItem(name: String, kind: WorkspaceSymbolKind, location: SourceSpan,
-  selectionRange: (LineColumn, LineColumn), target: HierarchyTarget)
+final case class HierarchyItem(
+  name: String,
+  kind: WorkspaceSymbolKind,
+  location: SourceSpan,
+  selectionRange: (LineColumn, LineColumn),
+  target: HierarchyTarget,
+)
 
 /**
  * A caller or callee with call-site ranges in the caller's document.

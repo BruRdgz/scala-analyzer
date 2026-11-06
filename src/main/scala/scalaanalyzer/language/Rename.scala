@@ -1,12 +1,12 @@
 package scalaanalyzer.language
 
 import com.intellij.openapi.progress.ProgressManager
-import com.intellij.openapi.util.Computable
-import com.intellij.psi.search.GlobalSearchScope
 import com.intellij.openapi.project.Project
+import com.intellij.openapi.util.Computable
+import com.intellij.psi.{PsiDocumentManager, PsiElement, PsiFile}
 import com.intellij.psi.impl.light.LightElement
 import com.intellij.psi.impl.source.PostprocessReformattingAspect
-import com.intellij.psi.{PsiDocumentManager, PsiElement, PsiFile}
+import com.intellij.psi.search.GlobalSearchScope
 import com.intellij.refactoring.listeners.RefactoringElementListener
 import com.intellij.refactoring.rename.{PsiElementRenameHandler, RenamePsiElementProcessor, RenameUtil}
 import com.intellij.refactoring.util.{MoveRenameUsageInfo, RelatedUsageInfo}
@@ -47,16 +47,26 @@ object Rename {
   final class Plan private[Rename] (val project: Project,
                                     val renames: util.LinkedHashMap[PsiElement, String],
                                     val usages: Array[UsageInfo]) {
-    /** Project files that may be changed, excluding attached library sources. */
+    /**
+     * Distinct project files that contain a renamed declaration or a selected usage.
+     *
+     * Attached library sources are excluded: only files backed by the host's editable `SourceFile` are listed.
+     */
     val files: Seq[PsiFile] = (renames.keySet.asScala.flatMap(e => Option(e.getContainingFile)) ++ usages.map(_.getFile))
       .filter(_.getViewProvider.getVirtualFile.isInstanceOf[SourceFile]).toSeq.distinct
   }
 
   // The plugin's processors ask where the IDE has a popup or dialog (rename the base member, rename the getters and
   // setters too): unit-test mode is their way of answering with the defaults, and the host has no UI to ask.
+  /** Whether the current thread is inside `withDefaultAnswers`. */
   private val answeringDialogs = ThreadLocal.withInitial(() => false)
 
-  /** Whether rename processors should use their unit-test defaults instead of requesting UI choices. */
+  /**
+   * Tells whether rename processors on the current thread should use their unit-test defaults instead of
+   * requesting UI choices.
+   *
+   * @return `true` only while a rename planning or target step runs with the host's default answers
+   */
   def isAnsweringDialogs: Boolean = answeringDialogs.get
 
   /** Temporarily makes processor questions resolve to the host's deterministic defaults on this thread. */
@@ -102,21 +112,26 @@ object Rename {
    */
   def plan(target: PsiElement, newName: String): Plan = {
     val project = target.getProject
+
+    if (!RenameUtil.isValidName(project, target, newName)) throw new Refused(Seq(s"'$newName' is not a valid name for this element."))
+
     val renames = new util.LinkedHashMap[PsiElement, String]
     val conflicts = new MultiMap[PsiElement, String]
 
-    if (!RenameUtil.isValidName(project, target, newName)) throw new Refused(Seq(s"'$newName' is not a valid name for this element."))
     renames.put(target, newName)
     withDefaultAnswers(RenamePsiElementProcessor.allForElement(target).asScala.foreach(_.prepareRenaming(target, newName, renames)))
     // The file of a top-level class follows its name in the IDE; the host's files have fixed paths.
     renames.keySet.removeIf(_.isInstanceOf[PsiFile])
+
     val scope = GlobalSearchScope.projectScope(project)
     val usages = renames.asScala.toSeq.flatMap { (element, name) =>
       RenameUtil.findUsages(element, name, scope, false, false, renames)
     }.toArray
+
     RenameUtil.addConflictDescriptions(usages, conflicts)
     RenamePsiElementProcessor.forElement(target).findExistingNameConflicts(target, newName, conflicts, renames)
     if (!conflicts.isEmpty) throw new Refused(conflicts.values.asScala.toSeq.distinct)
+
     new Plan(project, renames, usages)
   }
 
@@ -130,12 +145,14 @@ object Rename {
    */
   def perform(plan: Plan): Unit = {
     ProgressManager.checkCanceled()
+
     val classified = classify(plan)
     val ignored = new RefactoringElementListener {
       override def elementMoved(newElement: PsiElement): Unit = ()
       override def elementRenamed(newElement: PsiElement): Unit = ()
     }
     val documents = PsiDocumentManager.getInstance(plan.project)
+
     // The IDE formats what a rename changed once its command ends.
     val callbacks = PostprocessReformattingAspect.getInstance(plan.project).postponeFormattingInside((() => {
       val callbacks = plan.renames.asScala.toSeq.flatMap { (element, name) =>
@@ -148,6 +165,7 @@ object Rename {
       plan.files.foreach(f => documents.doPostponedOperationsAndUnblockDocument(documents.getDocument(f)))
       callbacks
     }): Computable[Seq[Runnable]])
+
     plan.files.foreach(f => documents.commitDocument(documents.getDocument(f)))
     callbacks.foreach(_.run())
   }
@@ -155,6 +173,7 @@ object Rename {
   /** Groups usages by their renamed declaration or navigation element, excluding implicit light references. */
   private def classify(plan: Plan): Map[PsiElement, Seq[UsageInfo]] = {
     val renamed = plan.renames.keySet.asScala
+
     /** Resolves a usage to an element in the planned rename set, following navigation when needed. */
     def renamedElement(usage: MoveRenameUsageInfo): Option[PsiElement] = usage match {
       case related: RelatedUsageInfo => Some(related.getRelatedElement).filter(renamed)
@@ -162,7 +181,9 @@ object Rename {
         if (renamed(element)) Some(element) else Option(element.getNavigationElement).filter(renamed)
       }
     }
-    plan.usages.toSeq.collect { case usage: MoveRenameUsageInfo if !usage.getReference.isInstanceOf[LightElement] => usage }
+
+    plan.usages.toSeq
+      .collect { case usage: MoveRenameUsageInfo if !usage.getReference.isInstanceOf[LightElement] => usage }
       .flatMap(usage => renamedElement(usage).map(_ -> (usage: UsageInfo)))
       .groupMap(_._1)(_._2)
   }

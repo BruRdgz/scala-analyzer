@@ -1,9 +1,9 @@
 package scalaanalyzer.language
 
-import com.intellij.codeInspection.*
-import com.intellij.codeInspection.ex.QuickFixWrapper
 import com.intellij.codeInsight.intention.IntentionAction
 import com.intellij.codeInsight.intention.preview.IntentionPreviewInfo
+import com.intellij.codeInspection.*
+import com.intellij.codeInspection.ex.QuickFixWrapper
 import com.intellij.lang.annotation.HighlightSeverity
 import com.intellij.modcommand.ModCommandService
 import com.intellij.openapi.progress.ProgressManager
@@ -11,17 +11,17 @@ import com.intellij.psi.{PsiAnnotationOwner, SyntaxTraverser}
 import com.intellij.psi.search.LocalSearchScope
 import com.intellij.psi.search.searches.ReferencesSearch
 import com.intellij.psi.util.PsiTreeUtil
-import org.jetbrains.plugins.scala.codeInspection.declarationRedundancy.{DeleteUnusedElementFix, ScalaUnusedDeclarationInspection}
 import org.jetbrains.plugins.scala.codeInspection.cast.ScalaRedundantCastInspection
+import org.jetbrains.plugins.scala.codeInspection.declarationRedundancy.{DeleteUnusedElementFix, ScalaUnusedDeclarationInspection}
+import org.jetbrains.plugins.scala.codeInspection.suppression.ScalaInspectionSuppressor
+import org.jetbrains.plugins.scala.lang.psi.ScalaPsiUtil
+import org.jetbrains.plugins.scala.lang.psi.api.ScalaFile
 import org.jetbrains.plugins.scala.lang.psi.api.base.patterns.ScReferencePattern
 import org.jetbrains.plugins.scala.lang.psi.api.expr.{ScGenericCall, ScReferenceExpression}
 import org.jetbrains.plugins.scala.lang.psi.api.statements.ScFunctionDefinition
-import org.jetbrains.plugins.scala.lang.psi.api.toplevel.imports.{ScImportExpr, ScImportSelector}
-import org.jetbrains.plugins.scala.codeInspection.suppression.ScalaInspectionSuppressor
-import org.jetbrains.plugins.scala.lang.psi.ScalaPsiUtil
 import org.jetbrains.plugins.scala.lang.psi.api.toplevel.ScNamedElement
+import org.jetbrains.plugins.scala.lang.psi.api.toplevel.imports.{ScImportExpr, ScImportSelector}
 import org.jetbrains.plugins.scala.lang.psi.api.toplevel.typedef.ScMember
-import org.jetbrains.plugins.scala.lang.psi.api.ScalaFile
 
 import scalaanalyzer.Diagnostic
 import scalaanalyzer.platform.{CallLog, ExtensionBean}
@@ -30,7 +30,18 @@ import scala.jdk.CollectionConverters.*
 
 /** Copy-bound previews for legacy fixes whose native preview contract is incomplete. */
 private[language] object Inspections {
-  /** Recreates audited single-file fixes on copied PSI, excluding parameter/type deletion that invokes Safe Delete. */
+  /**
+   * Previews the audited fixes whose native preview does not work on the copy.
+   *
+   * Rebuilds the unused-declaration removal and the redundant-cast removal on copied PSI and applies them there;
+   * parameter/type deletion, which invokes Safe Delete, is excluded. A fix known to mutate its captured original
+   * expression instead of the copy is answered with an empty preview. Any other fix is left to the caller.
+   *
+   * @param action quick fix, or the intention wrapping one, to preview
+   * @param copy preview copy that the rebuilt fix mutates
+   * @return `None` when this object does not handle the fix, `Some(DIFF)` when the rebuilt fix was applied to the
+   *         copy, and `Some(EMPTY)` when the fix is handled but offers no applicable preview
+   */
   def previewFix(action: IntentionAction, copy: ScalaFile): Option[IntentionPreviewInfo] = {
     val fix = action match {
       case local: LocalQuickFix => local
@@ -43,6 +54,7 @@ private[language] object Inspections {
     val command = Option(fix).flatMap(local => Option(ModCommandService.getInstance.unwrap(local)))
     val capturesOriginal = command.exists(_.getClass.getName ==
       "org.jetbrains.plugins.scala.codeInspection.controlFlow.ScalaUnusedExpressionInspection$AddReturnQuickFix")
+
     if (capturesOriginal) Some(IntentionPreviewInfo.EMPTY)
     else if (!removal && !cast) None
     else fix match {
@@ -84,9 +96,12 @@ private[language] object Inspections {
  * @param descriptors local inspection registrations from the pinned Scala plugin
  */
 final class Inspections(descriptors: Seq[ExtensionBean]) {
+  /** Short names of the inspections this host runs; construction fails unless the descriptors register all of them. */
   private val supported = Set("ScalaDeprecation", "ScalaRedundantCast", "SimplifyBoolean",
     "ScalaUnusedSymbol", "ScalaUnusedExpression", "ScalaUnnecessarySemicolon", "RemoveRedundantReturn")
-  private val tools = descriptors.filter(bean => supported(bean.attributes.getOrElse("shortName", "")))
+
+  /** The registrations of the supported inspections. */
+  private val tools =descriptors.filter(bean => supported(bean.attributes.getOrElse("shortName", "")))
   require(tools.map(_.attributes("shortName")).toSet == supported, "missing supported Scala inspections")
 
   /**
@@ -106,6 +121,7 @@ final class Inspections(descriptors: Seq[ExtensionBean]) {
     }
     val elements = SyntaxTraverser.psiTraverser(file).asScala.toVector
     tools.flatMap { bean =>
+      // `tools` holds only local inspection registrations, whose implementation classes are LocalInspectionTool.
       val tool = Class.forName(bean.implementation).getConstructor().newInstance().asInstanceOf[LocalInspectionTool]
       // Batch visitation performs real local reference searches instead of relying on a desktop highlighting pass.
       val onTheFly = tool match {
@@ -168,7 +184,11 @@ final class Inspections(descriptors: Seq[ExtensionBean]) {
     PsiTreeUtil.getParentOfType(problem.getPsiElement, classOf[ScNamedElement], false) match {
       case member: ScMember =>
         // Some pinned query executors lose the processor's stop status, so Query.anyMatch can miss actual results.
-        val references = ReferencesSearch.search(member, new LocalSearchScope(member.getContainingFile), true).findAll.asScala.toSeq
+        val references = ReferencesSearch
+          .search(member, new LocalSearchScope(member.getContainingFile), true)
+          .findAll
+          .asScala
+          .toSeq
         references.exists(reference => !PsiTreeUtil.isAncestor(member, reference.getElement, false))
       case _ => false
     }
