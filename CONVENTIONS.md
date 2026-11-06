@@ -33,6 +33,9 @@ Methods that are a single expression or a `match` (normalizers, dispatch tables)
   or absent case does), and `@param` for every parameter and `@return` unless the result is `Unit`.
   `@return` states what the type does not: the meaning of `true`/`false`, ordering, distinctness. It never
   repeats the type.
+- **Exception: platform overrides that only reject the call** (their body is `CallLog.unsupported(...)` or
+  equivalent) get a one-line `/** ... */` such as `Rejects asynchronous commits; the host commits synchronously.`
+  with no `@param` or `@throws`: the platform declares the signature and the body is the whole contract.
 - **Private members** get a one-line `/** ... */` that states the effect. Invariants shared by a whole class
   live in the class documentation, not in each method. A precondition specific to one private method goes in
   that method's sentence.
