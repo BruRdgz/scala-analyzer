@@ -50,7 +50,7 @@ Beta 1 remains implemented but untagged, and Beta 2 closed without inspections.
 - `scalaanalyzer.language`: language operations and internal result models.
 - `scalaanalyzer.lsp`: transport and request/response mapping.
 - `scalaanalyzer`: root `ScalaPsiHost` facade and caller-facing `HostConfig`, `Diagnostic`, `ModuleSpec`, `HostModule`,
-  `ModuleModel`, `LineColumn`, and `LibraryIndexReport` types.
+  `ModuleModel`, `LineColumn`, `LineRange`, and `LibraryIndexReport` types.
 
 The package map describes the current implementation. The historical milestones below retain their oracle counts and
 limitations as recorded at the time.
@@ -143,3 +143,52 @@ Closed on 2026-10-30 (`v0.1.0-b2`) without inspections: their milestone is still
 - Test discovery and code lenses over BSP.
 - Refactorings with dialogs in the IDE: extract, inline, change signature.
 - Worksheets; debugging (DAP).
+
+## Code quality — standardization pass (2026-11-06/07)
+
+[CONVENTIONS.md](CONVENTIONS.md) is the standard; every package under `src/main` follows it (`platform`, `build`,
+root data types, `language`, `lsp`, `workspace`, `ScalaPsiHost`). The suite passed 176/176 at the end of the pass.
+
+**Decisions**
+
+- The `Host_*.java` adapters stay outside the pass: 27 mechanical files of at most 43 lines, pinned by
+  `AdapterSurfaceTest`, regenerated on a platform upgrade rather than read.
+- `Completion` needs no pass of its own: its longest method is 45 lines after the pass.
+- The tests were not standardized.
+- Run `sbt clean test` before pushing a build-structure or package change: an incremental build hid a shadowed
+  package once (`scalaanalyzer.munit`) that a clean CI build rejected.
+
+**Found and fixed during the pass** (each with a test): `completeInsertion` with malformed arguments answered
+`InternalError` instead of `InvalidParams`; semantic tokens with one start position and different lengths were kept
+in hash order; a test run's compile stored build diagnostics without republishing them, and the next compile on
+save then saw no change.
+
+**Found, not fixed** (read from the code or reported by reviewers; check before acting)
+
+- Indexes and files: `WordIndex.indexFile` without `removeFile` leaves stale `filesByWord` (`indexFile` could remove
+  first). `LibraryFileSystem.filenameIndex` can publish a stale index when a mount lands between the snapshot and
+  `byName = index`; the same jar mounted twice leaks a file system. `libraryFileOnDisk` does I/O under the object
+  monitor. `HostDispatchThread` initialization calls `submit().get()` while the object initializes.
+- `HostBootstrap`: `installApplication`, `installLanguageRegistries` and `installProjectServices` run 300 to 520 lines
+  and their phases leak services into each other. `newPrivate` takes the first constructor of the matching arity,
+  which is not deterministic with overloads. `instantiateClass` has duplicated cases. `platform` imports `language`
+  at `HostBootstrap.scala:275`, the only upward dependency found.
+- Build and tests: `TestRun.execute` may call `finished` twice after a `NonFatal` failure. `BspImport.connect` and
+  `modules` are long. A rare timeout in `LanguageServerTest` ("a client that does not apply the server's edits gets
+  suggestions without commands", seen once on 2026-11-07, passed on rerun) was not investigated.
+- `ProjectLanguageOperations.prepareRename` discards the result of `renameTarget` and reads in two non-atomic blocks;
+  `hierarchyElement` nests five levels. Long methods in `language/`: `CodeActions.collect` (about 80 lines),
+  `Inspections.collect` (about 63), `ChangeEngine.run`; measure again before acting.
+- `ProjectSession`: `applyImport` is about 69 lines and holds the host write lock and the import lock throughout (by
+  design). `close()` does I/O under `buildLock`. `isUsable` ignores `closed`. `workspaceSymbols` does not take the
+  import snapshot lock, unlike `problems` and `isSource`. `language` is a `val` between methods that depends on the
+  initialization order of two fields above it.
+- `ScalaLanguageServer`: `initialize` is about 100 lines (judged not worth splitting: linear and single use).
+  `closing` is a `lazy val` with side effects. `importAgain` and `openProject` catch `Throwable`. `onRead` shares a
+  plain `var asked` across threads. A `file:` URI that does not parse throws out of `sourcePath` as `InternalError`.
+  The `TextDocuments` object (about 300 lines) and the conversion helpers would split naturally into a converter file.
+- Public tuples left: `ScalaPsiHost.rename`, `textAttributes` and `Diagnostic.fixes`; `ProjectSession.definition`,
+  `typeDefinition` and `codeActions`. `TextChange`, `FileProblem` and `CompletionFollowUp` keep `start` and `end` as
+  separate fields.
+- [ARCHITECTURE.md](ARCHITECTURE.md) does not exist, though this file links it; the upgrade procedure it should hold
+  lives only in an old checkpoint (`d9e0340`).
