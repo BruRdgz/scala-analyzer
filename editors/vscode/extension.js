@@ -149,7 +149,8 @@ function compileTask(definition) {
   const task = new vscode.Task(definition, vscode.TaskScope.Workspace, 'compile', 'scala-analyzer',
     new vscode.CustomExecution(async () => compileTerminal()), []);
   task.group = vscode.TaskGroup.Build;
-  task.presentationOptions = { reveal: vscode.TaskRevealKind.Never };
+  // A reused task terminal comes back into view despite `reveal`; closing it when done keeps the panel as it was.
+  task.presentationOptions = { reveal: vscode.TaskRevealKind.Never, close: true };
   return task;
 }
 
