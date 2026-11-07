@@ -18,6 +18,10 @@ failed compile opens the Problems panel with the diagnostics.
 next move or edit; it is in the editor context menu for Scala files. It has no default key (IntelliJ's Ctrl+Shift+P opens VS Code's command palette); bind one in
 `keybindings.json`: `{ "key": "<your key>", "command": "scalaAnalyzer.typeInfo", "when": "editorLangId == scala" }`.
 
+The **Scala Build** view in the Explorer lists the build's targets with their Scala version, the targets they depend
+on, their libraries and their source file count. It refreshes whenever the build is (re)imported; its title bar
+compiles or reimports the build, and the button on a target compiles just that target.
+
 The server provides diagnostics, completion, Markdown hover, navigation, formatting, symbols and previewed
 code actions. Supported platforms for the packaged server are Linux x64 and macOS Intel/Apple Silicon.
 The server currently serves one workspace per process. See the repository README for feature boundaries.

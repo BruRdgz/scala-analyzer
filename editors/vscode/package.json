@@ -65,6 +65,21 @@
         }
       }
     ],
+    "views": {
+      "explorer": [
+        {
+          "id": "scalaAnalyzer.buildTargets",
+          "name": "Scala Build",
+          "when": "scalaAnalyzer.active"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "scalaAnalyzer.buildTargets",
+        "contents": "No build targets yet. They appear here once the build has been imported."
+      }
+    ],
     "menus": {
       "editor/context": [
         {
@@ -73,10 +88,33 @@
           "group": "navigation"
         }
       ],
+      "view/title": [
+        {
+          "command": "scalaAnalyzer.compile",
+          "when": "view == scalaAnalyzer.buildTargets",
+          "group": "navigation"
+        },
+        {
+          "command": "scalaAnalyzer.reimport",
+          "when": "view == scalaAnalyzer.buildTargets",
+          "group": "navigation"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "scalaAnalyzer.compileTarget",
+          "when": "view == scalaAnalyzer.buildTargets && viewItem == target",
+          "group": "inline"
+        }
+      ],
       "commandPalette": [
         {
           "command": "scalaAnalyzer.typeInfo",
           "when": "editorLangId == scala"
+        },
+        {
+          "command": "scalaAnalyzer.compileTarget",
+          "when": "false"
         }
       ]
     },
@@ -89,12 +127,20 @@
       {
         "command": "scalaAnalyzer.compile",
         "title": "Compile Build",
-        "category": "scala-analyzer"
+        "category": "scala-analyzer",
+        "icon": "$(tools)"
+      },
+      {
+        "command": "scalaAnalyzer.compileTarget",
+        "title": "Compile Target",
+        "category": "scala-analyzer",
+        "icon": "$(tools)"
       },
       {
         "command": "scalaAnalyzer.reimport",
         "title": "Reimport Build",
-        "category": "scala-analyzer"
+        "category": "scala-analyzer",
+        "icon": "$(sync)"
       },
       {
         "command": "scalaAnalyzer.restart",
@@ -127,7 +173,7 @@
     "@vscode/vsce": "4.1.0"
   },
   "scripts": {
-    "check": "node --check extension.js",
+    "check": "node --check extension.js && node --check buildTargets.js",
     "package": "vsce package",
     "test:installed": "node test/run.js"
   },

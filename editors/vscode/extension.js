@@ -5,9 +5,10 @@
 // The server logs to its output channel (and to a log file), reports opening the project as progress, and its state
 // as `scalaAnalyzer/state` notifications, shown in the status bar; `scalaAnalyzer/status` answers what it is doing.
 // The status bar menu and the commands call the server's requests (compile, reimport, type info) and show the result;
-// compiling is also the workspace build task (Ctrl+Shift+B).
+// compiling is also the workspace build task (Ctrl+Shift+B). The Scala Build view lists the build's targets (buildTargets.js).
 const vscode = require('vscode');
 const { LanguageClient, State } = require('vscode-languageclient/node');
+const { registerBuildTargets } = require('./buildTargets');
 
 /** @type {LanguageClient} */
 let client;
@@ -31,12 +32,13 @@ const statusMessageMs = 5000;
 const plural = (count, word) => `${count} ${word}${count === 1 ? '' : 's'}`;
 
 // Commands that send requests do nothing but warn while the server is not running.
-const needsServer = handler => async () => {
-  if (client.isRunning()) return handler();
+const needsServer = handler => async (...args) => {
+  if (client.isRunning()) return handler(...args);
   vscode.window.showWarningMessage('scala-analyzer: the server is not running');
 };
 
-function createStatusBar(context) {
+// `onReady` runs whenever the server reports the build imported, which it does after every import and reimport.
+function createStatusBar(context, onReady) {
   const status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 0);
   status.command = 'scalaAnalyzer.menu';
   const show = (state, message) => {
@@ -46,7 +48,10 @@ function createStatusBar(context) {
   };
   show('starting', 'starting the server');
   context.subscriptions.push(status);
-  client.onNotification('scalaAnalyzer/state', ({ state, message }) => show(state, message));
+  client.onNotification('scalaAnalyzer/state', ({ state, message }) => {
+    show(state, message);
+    if (state === 'ready') onReady();
+  });
   client.onDidChangeState(({ newState }) => {
     if (newState === State.Stopped) show('stopped', 'the server is not running');
   });
@@ -107,6 +112,7 @@ function registerCommands(context) {
     if (pick) await vscode.commands.executeCommand(pick.command);
   });
   register('compile', compile);
+  register('compileTarget', needsServer(node => compileAndReport(node.id)));
   register('reimport', needsServer(reimport));
   register('restart', () => client.restart());
   register('typeInfo', needsServer(showTypeInfo));
@@ -122,26 +128,40 @@ function registerCommands(context) {
   }));
 }
 
-// The terminal only relays the server's compile result and stays hidden (see compileTask): the outcome shows briefly
-// in the status bar, and a failed compile opens the Problems panel, where the server publishes the diagnostics.
+// Compiles the whole build, or the target with the given id, and shows the outcome briefly in the status bar. A failed
+// compile opens the Problems panel, where the server publishes the diagnostics. `onOutcome` gets the summary line and
+// the exit code first, for the task terminal.
+/**
+ * @param {string | undefined} target
+ * @param {(line: string, exitCode: number) => void} [onOutcome]
+ */
+async function compileAndReport(target, onOutcome = () => {}) {
+  const outcome = (line, exitCode) => {
+    vscode.window.setStatusBarMessage(`${exitCode === 0 ? '$(check)' : '$(error)'} ${line}`, statusMessageMs);
+    onOutcome(line, exitCode);
+  };
+  try {
+    const request = target
+      ? client.sendRequest('scalaAnalyzer/compile', { target })
+      : client.sendRequest('scalaAnalyzer/compile');
+    const { succeeded, errors, warnings } = await request;
+    outcome(`${succeeded ? 'Compiled' : 'Compilation failed'}: ${plural(errors, 'error')}, ${plural(warnings, 'warning')}`, succeeded ? 0 : 1);
+    if (!succeeded) await vscode.commands.executeCommand('workbench.actions.view.problems');
+  } catch (error) {
+    outcome(error.message, 1);
+    vscode.window.showErrorMessage(`scala-analyzer: compile failed: ${error.message}`);
+  }
+}
+
+// The terminal only relays the server's compile result and stays hidden (see compileTask).
 function compileTerminal() {
   const written = new vscode.EventEmitter();
   const closed = new vscode.EventEmitter();
   const finish = (line, exitCode) => {
     written.fire(`${line}\r\n`);
-    vscode.window.setStatusBarMessage(`${exitCode === 0 ? '$(check)' : '$(error)'} ${line}`, statusMessageMs);
     closed.fire(exitCode);
   };
-  const run = async () => {
-    try {
-      const { succeeded, errors, warnings } = await client.sendRequest('scalaAnalyzer/compile');
-      finish(`${succeeded ? 'Compiled' : 'Compilation failed'}: ${plural(errors, 'error')}, ${plural(warnings, 'warning')}`, succeeded ? 0 : 1);
-      if (!succeeded) await vscode.commands.executeCommand('workbench.actions.view.problems');
-    } catch (error) {
-      finish(error.message, 1);
-      vscode.window.showErrorMessage(`scala-analyzer: compile failed: ${error.message}`);
-    }
-  };
+  const run = () => compileAndReport(undefined, finish);
   return { onDidWrite: written.event, onDidClose: closed.event, open: run, close: () => {} };
 }
 
@@ -181,7 +201,8 @@ async function activate(context) {
     { documentSelector: [{ scheme: 'file', language: 'scala' }, { scheme: 'file', language: 'java' }] },
   );
 
-  createStatusBar(context);
+  await vscode.commands.executeCommand('setContext', 'scalaAnalyzer.active', true);
+  createStatusBar(context, registerBuildTargets(context, client));
   registerCommands(context);
   registerTypeHint(context);
   registerBuildTask(context);
