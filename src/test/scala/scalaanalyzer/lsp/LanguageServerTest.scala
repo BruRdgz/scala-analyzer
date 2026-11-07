@@ -1090,6 +1090,32 @@ class LanguageServerTest extends munit.FunSuite {
     assertEquals(word.getParent.getParent.getRange, new Range(new Position(16, 0), new Position(17, 0)))
   }
 
+  test("type info shows the type of the identifier under the caret or of the selected expression, and nothing else") {
+    val text = """package app
+                 |object TypeInfo {
+                 |  val answer = 40 + 2
+                 |  val shout = "hi".toUpperCase
+                 |}
+                 |""".stripMargin
+    def change(value: String, version: Int): Unit = server.getTextDocumentService.didChange(new DidChangeTextDocumentParams(
+      new VersionedTextDocumentIdentifier(main.toUri.toString, version), JavaList.of(new TextDocumentContentChangeEvent(value))))
+    def typeInfo(range: Range): String =
+      server.typeInfo(new HostProtocol.TypeInfoParams(document(main), range)).get(1, TimeUnit.MINUTES)
+    def caret(line: Int, column: Int) = new Range(new Position(line, column), new Position(line, column))
+    val original = Files.readString(main).replace("val text: String", "val text: Int")
+    try {
+      change(text, 42)
+      // `answer`, whose type is inferred.
+      assertEquals(typeInfo(caret(2, 7)), "Int")
+      // The selected `"hi".toUpperCase`, up to the end of line 3.
+      val shout = text.split("\n")(3)
+      assertEquals(typeInfo(new Range(new Position(3, shout.indexOf("\"hi\"")), new Position(3, shout.length))), "String")
+      // Inside the `val` keyword, and on the space after it.
+      assertEquals(typeInfo(caret(2, 3)), null)
+      assertEquals(typeInfo(caret(2, 5)), null)
+    } finally change(original, 43)
+  }
+
   test("folds imports, doc comments and bodies, leaving closing braces visible") {
     val folds = server.getTextDocumentService.foldingRange(new FoldingRangeRequestParams(document(counter)))
       .get(1, TimeUnit.MINUTES).asScala.toSeq
@@ -1418,6 +1444,12 @@ class LanguageServerTest extends munit.FunSuite {
     }
   }
 
+  test("compiles the build on request and reports its outcome") {
+    val report = server.compile().get(5, TimeUnit.MINUTES)
+    assert(report.succeeded)
+    assertEquals(report.errors, 0)
+  }
+
   test("pending diagnostics for the same version are replaced without starving another source") {
     val service = implementation.getTextDocumentService
     val original = Files.readString(main).replace("val text: String", "val text: Int")
@@ -1507,6 +1539,12 @@ class LanguageServerTest extends munit.FunSuite {
     }
     // Back to the original options; the editor's text was kept through both imports.
     assertEquals(problemsAfterImport(4), typeMismatch)
+  }
+
+  test("imports the build again on request, reporting its state") {
+    Client.states.clear()
+    server.reimport().get(5, TimeUnit.MINUTES)
+    assertEquals(statesUntil(Client, "ready"), Seq("importing", "ready"))
   }
 
   test("a client that does not apply the server's edits gets suggestions without commands") {

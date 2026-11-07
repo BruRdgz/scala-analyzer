@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- `scalaAnalyzer/compile` compiles the build on request and answers whether it succeeded, with its error and warning
+  counts.
+- `scalaAnalyzer/reimport` reloads the build server's workspace and imports the build again on request.
+- `scalaAnalyzer/typeInfo` answers what the IDE's Type Info action shows for a caret or a selected expression.
 - `scalaAnalyzer.completeInsertion` with missing or non-numeric arguments now fails with `InvalidParams`.
 - Semantic tokens that start at the same position keep the last one, whatever its length, in a defined order.
 - After a test run's compile, the build's compiler diagnostics are republished to the open documents, also when the

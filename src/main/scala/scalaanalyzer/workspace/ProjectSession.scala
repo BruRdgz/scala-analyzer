@@ -1,5 +1,6 @@
 package scalaanalyzer.workspace
 
+import com.intellij.lang.annotation.HighlightSeverity
 import com.intellij.psi.PsiFile
 
 import scalaanalyzer.{HostModule, LineColumn, LineRange, ScalaPsiHost}
@@ -300,6 +301,16 @@ final class ProjectSession private (
    *         when no symbol is found or the plugin has no quick information for it
    */
   def hover(path: Path, at: LineColumn): Option[String] = language.hover(path, at)
+
+  /**
+   * Describes the type under a caret or of a selected expression, as the IDE's Type Info action does.
+   *
+   * @param path registered project-source path
+   * @param range selection in zero-based lines and UTF-16 columns; an empty range stands for the caret
+   * @return the type as plain text, on several lines when the IDE adds the expected or original type; `None` when
+   *         there is no type to show, and for a source that is not Scala
+   */
+  def typeInfo(path: Path, range: LineRange): Option[String] = language.typeInfo(path, range)
 
   /**
    * Locates the declaration referenced at a source position.
@@ -678,12 +689,23 @@ final class ProjectSession private (
    * Document operations can continue during compilation. Imports and closure wait for its BSP request to finish.
    * The build can report compilation errors without throwing, in which case its diagnostics are still stored.
    *
-   * @return the registered sources whose stored diagnostics changed and may need republishing
+   * @return whether the build compiled, the number of errors and warnings among all the diagnostics it published (of
+   *         registered sources or not), and the registered sources whose stored diagnostics changed and may need
+   *         republishing
    */
-  def compileBuild(): Set[Path] = buildLock.synchronized {
+  def compileBuild(): ProjectSession.BuildCompilation = buildLock.synchronized {
     ensureUsable()
 
-    storeBuildProblems(build.compile().diagnostics)
+    val compiled = build.compile()
+    val severities = compiled.diagnostics.values.flatten.map(_.severity).toSeq
+    val changed = storeBuildProblems(compiled.diagnostics)
+
+    ProjectSession.BuildCompilation(
+      succeeded = compiled.succeeded,
+      errors = severities.count(_ == HighlightSeverity.ERROR),
+      warnings = severities.count(_ == HighlightSeverity.WARNING),
+      changed = changed,
+    )
   }
 
   /** Replaces the stored build diagnostics; returns the registered sources whose diagnostics differ from the old ones. */
@@ -699,7 +721,7 @@ final class ProjectSession private (
    *
    * This blocks on BSP like `compileBuild`, and stores the build diagnostics published so far, whether or not the
    * compilation succeeded. `changed` receives the registered sources whose stored diagnostics changed, as
-   * `compileBuild` returns them, once they are stored and before a failed compilation is reported, so it also runs
+   * `compileBuild` reports them, once they are stored and before a failed compilation is reported, so it also runs
    * for a failed one. It runs on the calling thread under the BSP guard and must not block. A failed compilation is
    * reported as an exception after that.
    *
@@ -744,6 +766,16 @@ object ProjectSession {
    * @param sourceFileCount number of registered project sources when the import completed
    */
   private[scalaanalyzer] final case class Snapshot(moduleCount: Int, sourceFileCount: Int)
+
+  /**
+   * Captures what compiling the build produced: its outcome, diagnostic counts and the sources to republish.
+   *
+   * @param succeeded whether BSP reported a successful compile
+   * @param errors number of error diagnostics the compile published, in registered sources or not
+   * @param warnings number of warning diagnostics the compile published, in registered sources or not
+   * @param changed registered sources whose stored diagnostics changed and may need republishing
+   */
+  final case class BuildCompilation(succeeded: Boolean, errors: Int, warnings: Int, changed: Set[Path])
 
   /**
    * Rejects source requests after a partial import; recovery requires restarting the language server.

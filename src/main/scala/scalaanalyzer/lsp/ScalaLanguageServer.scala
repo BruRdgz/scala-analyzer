@@ -265,6 +265,12 @@ final class ScalaLanguageServer(
     }
   }
 
+  /** Imports the build again (see `importAgain`), then schedules diagnostics for every tracked document. */
+  private def importAndScheduleDiagnostics(s: ProjectSession, reload: Boolean): Unit = {
+    importAgain(s, reload)
+    versions.keySet.forEach(scheduleDiagnostics)
+  }
+
   /**
    * Negotiates client features and advertises the server's LSP capabilities.
    *
@@ -537,6 +543,49 @@ final class ScalaLanguageServer(
   }
 
   /**
+   * Compiles the build and schedules diagnostics for the sources whose build problems changed.
+   *
+   * Runs on the builds thread, as the compile on save does, and is shown as progress. A build that does not compile
+   * still answers: its errors are counted in the report.
+   *
+   * @return a future containing the compilation's outcome and its error and warning counts; it fails when the
+   *         project is not open or the compile could not run
+   */
+  override def compile(): CompletableFuture[HostProtocol.CompileReport] = answered("compile", builds.execute) { s =>
+    val compilation = withProgress("scala-analyzer: compiling the build")(_ => s.compileBuild())
+
+    compilation.changed.foreach(scheduleDiagnostics)
+
+    new HostProtocol.CompileReport(compilation.succeeded, compilation.errors, compilation.warnings)
+  }
+
+  /**
+   * Imports the build again after reloading the build server's workspace, then schedules diagnostics for every
+   * tracked document.
+   *
+   * Runs on the documents thread. The server state is `importing` meanwhile and `ready` afterwards.
+   *
+   * @return a future that completes with `null` when the import ends, or fails with the import's error
+   */
+  override def reimport(): CompletableFuture[Void] = onDocuments[Void]("reimport") { s =>
+    importAndScheduleDiagnostics(s, reload = true)
+    null
+  }
+
+  /**
+   * Describes the type under a caret or of a selected expression, as the IDE's Type Info action does.
+   *
+   * Runs on a read thread.
+   *
+   * @param params the document and the selection; an empty range stands for the caret
+   * @return the type as plain text, or `null` when there is no type there or the document is not a project source
+   */
+  override def typeInfo(params: HostProtocol.TypeInfoParams): CompletableFuture[String] =
+    onRead("typeInfo", params.textDocument, null) { (s, path) =>
+      s.typeInfo(path, lineRange(params.range)).orNull
+    }
+
+  /**
    * Exposes text-document requests and notifications.
    *
    * @return the service backed by the ordered documents executor
@@ -745,7 +794,7 @@ final class ScalaLanguageServer(
         val submitted = System.nanoTime()
         builds.execute { () =>
           compileQueued.set(false)
-          try timed("compile on save", submitted)(s.compileBuild().foreach(scheduleDiagnostics))
+          try timed("compile on save", submitted)(s.compileBuild().changed.foreach(scheduleDiagnostics))
           catch {
             case _: InterruptedException => Thread.currentThread().interrupt()
             case NonFatal(e) => HostLog.error("compile on save failed", e)
@@ -1528,8 +1577,7 @@ final class ScalaLanguageServer(
       val buildChanged = paths.exists(BuildDefinition.isPart)
 
       HostLog.info(s"${if (buildChanged) "build definition changed" else "source files created or deleted"}: ${paths.mkString(", ")}")
-      importAgain(s, reload = buildChanged)
-      versions.keySet.forEach(scheduleDiagnostics)
+      importAndScheduleDiagnostics(s, reload = buildChanged)
     }
   }
 }

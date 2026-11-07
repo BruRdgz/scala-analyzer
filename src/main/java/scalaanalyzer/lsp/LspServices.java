@@ -12,9 +12,10 @@ final class LspServices {
 
   /**
    * Base class of the language server: inherits the lsp4j defaults of {@link LanguageServer} and
-   * {@link LanguageClientAware}, and declares the host's {@code scalaAnalyzer/status} request.
+   * {@link LanguageClientAware}, and declares the host's {@code scalaAnalyzer/} requests.
    *
-   * Subclasses implement what those interfaces leave abstract, including {@code status}.
+   * Subclasses implement what those interfaces leave abstract, including {@code status}, {@code compile},
+   * {@code reimport} and {@code typeInfo}.
    */
   abstract static class Server implements LanguageServer, LanguageClientAware, HostProtocol.Server {}
 

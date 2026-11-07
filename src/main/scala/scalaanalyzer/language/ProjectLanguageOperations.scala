@@ -416,6 +416,24 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
     }
 
   /**
+   * Describes the type under a caret or of a selected expression, as the IDE's Type Info action does. Only Scala
+   * files have it.
+   *
+   * @param path registered project-source path
+   * @param range selection; an empty range stands for the caret
+   * @return the type as plain text, on several lines when the IDE adds the expected or original type; `None` when
+   *         there is no type to show, and for a file that is not Scala
+   */
+  def typeInfo(path: Path, range: LineRange): Option[String] = file(path) match {
+    case sourceFile: ScalaFile => host.read {
+      val sourceDocument = document(sourceFile)
+
+      TypeInfo.at(sourceFile, offset(sourceDocument, range.start), offset(sourceDocument, range.end))
+    }
+    case _ => None
+  }
+
+  /**
    * Locates the declaration referenced at a position.
    *
    * A library declaration is located in its attached source or decompiled text, materialized as a read-only file
