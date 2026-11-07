@@ -2,20 +2,25 @@ package scalaanalyzer.lsp
 
 import org.eclipse.lsp4j.{SemanticTokenModifiers, SemanticTokenTypes, SemanticTokensLegend}
 
-import scalaanalyzer.language.{SemanticToken, SemanticTokenKind, SemanticTokenModifier}
 import scalaanalyzer.LineColumn
+import scalaanalyzer.language.{SemanticToken, SemanticTokenKind, SemanticTokenModifier}
 
 import scala.jdk.CollectionConverters.*
 
 /** Maps protocol-neutral semantic tokens to the LSP legend and relative integer encoding. */
 object SemanticColoring {
+  /** Token type names in legend order: a type's position here is its index in the encoded tokens. */
   private val types = Seq(
     SemanticTokenTypes.Namespace, SemanticTokenTypes.Type, SemanticTokenTypes.Class, SemanticTokenTypes.Enum,
     SemanticTokenTypes.Interface, SemanticTokenTypes.TypeParameter, SemanticTokenTypes.Parameter,
     SemanticTokenTypes.Variable, SemanticTokenTypes.Property, SemanticTokenTypes.EnumMember,
     SemanticTokenTypes.Function, SemanticTokenTypes.Method, SemanticTokenTypes.Keyword, SemanticTokenTypes.Decorator,
   )
-  private val modifiers = Seq(SemanticTokenModifiers.Readonly, SemanticTokenModifiers.Abstract, SemanticTokenModifiers.Declaration)
+
+  /** Token modifier names in legend order: a modifier's position here is its bit in the encoded modifier mask. */
+  private val modifiers = Seq(
+    SemanticTokenModifiers.Readonly, SemanticTokenModifiers.Abstract, SemanticTokenModifiers.Declaration,
+  )
 
   /**
    * The token-type and modifier ordering used by [[encode]].
@@ -24,6 +29,7 @@ object SemanticColoring {
    */
   val legend: SemanticTokensLegend = new SemanticTokensLegend(types.asJava, modifiers.asJava)
 
+  /** The LSP token type name that each language token kind is reported as. */
   private val kindType: Map[SemanticTokenKind, String] = Map(
     SemanticTokenKind.Namespace -> SemanticTokenTypes.Namespace,
     SemanticTokenKind.Type -> SemanticTokenTypes.Type,
@@ -41,6 +47,7 @@ object SemanticColoring {
     SemanticTokenKind.Decorator -> SemanticTokenTypes.Decorator,
   )
 
+  /** The LSP modifier name that each language token modifier is reported as. */
   private val modifierName: Map[SemanticTokenModifier, String] = Map(
     SemanticTokenModifier.Readonly -> SemanticTokenModifiers.Readonly,
     SemanticTokenModifier.Abstract -> SemanticTokenModifiers.Abstract,
@@ -51,10 +58,12 @@ object SemanticColoring {
    * Encodes semantic tokens as LSP delta tuples.
    *
    * Tokens are sorted by position. Equal ranges keep the last input token; later overlapping ranges are dropped.
-   * Input positions and lengths use UTF-16 code units and each token must fit within one line.
+   * Input positions and lengths use UTF-16 code units and each token must fit within one line. An empty input
+   * encodes to an empty sequence.
    *
    * @param tokens tokens expressed in the language model's categories
-   * @return flattened delta-line, delta-column, length, type-index and modifier-bit tuples
+   * @return flattened delta-line, delta-column, length, type-index and modifier-bit tuples: five integers per kept
+   *         token, in position order
    */
   def encode(tokens: Seq[SemanticToken]): Seq[Int] = {
     val lastPerRange = tokens.groupMapReduce(token => (token.start, token.length))(identity)((_, later) => later).values
@@ -65,6 +74,7 @@ object SemanticColoring {
         case _ => acc :+ next
       }
     }
+
     kept.zipWithIndex.flatMap { (token, i) =>
       val previous = if (i == 0) LineColumn(0, 0) else kept(i - 1).start
       val deltaLine = token.start.line - previous.line

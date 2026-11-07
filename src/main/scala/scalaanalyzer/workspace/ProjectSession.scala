@@ -3,8 +3,15 @@ package scalaanalyzer.workspace
 import com.intellij.psi.PsiFile
 
 import scalaanalyzer.{HostModule, LineColumn, ScalaPsiHost}
-import scalaanalyzer.build.{BspImport, BuildConnection, CompileSpec, CompilerDiagnostic, DocumentCompiler, ImportedModule, ScalafmtFormatting, TestRun}
-import scalaanalyzer.language.{CodeActionResult, CompletionChoices, CompletionFollowUp, FileChanges, FileProblem, Fold, HierarchyCall, HierarchyItem, HierarchyTarget, InlineHint, Occurrence, OutlineSymbol, ProjectLanguageOperations, SemanticToken, SignatureChoices, SourceSpan, TestLens, TextChange, WorkspaceSymbolMatch}
+import scalaanalyzer.build.{
+  BspImport, BuildConnection, CompileSpec, CompilerDiagnostic, DocumentCompiler, ImportedModule, ScalafmtFormatting,
+  TestRun,
+}
+import scalaanalyzer.language.{
+  CodeActionResult, CompletionChoices, CompletionFollowUp, FileChanges, FileProblem, Fold, HierarchyCall,
+  HierarchyItem, HierarchyTarget, InlineHint, Occurrence, OutlineSymbol, ProjectLanguageOperations, SemanticToken,
+  SignatureChoices, SourceSpan, TestLens, TextChange, WorkspaceSymbolMatch,
+}
 import scalaanalyzer.platform.{HostLock, HostLog}
 
 import java.nio.file.{Files, Path}
@@ -38,22 +45,29 @@ final class ProjectSession private (
   build: BuildConnection,
   root: Path,
 ) extends AutoCloseable {
+  /** The live registry of project sources by path; an import adds and removes entries while it applies. */
   private val files = new ConcurrentHashMap[Path, PsiFile]()
-  // Diagnostics run apart from the serialized documents executor; keep their source check/read outside a partial import.
+  /** Diagnostics run apart from the documents executor; this lock keeps their source check/read outside an import. */
   private val importSnapshotLock = new ReentrantReadWriteLock(true)
-  // Build compilation runs apart from document requests, but must never overlap a reload/import or BSP shutdown.
+  /** Build compilation runs apart from document requests, but must never overlap a reload/import or BSP shutdown. */
   private val buildLock = new Object
+  /** Set by `close`; once true, `ensureUsable` rejects requests. */
   @volatile private var closed = false
-  // The build's modules as last imported (changed only by `importBuild`, on the session's thread).
+  /** The build's modules as last imported (changed only by `importBuild`, on the session's thread). */
   @volatile private var imported: Seq[ImportedModule] = Seq.empty
+  /** Compile settings of the last import's modules, by stable module id. */
   @volatile private var compileSpecs: Map[String, CompileSpec] = Map.empty
-  // Classpath jars whose sources were asked for, attached or not.
+  /** Classpath jars whose sources were asked for, attached or not. */
   private var sourcesAskedFor = Set.empty[Path]
+  /** Compiles current buffers for compiler diagnostics; closed with the session. */
   private val documentCompiler = new DocumentCompiler
+  /** Formats whole Scala files; closed with the session. */
   private val scalafmt = new ScalafmtFormatting(host.stateDir.resolve("scalafmt"))
-  // The build's compiler problems from its last compile, by file (for files the document compiler does not cover).
+  /** The build's compiler problems from its last compile, by file (for files the document compiler does not cover). */
   private val buildProblems = new AtomicReference[Map[Path, Seq[CompilerDiagnostic]]](Map.empty)
+  /** The failure message recorded by `markUnavailable`; `ensureUsable` rejects requests while it is present. */
   @volatile private var unavailable: Option[String] = None
+  /** Counts as of the end of the last completed import, readable without waiting for an ongoing one. */
   @volatile private var lastImportedSnapshot = ProjectSession.Snapshot(0, 0)
 
   /** Captures the validated module graph, affected identities and source inputs for a host update. */
@@ -71,18 +85,20 @@ final class ProjectSession private (
    * Lists the sources currently registered in the session.
    *
    * This includes sources without an open editor tab. During an import the live registry can change; use
-   * `snapshot` for counts from the last completed import.
+   * `snapshot` for counts from the last completed import. Takes no lock and does not check the session's state.
    *
-   * @return `Seq[Path]` containing the registered source paths, in unspecified order
+   * @return the registered source paths, in unspecified order
    */
   def sourceFiles: Seq[Path] = files.keySet.toArray(Array.empty[Path]).toSeq
 
   /**
    * Checks whether a path belongs to a registered project source.
    *
-   * Library files are excluded. The check waits for host updates and rejects an unavailable session.
+   * Library files are excluded. The check takes the import guard's read lock, so it waits for host updates, and
+   * rejects a closed or unavailable session.
    *
    * @param path source path as registered by the build
+   * @return `true` if `path` is a registered project source; `false` for library files and unregistered paths
    */
   def isSource(path: Path): Boolean = {
     val readLock = importSnapshotLock.readLock()
@@ -93,13 +109,33 @@ final class ProjectSession private (
     } finally readLock.unlock()
   }
 
-  /** Reports whether source requests remain permitted by the import-failure guard. */
+  /**
+   * Reports whether source requests remain permitted by the import-failure guard.
+   *
+   * Takes no lock. Only the partial-import failure is consulted: closing the session does not change the result.
+   *
+   * @return `false` once a partial import has left the session unavailable; `true` otherwise
+   */
   private[scalaanalyzer] def isUsable: Boolean = unavailable.isEmpty
 
-  /** Provides the recorded partial-import failure and recovery message, when present. */
+  /**
+   * Provides the recorded partial-import failure and recovery message.
+   *
+   * Takes no lock.
+   *
+   * @return the message that source requests are rejected with after a partial import; `None` while the session
+   *         has no recorded failure
+   */
   private[scalaanalyzer] def unavailableMessage: Option[String] = unavailable
 
-  /** Reads the last completed import's counts without waiting for ongoing updates. */
+  /**
+   * Reads the last completed import's counts without waiting for ongoing updates.
+   *
+   * Takes no lock.
+   *
+   * @return the module and source counts as of the end of the last completed import; both zero before the first
+   *         one completes
+   */
   private[scalaanalyzer] def snapshot: ProjectSession.Snapshot = lastImportedSnapshot
 
   /** Rejects requests after closure or a partial import failure. */
@@ -120,13 +156,14 @@ final class ProjectSession private (
     Option(files.get(path)).getOrElse(throw new IllegalArgumentException(s"not a source file of the project: $path"))
   }
 
+  /** Performs the PSI-backed source requests this session delegates to, resolving paths through `file`. */
   private val language = new ProjectLanguageOperations(host, root, documentCompiler, scalafmt, file)
 
   /**
    * Reads the current text of a source buffer.
    *
    * @param path registered project-source path
-   * @return `String` containing the in-memory text, including unsaved edits
+   * @return the in-memory text, including unsaved edits
    */
   def text(path: Path): String = language.text(path)
 
@@ -137,7 +174,8 @@ final class ProjectSession private (
    *
    * @param path registered project-source path
    * @param at caret position in zero-based lines and UTF-16 columns
-   * @return `CompletionChoices` in relevance order, with an incomplete flag; empty for unsupported source languages
+   * @return the suggestions in the order the host returns them, best first, with an incomplete flag; empty and
+   *         complete for a source that is neither Scala nor Java
    */
   def completion(path: Path, at: LineColumn): CompletionChoices = language.completion(path, at)
 
@@ -147,11 +185,17 @@ final class ProjectSession private (
    * @param path registered project-source path
    * @param start range start in zero-based lines and UTF-16 columns
    * @param end range end in the same coordinates
-   * @return `Seq[InlineHint]` within the range, or an empty sequence for non-Scala sources
+   * @return the hints whose offset lies within the range, in the order the host returns them; empty for a source
+   *         that is not Scala
    */
   def inlayHints(path: Path, start: LineColumn, end: LineColumn): Seq[InlineHint] = language.inlayHints(path, start, end)
 
-  /** Returns runnable suite and test selections with their owning BSP target identities. */
+  /**
+   * Finds the runnable suite and test selections of a source, each with the BSP target identity of its module.
+   *
+   * @param path registered project-source path
+   * @return the lenses of a Scala source whose module has a BSP target identity; empty for any other source
+   */
   def testLenses(path: Path): Seq[TestLens] = language.testLenses(path)
 
   /**
@@ -159,7 +203,8 @@ final class ProjectSession private (
    *
    * @param path registered project-source path
    * @param at caret position in zero-based lines and UTF-16 columns
-   * @return `Option[SignatureChoices]` with rendered overloads, or `None` when no signature is available
+   * @return the rendered overloads and the active one as the host reports them; `None` when the host finds no call,
+   *         and for a source that is not Scala
    */
   def signatures(path: Path, at: LineColumn): Option[SignatureChoices] = language.signatures(path, at)
 
@@ -170,7 +215,7 @@ final class ProjectSession private (
    *
    * @param path registered project-source path
    * @param positions carets in zero-based lines and UTF-16 columns, in the desired result order
-   * @return `Seq[Seq[(LineColumn, LineColumn)]]` of start/end ranges, smallest first for each caret
+   * @return one chain per caret, in the order of `positions`, each of start/end ranges smallest first
    */
   def selectionRanges(path: Path, positions: Seq[LineColumn]): Seq[Seq[(LineColumn, LineColumn)]] =
     language.selectionRanges(path, positions)
@@ -186,7 +231,8 @@ final class ProjectSession private (
    * @param prefixText original typed prefix replaced by the lookup text
    * @param lookup lookup text already inserted by the editor
    * @param identity suggestion identity returned by `completion`
-   * @return `Option[CompletionFollowUp]` with edits and caret position, or `None` if the suggestion no longer applies
+   * @return the changes still to apply and the caret position, in the text that applying them produces; `None` when
+   *         the host reports no follow-up, and for a source that is neither Scala nor Java
    */
   def insertCompletion(path: Path, start: LineColumn, prefixText: String, lookup: String, identity: String)
       : Option[CompletionFollowUp] = language.insertCompletion(path, start, prefixText, lookup, identity)
@@ -201,7 +247,7 @@ final class ProjectSession private (
    * @param range optional start/end positions in zero-based lines and UTF-16 columns; `None` selects the whole file
    * @param indentSize positive indentation size used by the IntelliJ formatter
    * @param useTabs whether the IntelliJ formatter should indent with tabs
-   * @return `Seq[TextChange]` against the current buffer, or an empty sequence for non-Scala sources
+   * @return the changes against the current buffer; empty for a source that is not Scala
    */
   def formatting(path: Path, range: Option[(LineColumn, LineColumn)], indentSize: Int, useTabs: Boolean): Seq[TextChange] =
     language.formatting(path, range, indentSize, useTabs)
@@ -227,7 +273,7 @@ final class ProjectSession private (
    * buffer, without running javac.
    *
    * @param path registered project-source path
-   * @return source problems from the diagnostics available for its language
+   * @return the plugin's problems, then the compiler's; empty for a source that is neither Scala nor Java
    */
   def problems(path: Path): Seq[FileProblem] = {
     val readLock = importSnapshotLock.readLock()
@@ -250,7 +296,8 @@ final class ProjectSession private (
    *
    * @param path registered project-source path
    * @param at referenced or declared symbol position in zero-based lines and UTF-16 columns
-   * @return `Option[String]` containing Markdown, or `None` when no quick information is available
+   * @return Markdown with the signature in a fenced block, followed by the documentation when it can be read; `None`
+   *         when no symbol is found or the plugin has no quick information for it
    */
   def hover(path: Path, at: LineColumn): Option[String] = language.hover(path, at)
 
@@ -261,7 +308,8 @@ final class ProjectSession private (
    *
    * @param path registered project-source path
    * @param at reference position in zero-based lines and UTF-16 columns
-   * @return `Option[(Path, LineColumn)]` locating the declaration's name, or `None` when no location is available
+   * @return the declaration's file and the position of its name; `None` when nothing resolves there or the
+   *         declaration is in neither a project source nor a library file
    */
   def definition(path: Path, at: LineColumn): Option[(Path, LineColumn)] = language.definition(path, at)
 
@@ -272,7 +320,8 @@ final class ProjectSession private (
    *
    * @param path registered project-source path
    * @param at referenced or declared symbol position in zero-based lines and UTF-16 columns
-   * @return `Seq[(Path, LineColumn)]` of declaration-name locations, empty when no type location is available
+   * @return the declaration locations, distinct and in the order the type lookup finds them; empty when the symbol
+   *         has no type declaration to navigate to
    */
   def typeDefinition(path: Path, at: LineColumn): Seq[(Path, LineColumn)] = language.typeDefinition(path, at)
 
@@ -284,7 +333,7 @@ final class ProjectSession private (
    * @param path registered project-source path
    * @param at referenced or declared symbol position in zero-based lines and UTF-16 columns
    * @param includeDeclaration whether to include the target's declaration name when it belongs to a project source
-   * @return `Seq[SourceSpan]` of distinct source occurrences
+   * @return the distinct spans, the declaration first; empty when the position has no usage target
    */
   def references(path: Path, at: LineColumn, includeDeclaration: Boolean): Seq[SourceSpan] =
     language.references(path, at, includeDeclaration)
@@ -299,7 +348,7 @@ final class ProjectSession private (
    * @param start selection start in zero-based lines and UTF-16 columns
    * @param end selection end in the same coordinates; equal to `start` for a caret request
    * @param only accepted action kinds and their descendants; empty selects contextual fixes and refactorings
-   * @return `Seq[(CodeActionResult, Seq[TextChange])]` pairing each action with its current-buffer edits
+   * @return each accepted action paired with its current-buffer edits; empty for a source that is not Scala
    */
   def codeActions(path: Path, start: LineColumn, end: LineColumn, only: Seq[String] = Seq.empty)
       : Seq[(CodeActionResult, Seq[TextChange])] = language.codeActions(path, start, end, only)
@@ -311,7 +360,7 @@ final class ProjectSession private (
    *
    * @param path registered project-source path
    * @param at referenced or declared symbol position in zero-based lines and UTF-16 columns
-   * @return `(LineColumn, LineColumn)` marking the start and end of the name to rename
+   * @return start and end of the name to rename
    */
   def prepareRename(path: Path, at: LineColumn): (LineColumn, LineColumn) = language.prepareRename(path, at)
 
@@ -325,7 +374,7 @@ final class ProjectSession private (
    * @param path registered project-source path
    * @param at referenced or declared symbol position in zero-based lines and UTF-16 columns
    * @param newName replacement name validated by the plugin's rename processors
-   * @return `Seq[FileChanges]` grouped by affected project-source file
+   * @return the edits of each affected project-source file; files outside the project sources are left out
    */
   def rename(path: Path, at: LineColumn, newName: String): Seq[FileChanges] = language.rename(path, at, newName)
 
@@ -336,18 +385,44 @@ final class ProjectSession private (
    *
    * @param path registered project-source path
    * @param at symbol position in zero-based lines and UTF-16 columns
-   * @return `Seq[SourceSpan]` of distinct declaration-name ranges
+   * @return the spans of the declarations' names, distinct and in the order the search finds them
    */
   def implementations(path: Path, at: LineColumn): Seq[SourceSpan] = language.implementations(path, at)
 
-  /** Prepares a call or type hierarchy without retaining PSI across requests. */
-  def prepareHierarchy(path: Path, at: LineColumn, types: Boolean): Seq[HierarchyItem] = language.prepareHierarchy(path, at, types)
+  /**
+   * Prepares the call hierarchy method or type hierarchy class at a position, without retaining PSI across requests.
+   *
+   * @param path registered project-source path
+   * @param at position of the method or class, in zero-based lines and UTF-16 columns
+   * @param types `true` for the type hierarchy's class, `false` for the call hierarchy's method
+   * @return the item for the target, locatable in a project source or a navigable library; empty when the position
+   *         has no target or the target cannot be located
+   */
+  def prepareHierarchy(path: Path, at: LineColumn, types: Boolean): Seq[HierarchyItem] =
+    language.prepareHierarchy(path, at, types)
 
-  /** Resolves a hierarchy item and returns its incoming or outgoing call edges. */
-  def hierarchyCalls(path: Path, target: HierarchyTarget, incoming: Boolean): Seq[HierarchyCall] = language.hierarchyCalls(path, target, incoming)
+  /**
+   * Resolves a call-hierarchy item and finds its call edges.
+   *
+   * @param path registered project-source path the request started from
+   * @param target item to expand, as `prepareHierarchy` returned it
+   * @param incoming `true` for the callers of the item, `false` for the methods it calls
+   * @return one edge per caller or callee, with the call sites in the caller's document for incoming edges; empty
+   *         when the target no longer resolves to a method
+   */
+  def hierarchyCalls(path: Path, target: HierarchyTarget, incoming: Boolean): Seq[HierarchyCall] =
+    language.hierarchyCalls(path, target, incoming)
 
-  /** Resolves a hierarchy item and returns its direct type children. */
-  def hierarchyTypes(path: Path, target: HierarchyTarget, subtypes: Boolean): Seq[HierarchyItem] = language.hierarchyTypes(path, target, subtypes)
+  /**
+   * Resolves a type-hierarchy item and finds its direct supertypes or project-source subtypes.
+   *
+   * @param path registered project-source path the request started from
+   * @param target item to expand, as `prepareHierarchy` returned it
+   * @param subtypes `true` for the subclasses, `false` for the supertypes
+   * @return the items found; empty when the target no longer resolves to a class
+   */
+  def hierarchyTypes(path: Path, target: HierarchyTarget, subtypes: Boolean): Seq[HierarchyItem] =
+    language.hierarchyTypes(path, target, subtypes)
 
   /**
    * Searches project symbols by name.
@@ -355,7 +430,7 @@ final class ProjectSession private (
    * Uses the plugin's name matching and result limit. Library symbols are excluded; a blank query matches nothing.
    *
    * @param query symbol-name query, optionally qualified by package or enclosing type
-   * @return `Seq[WorkspaceSymbolMatch]` in relevance order
+   * @return the matches, best first
    */
   def workspaceSymbols(query: String): Seq[WorkspaceSymbolMatch] = {
     ensureUsable()
@@ -367,7 +442,8 @@ final class ProjectSession private (
    *
    * @param path registered project-source path
    * @param at referenced or declared symbol position in zero-based lines and UTF-16 columns
-   * @return `Seq[Occurrence]` containing declaration and reference ranges, with write-access markers
+   * @return the distinct occurrences with write-access markers, the declaration first when it is in this document;
+   *         empty when no named symbol is at the position
    */
   def highlights(path: Path, at: LineColumn): Seq[Occurrence] = language.highlights(path, at)
 
@@ -375,7 +451,7 @@ final class ProjectSession private (
    * Builds the declaration outline shown by the plugin's structure view.
    *
    * @param path registered project-source path
-   * @return `Seq[OutlineSymbol]` of nested declarations, empty for non-Scala sources
+   * @return the nested declarations; empty for a source that is not Scala
    */
   def outline(path: Path): Seq[OutlineSymbol] = language.outline(path)
 
@@ -385,7 +461,7 @@ final class ProjectSession private (
    * When a range ends at a closing bracket, its last line remains visible.
    *
    * @param path registered project-source path
-   * @return `Seq[Fold]` of distinct multiline regions, empty for non-Scala sources
+   * @return the distinct multiline regions; empty for a source that is not Scala
    */
   def foldingRanges(path: Path): Seq[Fold] = language.foldingRanges(path)
 
@@ -395,7 +471,7 @@ final class ProjectSession private (
    * Only supported, nonempty, single-line classifications are returned. LSP encoding belongs to the caller.
    *
    * @param path registered project-source path
-   * @return `Seq[SemanticToken]` with source positions, kinds and modifiers; empty for non-Scala sources
+   * @return the tokens with source positions, kinds and modifiers; empty for a source that is not Scala
    */
   def semanticTokens(path: Path): Seq[SemanticToken] = language.semanticTokens(path)
 
@@ -419,6 +495,8 @@ final class ProjectSession private (
    * @param progress callback invoked synchronously on the calling thread as each stage starts; defaults to a no-op
    */
   def importBuild(reload: Boolean, progress: String => Unit = _ => ()): Unit = buildLock.synchronized {
+    ensureUsable()
+
     val start = System.nanoTime()
 
     /** Applies a prepared plan under both locks, recording mutation failures before unlocking. */
@@ -438,7 +516,6 @@ final class ProjectSession private (
       } finally writeLock.unlock()
     }
 
-    ensureUsable()
     if (reload) {
       progress("reloading the build definition")
       HostLog.timed("build definition reloaded")(build.reload())
@@ -502,6 +579,7 @@ final class ProjectSession private (
         build.librarySources(classpathJarsToFetchSources)
       }
     }
+
     ImportPlan(
       orderedModules,
       previousModulesById,
@@ -587,7 +665,9 @@ final class ProjectSession private (
    * Counts the modules currently recorded as imported.
    *
    * For a consistent pair of counts from one completed import, use `snapshot` instead of combining this value
-   * with the live source registry during an update.
+   * with the live source registry during an update. Takes no lock.
+   *
+   * @return the number of modules in the last applied import; zero before the first import
    */
   def moduleCount: Int = imported.size
 
@@ -598,7 +678,7 @@ final class ProjectSession private (
    * Document operations can continue during compilation. Imports and closure wait for its BSP request to finish.
    * The build can report compilation errors without throwing, in which case its diagnostics are still stored.
    *
-   * @return `Set[Path]` of registered sources whose stored diagnostics changed and may need republishing
+   * @return the registered sources whose stored diagnostics changed and may need republishing
    */
   def compileBuild(): Set[Path] = buildLock.synchronized {
     ensureUsable()
@@ -611,12 +691,26 @@ final class ProjectSession private (
       .filter(path => previousProblems.get(path) != compiledProblems.get(path) && files.containsKey(path))
   }
 
-  /** Compiles a test target and captures its environment under the BSP guard, without taking a host lock. */
+  /**
+   * Compiles a test target and captures its environment under the BSP guard, without taking a host lock.
+   *
+   * This blocks on BSP like `compileBuild`, and stores the build diagnostics published so far, whether or not the
+   * compilation succeeded. Unlike `compileBuild`, it does not report which sources changed, so the editor sees the new
+   * diagnostics only when a source's problems are next requested. A failed compilation is reported as an exception
+   * after its diagnostics are stored.
+   *
+   * @param target BSP target to compile and to capture the test environment of
+   * @return the target's test environment, captured after its successful compilation
+   * @throws IllegalStateException when the target does not compile, or the session is closed or unavailable
+   */
   def prepareTestRun(target: String): TestRun.Environment = buildLock.synchronized {
     ensureUsable()
+
     val compiled = build.compile(target)
+
     buildProblems.set(compiled.diagnostics)
     if (!compiled.succeeded) throw new IllegalStateException(s"compilation failed for $target; see compiler diagnostics")
+
     build.testEnvironment(target)
   }
 
@@ -624,10 +718,9 @@ final class ProjectSession private (
    * Releases the session's compiler, formatter and BSP connection.
    *
    * Waits for in-flight build operations and document compilations before releasing their resources. Closing is
-   * idempotent. Every resource is offered for
-   * closure even if another close fails; cleanup failures propagate with suppressed errors as managed by `Using`.
-   * Callers must stop session operations before closing. Host modules, source PSI and mounted libraries remain
-   * in the process-scoped host.
+   * idempotent. Every resource is offered for closure even if another close fails; cleanup failures propagate with
+   * suppressed errors as managed by `Using`. Callers must stop session operations before closing. Host modules,
+   * source PSI and mounted libraries remain in the process-scoped host.
    */
   override def close(): Unit = buildLock.synchronized {
     if (!closed) {
@@ -639,10 +732,19 @@ final class ProjectSession private (
 
 /** Opens workspaces and defines the session's import-status and failure values. */
 object ProjectSession {
-  /** Captures module and source counts from one completed import for concurrent status reporting. */
+  /**
+   * Captures module and source counts from one completed import for concurrent status reporting.
+   *
+   * @param moduleCount number of modules recorded by the import
+   * @param sourceFileCount number of registered project sources when the import completed
+   */
   private[scalaanalyzer] final case class Snapshot(moduleCount: Int, sourceFileCount: Int)
 
-  /** Rejects source requests after a partial import; recovery requires restarting the language server. */
+  /**
+   * Rejects source requests after a partial import; recovery requires restarting the language server.
+   *
+   * @param message the recorded failure and recovery advice, as `unavailableMessage` reports it
+   */
   private[scalaanalyzer] final class Unavailable(message: String) extends IllegalStateException(message)
 
   /**
@@ -659,7 +761,7 @@ object ProjectSession {
    * @param root workspace directory containing the BSP connection definitions
    * @param connection optional BSP connection-file name without its `.json` suffix; required if several exist
    * @param progress callback invoked synchronously on the calling thread as each stage starts; defaults to a no-op
-   * @return `ProjectSession` with the initial import completed and its session resources owned by the caller
+   * @return the session with its initial import completed; the caller owns it and must close it
    */
   def open(host: ScalaPsiHost, root: Path, connection: Option[String] = None, progress: String => Unit = _ => ()): ProjectSession = {
     progress("connecting to the build server")

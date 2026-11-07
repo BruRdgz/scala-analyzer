@@ -1,8 +1,8 @@
 package scalaanalyzer.lsp
 
+import com.google.gson.{JsonObject, JsonPrimitive}
 import com.intellij.diff.comparison.DiffTooBigException
 import com.intellij.openapi.progress.ProcessCanceledException
-import com.google.gson.{JsonObject, JsonPrimitive}
 import org.eclipse.lsp4j.*
 import org.eclipse.lsp4j.jsonrpc.ResponseErrorException
 import org.eclipse.lsp4j.jsonrpc.messages.{Either as LspEither, Either3 as LspEither3, ResponseError, ResponseErrorCode, Tuple}
@@ -49,54 +49,110 @@ final class ScalaLanguageServer(
   logFile: Option[Path] = None,
   startupLog: Seq[HostLog.Entry] = Seq.empty,
 ) extends LspServices.Server {
-  // Fast typing produces a change per keystroke; diagnostics wait for this pause before they are computed.
+  /** Fast typing produces a change per keystroke; diagnostics wait for this pause before they are computed. */
   private val DiagnosticsDelayMs = 200L
-  // A request that takes longer is logged as slow: an editor waiting this long looks stuck.
+
+  /** A request that takes longer is logged as slow: an editor waiting this long looks stuck. */
   private val SlowRequestMs = 1000L
-  // Allows a short BSP shutdown handshake, but never waits for a full build import when the client has gone.
+
+  /** Allows a short BSP shutdown handshake, but never waits for a full build import when the client has gone. */
   private val EndingDeadlineSeconds = 5L
-  // Progress cannot start until the client acknowledges its token; bound that UI handshake separately from import.
+
+  /** Progress cannot start until the client acknowledges its token; bound that UI handshake separately from import. */
   private val ProgressRegistrationDeadlineSeconds = 30L
-  // Status is a compact report; the full bounded warning/error history remains in HostLog.
+
+  /** Status is a compact report; the full bounded warning/error history remains in HostLog. */
   private val ReportedProblems = 20
-  // Requests that only read run concurrently on this many threads: most of what an editor asks after a keystroke at
-  // once, leaving cores to the documents and diagnostics threads.
+
+  /**
+   * Requests that only read run concurrently on this many threads: most of what an editor asks after a keystroke at
+   * once, leaving cores to the documents and diagnostics threads.
+   */
   private val ReadThreads = 4
 
+  /** The connected client; set by `connect`. */
   @volatile private var client: LanguageClient = scala.compiletime.uninitialized
+
+  /** The subscription that forwards host log entries to the client; closed on exit. */
   private var clientLog: Option[AutoCloseable] = None
-  // Whether the client applies the server's edits and moves the caret on its request: a chosen suggestion's insert
-  // handler needs both (see CompleteInsertion).
+
+  /**
+   * Whether the client applies the server's edits and moves the caret on its request: a chosen suggestion's insert
+   * handler needs both (see CompleteInsertion).
+   */
   @volatile private var appliesEdits = false
+
+  /** Whether the client can show a document, with a selection, when the server asks. */
   @volatile private var showsDocuments = false
-  // The project to open once the client says it is ready (`initialized`).
+
+  /** The project to open once the client says it is ready (`initialized`). */
   @volatile private var workspace = Option.empty[Path]
+
+  /** Whether the client accepts dynamic registration of watched-file notifications. */
   @volatile private var watchesFiles = false
+
+  /** The Scala-only providers registered once the client is ready; empty when the capabilities are static. */
   @volatile private var languageRegistrations = Seq.empty[Registration]
+
+  /** Whether the client shows work-done progress. */
   @volatile private var reportsProgress = false
+
+  /** Whether the client supports requests to refresh its code lenses. */
   @volatile private var refreshesCodeLenses = false
+
+  /** The latest reported server state. */
   @volatile private var state = new HostProtocol.ServerState("starting", "waiting for the client")
+
+  /** When the server was created, in `System.nanoTime` units, for the uptime report. */
   private val startedAt = System.nanoTime()
+
+  /** Numbers the progress tokens sent to the client. */
   private val progressTokens = new AtomicInteger()
+
+  /** Latencies of the requests served. */
   private val requests = new RequestStats
+
+  /** Whether the client sent `shutdown`; selects the process exit code. */
   @volatile private var shutdownRequested = false
+
+  /** Whether opening a project was queued, so that closing has a session to close. */
   @volatile private var projectRequested = false
+
+  /** Makes `exit` run its cleanup once. */
   private val ending = new AtomicBoolean()
+
+  /** Runs document notifications and requests in order, on one thread. */
   private val documents = Executors.newSingleThreadExecutor(daemon("scala-analyzer-documents"))
+
+  /** Runs the requests that only read a document, concurrently. */
   private val reads = Executors.newFixedThreadPool(ReadThreads, daemon("scala-analyzer-reads"))
+
+  /** Runs build compiles away from the documents thread. */
   private val builds = Executors.newSingleThreadExecutor(daemon("scala-analyzer-builds"))
-  // At most one compile waits behind the running one; every compile includes all Scala targets.
+
+  /** At most one compile waits behind the running one; every compile includes all Scala targets. */
   private val compileQueued = new AtomicBoolean()
+
+  /** Runs the test selections started from code lenses. */
   private val testRuns = new TestRun
+
+  /** Delays and runs diagnostic computations. */
   private val diagnostics = new ScheduledThreadPoolExecutor(1, daemon("scala-analyzer-diagnostics"))
   diagnostics.setRemoveOnCancelPolicy(true)
+
   /** Keeps a pending computation's identity together with its cancellable scheduler handle. */
   private final case class ScheduledDiagnostics(task: Runnable, future: ScheduledFuture[?])
+
+  /** The computation scheduled for each source; guarded by its own monitor. */
   private val pendingDiagnostics = scala.collection.mutable.Map.empty[Path, ScheduledDiagnostics]
+
+  /** Completes with the project session once it is open, or exceptionally if opening failed. */
   private val session = new CompletableFuture[ProjectSession]
-  // Each document's latest version, as the client numbers them; diagnostics of older versions are dropped.
+
+  /** Each document's latest version, as the client numbers them; diagnostics of older versions are dropped. */
   private val versions = new ConcurrentHashMap[Path, Integer]()
-  // Edits counted as they arrive, before their turn on the documents thread (see onEditsRequest).
+
+  /** Edits counted as they arrive, before their turn on the documents thread (see onEditsRequest). */
   private val editsReceived = new AtomicLong()
 
   /** Creates a daemon-thread factory for server work that must not keep the process alive. */
@@ -128,6 +184,7 @@ final class ScalaLanguageServer(
       case HostLog.Level.Info => MessageType.Info
       case HostLog.Level.Debug => MessageType.Log
     }
+
     client.logMessage(new MessageParams(kind, entry.toString))
   }
 
@@ -145,6 +202,7 @@ final class ScalaLanguageServer(
     if (!reportsProgress) body(_ => ())
     else {
       val token = LspEither.forLeft[String, Integer](s"scala-analyzer-${progressTokens.incrementAndGet()}")
+
       /** Sends a progress update after the client has acknowledged the token. */
       def send(value: WorkDoneProgressNotification): Unit =
         client.notifyProgress(new ProgressParams(token, LspEither.forLeft[WorkDoneProgressNotification, Object](value)))
@@ -169,7 +227,18 @@ final class ScalaLanguageServer(
       null
     }
 
-  /** Imports the build again (see [[ProjectSession.importBuild]]), as progress and server state. */
+  /**
+   * Imports the build again (see [[ProjectSession.importBuild]]), as progress and server state.
+   *
+   * Blocks the calling thread until the import ends. The state is "importing" meanwhile and "ready" afterwards, with
+   * code lenses refreshed when the client supports it. A failure is rethrown after the state is set: "failed" when the session is no longer
+   * usable, otherwise "ready" with a message saying whether the import had returned (only progress reporting failed)
+   * or the last imported snapshot remains active.
+   *
+   * @param s session whose build is imported
+   * @param reload `true` to reload the BSP workspace first, as when the build definition changed; `false` when only
+   *               source files were created or deleted
+   */
   private[lsp] def importAgain(s: ProjectSession, reload: Boolean): Unit = {
     var importReturned = false
 
@@ -219,6 +288,8 @@ final class ScalaLanguageServer(
         Option(feature).flatMap(f => Option(f.getDynamicRegistration)).exists(_.booleanValue)
       }
     }
+
+    /** Selects only Scala documents on the `file` scheme in the registration options, and returns them. */
     def scalaOnly[T <: AbstractTextDocumentRegistrationAndWorkDoneProgressOptions](options: T): T = {
       options.setDocumentSelector(java.util.List.of(new DocumentFilter("scala", "file", null)))
       options
@@ -232,12 +303,14 @@ final class ScalaLanguageServer(
     appliesEdits = workspaceCapabilities.flatMap(w => Option(w.getApplyEdit)).exists(_.booleanValue)
     showsDocuments = windowCapabilities.flatMap(w => Option(w.getShowDocument))
       .exists(_.isSupport)
+
     val folders = Option(params.getWorkspaceFolders).map(_.asScala.toSeq).getOrElse(Seq.empty)
     val rootUri = folders.headOption.map(_.getUri).orElse(Option(params.getRootUri))
       .getOrElse(throw new IllegalArgumentException("the client sent no workspace folder or root URI"))
     val clientName = Option(params.getClientInfo).map(i => s"${i.getName} ${Option(i.getVersion).getOrElse("")}".trim).getOrElse("an unnamed client")
     HostLog.info(s"initialized by $clientName for $rootUri")
     workspace = Some(Path.of(URI.create(rootUri)))
+
     val capabilities = new ServerCapabilities
     capabilities.setTextDocumentSync(TextDocumentSyncKind.Incremental)
     capabilities.setHoverProvider(true)
@@ -257,6 +330,7 @@ final class ScalaLanguageServer(
     val actionKinds = java.util.List.of(CodeActionKind.QuickFix, CodeActionKind.RefactorRewrite,
       CodeActionKind.SourceOrganizeImports)
     capabilities.setCompletionProvider(new CompletionOptions(/* resolveProvider = */ false, completionTriggers))
+
     if (scopesScalaFeatures) {
       val lenses = scalaOnly(new CodeLensRegistrationOptions)
       lenses.setResolveProvider(false)
@@ -294,6 +368,7 @@ final class ScalaLanguageServer(
     }
     capabilities.setRenameProvider(rename)
     capabilities.setSemanticTokensProvider(tokens)
+
     Option(params.getProcessId).foreach { pid =>
       try {
         val process = ProcessHandle.of(pid.longValue())
@@ -303,6 +378,7 @@ final class ScalaLanguageServer(
         else HostLog.info(s"client process $pid is not visible; the server ends when its input ends")
       } catch { case NonFatal(e) => HostLog.warn(s"could not watch client process $pid", e) }
     }
+
     CompletableFuture.completedFuture(new InitializeResult(capabilities, new ServerInfo("scala-analyzer", Main.version)))
   }
 
@@ -316,18 +392,21 @@ final class ScalaLanguageServer(
    */
   override def initialized(params: InitializedParams): Unit = {
     workspace.foreach(openProject)
+
     if (languageRegistrations.nonEmpty) {
       client.registerCapability(new RegistrationParams(languageRegistrations.asJava)).exceptionally { error =>
         HostLog.warn("could not register Scala language features", error)
         null
       }
     }
+
     if (watchesFiles) {
       val changes = WatchKind.Create | WatchKind.Change | WatchKind.Delete
       val watchers = Seq(
         BuildDefinition.SbtFiles -> changes, BuildDefinition.ProjectFiles -> changes, BuildDefinition.BuildProperties -> changes,
         "**/*.{scala,java}" -> (WatchKind.Create | WatchKind.Delete),
       ).map((glob, kind) => new FileSystemWatcher(LspEither.forLeft[String, RelativePattern](glob), kind))
+
       client.registerCapability(new RegistrationParams(java.util.List.of(new Registration(
         "scala-analyzer-build-files", "workspace/didChangeWatchedFiles", new DidChangeWatchedFilesRegistrationOptions(watchers.asJava)))))
     }
@@ -342,6 +421,7 @@ final class ScalaLanguageServer(
         val opened = withProgress("scala-analyzer: opening the project")(progress => ProjectSession.open(host, root, progress = progress))
         val heap = Runtime.getRuntime
         val snapshot = opened.snapshot
+
         HostLog.info(s"ready in ${(System.nanoTime() - startedAt) / 1_000_000} ms since the server started: " +
           s"${snapshot.moduleCount} modules, ${snapshot.sourceFileCount} source files, " +
           s"heap ${(heap.totalMemory - heap.freeMemory) / (1024 * 1024)} of ${heap.maxMemory / (1024 * 1024)} MB")
@@ -385,6 +465,7 @@ final class ScalaLanguageServer(
       diagnostics.shutdownNow()
       pendingDiagnostics.clear()
     }
+
     val closed = if (!projectRequested) CompletableFuture.completedFuture[AnyRef](null)
     else session.handleAsync[AnyRef]((opened, error) => {
       if (error == null) opened.close()
@@ -425,15 +506,18 @@ final class ScalaLanguageServer(
     /** Builds an ordered heterogeneous object for lsp4j's JSON serialization. */
     def map(entries: (String, Any)*): java.util.Map[String, Object] = {
       val fields = new java.util.LinkedHashMap[String, Object]()
+      // Every Scala value is an Object at runtime (primitives are boxed), so this cast cannot fail.
       entries.foreach((name, value) => fields.put(name, value.asInstanceOf[Object]))
       fields
     }
+
     val heap = Runtime.getRuntime
     val opened = if (session.isDone && !session.isCompletedExceptionally) Some(session.join()) else None
     val project = opened.map { s =>
       val snapshot = s.snapshot
       map("modules" -> Integer.valueOf(snapshot.moduleCount), "sourceFiles" -> Integer.valueOf(snapshot.sourceFileCount))
     }
+
     CompletableFuture.completedFuture(map(
       "state" -> state.state,
       "message" -> state.message,
@@ -442,7 +526,7 @@ final class ScalaLanguageServer(
       "project" -> project.orNull,
       "heapMb" -> map("used" -> java.lang.Long.valueOf((heap.totalMemory - heap.freeMemory) / (1024 * 1024)),
         "max" -> java.lang.Long.valueOf(heap.maxMemory / (1024 * 1024))),
-      "requests" -> map(requests.summary.map((kind, s) => kind -> map(
+      "requests" -> map(requests.summary.map(s => s.kind -> map(
         "count" -> java.lang.Long.valueOf(s.count), "p50Ms" -> java.lang.Long.valueOf(s.p50),
         "p95Ms" -> java.lang.Long.valueOf(s.p95), "maxMs" -> java.lang.Long.valueOf(s.max)))*),
       "logged" -> map("errors" -> java.lang.Long.valueOf(HostLog.count(HostLog.Level.Error)),
@@ -492,6 +576,7 @@ final class ScalaLanguageServer(
     val submitted = System.nanoTime()
     val answer = new CompletableFuture[T]
     val cancellation = new HostLock.RequestCancellation
+
     answer.whenComplete((_, _) => if (answer.isCancelled) cancellation.cancel())
     schedule { () =>
       if (answer.isCancelled) HostLog.debug(s"$kind: cancelled before it ran")
@@ -499,6 +584,7 @@ final class ScalaLanguageServer(
         try answer.complete(timed(kind, submitted)(HostLock.cancelledBy(cancellation)(answerOf(kind, request(session.join())))))
         catch { case error: Throwable => answer.completeExceptionally(error) }
     }
+
     answer
   }
 
@@ -553,7 +639,10 @@ final class ScalaLanguageServer(
     val uri = document.getUri
     // Written on the documents thread before the request is handed to the read threads, which read it after.
     var asked: Integer = null
+
+    /** Whether the document still has the version it had when the request was taken off the documents thread. */
     def isAsked(path: Path): Boolean = versions.get(path) == asked
+
     answered(kind, work => documents.execute { () =>
       asked = Option.when(uri.startsWith("file:"))(versions.get(pathOf(uri))).orNull
       reads.execute(work)
@@ -578,6 +667,7 @@ final class ScalaLanguageServer(
     // Completion lists use no edit guard: clients filter suggestions as the user continues typing.
     /** Checks incoming edits even before they reach the ordered documents executor. */
     def checkNoNewerEdit(): Unit = if (editsReceived.get() != received) throw new ProcessCanceledException
+
     onSource(kind, document, outside) { (s, path) =>
       checkNoNewerEdit()
       val result = request(s, path)
@@ -588,16 +678,24 @@ final class ScalaLanguageServer(
 
   /** Text-document notifications and requests, executed in document order (reads then run concurrently). */
   private object TextDocuments extends LspServices.TextDocuments {
-    // Documents that are not project sources are not tracked. A Scala or Java file that is not one yet may have just
-    // been created (the editor may open it before reporting its creation): the build is imported again first.
-    /** Tracks versions, syncs unsaved text and schedules diagnostics for project sources. */
+    /**
+     * Tracks versions, syncs unsaved text and schedules diagnostics for project sources.
+     *
+     * Runs on the documents thread. Documents that are not project sources are not tracked. A Scala or Java file
+     * outside the host state directory that is not one yet may have just been created (the editor may open it before
+     * reporting its creation): the build is imported again first.
+     *
+     * @param params the opened document, with its version and the editor's text
+     */
     override def didOpen(params: DidOpenTextDocumentParams): Unit = onDocuments("didOpen") { s =>
       val uri = params.getTextDocument.getUri
+
       if (uri.startsWith("file:") && sourcePath(s, uri).isEmpty) {
         val path = pathOf(uri)
         val name = path.getFileName.toString
         if ((name.endsWith(".scala") || name.endsWith(".java")) && !path.startsWith(host.stateDir)) importAgain(s, reload = false)
       }
+
       sourcePath(s, uri).foreach { path =>
         versions.put(path, params.getTextDocument.getVersion)
         // The editor's buffer may differ from the file on disk (unsaved changes).
@@ -606,7 +704,15 @@ final class ScalaLanguageServer(
       }
     }
 
-    /** Applies the client's incremental edits in order and replaces diagnostics for the new version. */
+    /**
+     * Applies the client's incremental edits in order and replaces diagnostics for the new version.
+     *
+     * The edit counter that guards edit-producing requests advances on arrival, before the documents thread takes the
+     * change; the change itself applies there, and only to project sources.
+     *
+     * @param params the changed document's new version and its content changes; a change without a range replaces the
+     *               whole text
+     */
     override def didChange(params: DidChangeTextDocumentParams): Unit = {
       editsReceived.incrementAndGet()
       onDocuments("didChange") { s =>
@@ -621,10 +727,20 @@ final class ScalaLanguageServer(
       }
     }
 
-    /** Keeps project sources open until a build reimport or session shutdown, even after editor tabs close. */
+    /**
+     * Keeps project sources open until a build reimport or session shutdown, even after editor tabs close.
+     *
+     * @param params the closed document, which is ignored
+     */
     override def didClose(params: DidCloseTextDocumentParams): Unit = ()
 
-    /** Queues a build compile without holding up edits and requests; pending saves share the next compile. */
+    /**
+     * Queues a build compile without holding up edits and requests; pending saves share the next compile.
+     *
+     * The compile runs on the builds thread, then schedules diagnostics for each path it reports.
+     *
+     * @param params the saved document, which is ignored: every compile includes all Scala targets
+     */
     override def didSave(params: DidSaveTextDocumentParams): Unit = onDocuments("didSave") { s =>
       if (compileQueued.compareAndSet(false, true)) {
         val submitted = System.nanoTime()
@@ -639,14 +755,31 @@ final class ScalaLanguageServer(
       }
     }
 
-    /** Returns the documentation at the requested project-source position as Markdown. */
+    /**
+     * Returns the documentation at the requested project-source position as Markdown.
+     *
+     * Runs on a read thread.
+     *
+     * @param params the document and position to describe
+     * @return the hover with Markdown content, or `null` when the session has none for the position or the document
+     *         is not a project source
+     */
     override def hover(params: HoverParams): CompletableFuture[Hover] = onRead("hover", params.getTextDocument, null) { (s, path) =>
       s.hover(path, lineColumn(params.getPosition)).map { markdown =>
         new Hover(new MarkupContent(MarkupKind.MARKDOWN, markdown))
       }.orNull
     }
 
-    /** Returns completion choices and whether more choices may be requested as the user types. */
+    /**
+     * Returns completion choices and whether more choices may be requested as the user types.
+     *
+     * Runs on the documents thread and, unlike edit-producing requests, is not cancelled by newer edits: clients
+     * filter suggestions as the user continues typing.
+     *
+     * @param params the document and position to complete at
+     * @return a list in the session's rank order whose `isIncomplete` flag is the session's; empty when the
+     *         document is not a project source
+     */
     override def completion(params: CompletionParams): CompletableFuture[LspEither[java.util.List[CompletionItem], CompletionList]] =
       onSource("completion", params.getTextDocument, LspEither.forRight(new CompletionList())) { (s, path) =>
         val choices = s.completion(path, lineColumn(params.getPosition))
@@ -654,7 +787,15 @@ final class ScalaLanguageServer(
         LspEither.forRight(new CompletionList(choices.incomplete, items.asJava))
       }
 
-    /** Returns parameter and other inline hints within the requested source range. */
+    /**
+     * Returns the inline hints the session computes within the requested source range.
+     *
+     * Runs on a read thread.
+     *
+     * @param params the document and range to hint
+     * @return one text-labelled hint per hint the session returns, each at its position; empty when the document is
+     *         not a project source
+     */
     override def inlayHint(params: InlayHintParams): CompletableFuture[JavaList[InlayHint]] =
       onRead("inlayHint", params.getTextDocument, JavaList.of[InlayHint]()) { (s, path) =>
         val range = params.getRange
@@ -668,6 +809,11 @@ final class ScalaLanguageServer(
      *
      * A client that can refresh lenses gets none until the project is open, then a refresh: an answer that waited
      * for the import would make VS Code, which spaces lens requests by their past durations, slow for the session.
+     *
+     * @param params the document whose lenses are requested
+     * @return one lens per test suite or test, titled "Run suite" or "Run test", whose command carries the run's
+     *         target, framework, suite and optional test name; empty when the document is not a project source, or
+     *         while the project is still opening for a client that refreshes lenses
      */
     override def codeLens(params: CodeLensParams): CompletableFuture[JavaList[? <: CodeLens]] =
       if (refreshesCodeLenses && !session.isDone) CompletableFuture.completedFuture(JavaList.of[CodeLens]())
@@ -683,13 +829,29 @@ final class ScalaLanguageServer(
         }.asJava
       }
 
-    /** Returns the signatures and active parameter at the requested call position. */
+    /**
+     * Returns the signatures and active parameter at the requested call position.
+     *
+     * Runs on a read thread.
+     *
+     * @param params the document and position inside a call
+     * @return the help for the signatures the session finds, or `null` when it finds none or the document is not a
+     *         project source
+     */
     override def signatureHelp(params: SignatureHelpParams): CompletableFuture[SignatureHelp] =
       onRead("signatureHelp", params.getTextDocument, null) { (s, path) =>
         s.signatures(path, lineColumn(params.getPosition)).filter(_.items.nonEmpty).map(signatureHelpOf).orNull
       }
 
-    /** Returns the nested syntax selections available at each requested position. */
+    /**
+     * Returns the nested syntax selections available at each requested position.
+     *
+     * Runs on a read thread.
+     *
+     * @param params the document and the positions to expand a selection from
+     * @return one selection per requested position, in request order, each linked through `parent` along the
+     *         session's range chain for that position; empty when the document is not a project source
+     */
     override def selectionRange(params: SelectionRangeParams): CompletableFuture[JavaList[SelectionRange]] =
       onRead("selectionRange", params.getTextDocument, JavaList.of[SelectionRange]()) { (s, path) =>
         s.selectionRanges(path, params.getPositions.asScala.toSeq.map(lineColumn)).map { chain =>
@@ -704,13 +866,27 @@ final class ScalaLanguageServer(
         }.asJava
       }
 
-    /** Formats a whole project source using the editor's indentation options. */
+    /**
+     * Formats a whole project source using the editor's indentation options.
+     *
+     * Runs on the documents thread; the request fails as cancelled if a newer edit arrives before it answers.
+     *
+     * @param params the document and the editor's tab size and tabs-or-spaces choice
+     * @return the edits that format the document; empty when the document is not a project source
+     */
     override def formatting(params: DocumentFormattingParams): CompletableFuture[java.util.List[? <: TextEdit]] =
       onEditsRequest("formatting", params.getTextDocument, java.util.List.of[TextEdit]()) { (s, path) =>
         textEdits(s.formatting(path, None, params.getOptions.getTabSize, !params.getOptions.isInsertSpaces))
       }
 
-    /** Formats only the requested range using the editor's indentation options. */
+    /**
+     * Formats only the requested range using the editor's indentation options.
+     *
+     * Runs on the documents thread; the request fails as cancelled if a newer edit arrives before it answers.
+     *
+     * @param params the document, the range to format and the editor's tab size and tabs-or-spaces choice
+     * @return the edits that format the range; empty when the document is not a project source
+     */
     override def rangeFormatting(params: DocumentRangeFormattingParams): CompletableFuture[java.util.List[? <: TextEdit]] =
       onEditsRequest("rangeFormatting", params.getTextDocument, java.util.List.of[TextEdit]()) { (s, path) =>
         val range = params.getRange
@@ -719,75 +895,158 @@ final class ScalaLanguageServer(
           !options.isInsertSpaces))
       }
 
-    /** Returns declaration locations for the symbol at the requested position. */
+    /**
+     * Returns declaration locations for the symbol at the requested position.
+     *
+     * Runs on a read thread.
+     *
+     * @param params the document and position of the symbol
+     * @return the locations the session reports, each a zero-width range at the reported position; empty when none
+     *         is found or the document is not a project source
+     */
     override def definition(params: DefinitionParams)
         : CompletableFuture[LspEither[java.util.List[? <: Location], java.util.List[? <: LocationLink]]] =
       onRead("definition", params.getTextDocument, locations(Seq.empty)) { (s, path) =>
         locations(s.definition(path, lineColumn(params.getPosition)).toSeq)
       }
 
-    /** Returns type-declaration locations for the symbol at the requested position. */
+    /**
+     * Returns type-declaration locations for the symbol at the requested position.
+     *
+     * Runs on a read thread.
+     *
+     * @param params the document and position of the symbol
+     * @return the locations the session reports, each a zero-width range at the reported position; empty when none
+     *         is found or the document is not a project source
+     */
     override def typeDefinition(params: TypeDefinitionParams)
         : CompletableFuture[LspEither[java.util.List[? <: Location], java.util.List[? <: LocationLink]]] =
       onRead("typeDefinition", params.getTextDocument, locations(Seq.empty)) { (s, path) =>
         locations(s.typeDefinition(path, lineColumn(params.getPosition)))
       }
 
-    /** Returns the source locations that reference the symbol at the requested position. */
+    /**
+     * Returns the source locations that reference the symbol at the requested position.
+     *
+     * Runs on a read thread.
+     *
+     * @param params the document and position of the symbol, and whether the declaration itself is included
+     * @return the locations of the references the session reports; empty when the document is not a project source
+     */
     override def references(params: ReferenceParams): CompletableFuture[java.util.List[? <: Location]] =
       onRead("references", params.getTextDocument, java.util.List.of[Location]()) { (s, path) =>
         s.references(path, lineColumn(params.getPosition), params.getContext.isIncludeDeclaration).map(location).asJava
       }
 
-    /** Returns source spans for the implementations of the symbol at the requested position. */
+    /**
+     * Returns source spans for the implementations of the symbol at the requested position.
+     *
+     * Runs on a read thread.
+     *
+     * @param params the document and position of the symbol
+     * @return the spans the session reports, each as a location covering its whole range; empty when the document is
+     *         not a project source
+     */
     override def implementation(params: ImplementationParams)
         : CompletableFuture[LspEither[java.util.List[? <: Location], java.util.List[? <: LocationLink]]] =
       onRead("implementation", params.getTextDocument, spanLocations(Seq.empty)) { (s, path) =>
         spanLocations(s.implementations(path, lineColumn(params.getPosition)))
       }
 
-    /** Prepares the method the IDE's call hierarchy selects at the position. */
+    /**
+     * Prepares the method the IDE's call hierarchy selects at the position.
+     *
+     * Runs on a read thread. Each item's `data` identifies its declaration for the incoming and outgoing requests.
+     *
+     * @param params the document and position to prepare from
+     * @return the items the session selects; empty when the document is not a project source
+     */
     override def prepareCallHierarchy(params: CallHierarchyPrepareParams): CompletableFuture[JavaList[CallHierarchyItem]] =
       onRead("prepareCallHierarchy", params.getTextDocument, java.util.List.of[CallHierarchyItem]()) { (s, path) =>
         s.prepareHierarchy(path, lineColumn(params.getPosition), types = false).map(callHierarchyItem).asJava
       }
 
-    /** Returns plugin caller groups with the references' ranges. */
+    /**
+     * Returns plugin caller groups with the references' ranges.
+     *
+     * Runs on a read thread. An item whose `data` is not a valid host identity is answered at once with an empty list.
+     *
+     * @param params the item, with the `data` this server gave it
+     * @return one entry per caller group, with the ranges of its references; empty when the identity is invalid or its
+     *         document is not a project source
+     */
     override def callHierarchyIncomingCalls(params: CallHierarchyIncomingCallsParams): CompletableFuture[JavaList[CallHierarchyIncomingCall]] =
       hierarchyRead("incomingCalls", params.getItem.getData, java.util.List.of[CallHierarchyIncomingCall]()) { (s, path, target) =>
         s.hierarchyCalls(path, target, incoming = true).map(c =>
           new CallHierarchyIncomingCall(callHierarchyItem(c.item), c.ranges.map(range).asJava)).asJava
       }
 
-    /** Returns callee groups with call sites in the requested caller. */
+    /**
+     * Returns callee groups with call sites in the requested caller.
+     *
+     * Runs on a read thread. An item whose `data` is not a valid host identity is answered at once with an empty list.
+     *
+     * @param params the item, with the `data` this server gave it
+     * @return one entry per callee group, with the ranges of its call sites; empty when the identity is invalid or its
+     *         document is not a project source
+     */
     override def callHierarchyOutgoingCalls(params: CallHierarchyOutgoingCallsParams): CompletableFuture[JavaList[CallHierarchyOutgoingCall]] =
       hierarchyRead("outgoingCalls", params.getItem.getData, java.util.List.of[CallHierarchyOutgoingCall]()) { (s, path, target) =>
         s.hierarchyCalls(path, target, incoming = false).map(c =>
           new CallHierarchyOutgoingCall(callHierarchyItem(c.item), c.ranges.map(range).asJava)).asJava
       }
 
-    /** Uses the Scala type hierarchy provider's target selection. */
+    /**
+     * Uses the Scala type hierarchy provider's target selection.
+     *
+     * Runs on a read thread. Each item's `data` identifies its declaration for the supertypes and subtypes requests.
+     *
+     * @param params the document and position to prepare from
+     * @return the items the session selects; empty when the document is not a project source
+     */
     override def prepareTypeHierarchy(params: TypeHierarchyPrepareParams): CompletableFuture[JavaList[TypeHierarchyItem]] =
       onRead("prepareTypeHierarchy", params.getTextDocument, java.util.List.of[TypeHierarchyItem]()) { (s, path) =>
         s.prepareHierarchy(path, lineColumn(params.getPosition), types = true).map(typeHierarchyItem).asJava
       }
 
-    /** Returns direct supertypes, including navigable library declarations. */
+    /**
+     * Returns direct supertypes, including navigable library declarations.
+     *
+     * Runs on a read thread. An item whose `data` is not a valid host identity is answered at once with an empty list.
+     *
+     * @param params the item, with the `data` this server gave it
+     * @return the direct supertypes; empty when the identity is invalid or its document is not a project source
+     */
     override def typeHierarchySupertypes(params: TypeHierarchySupertypesParams): CompletableFuture[JavaList[TypeHierarchyItem]] =
       hierarchyRead("supertypes", params.getItem.getData, java.util.List.of[TypeHierarchyItem]()) { (s, path, target) =>
         s.hierarchyTypes(path, target, subtypes = false).map(typeHierarchyItem).asJava
       }
 
-    /** Returns direct subtypes in project sources. */
+    /**
+     * Returns direct subtypes in project sources.
+     *
+     * Runs on a read thread. An item whose `data` is not a valid host identity is answered at once with an empty list.
+     *
+     * @param params the item, with the `data` this server gave it
+     * @return the direct subtypes; empty when the identity is invalid or its document is not a project source
+     */
     override def typeHierarchySubtypes(params: TypeHierarchySubtypesParams): CompletableFuture[JavaList[TypeHierarchyItem]] =
       hierarchyRead("subtypes", params.getItem.getData, java.util.List.of[TypeHierarchyItem]()) { (s, path, target) =>
         s.hierarchyTypes(path, target, subtypes = true).map(typeHierarchyItem).asJava
       }
 
-    /** Returns applicable code actions, with versioned edits for actions that can be applied immediately. */
+    /**
+     * Returns applicable code actions, with versioned edits for actions that can be applied immediately.
+     *
+     * Runs on a read thread. An action the session marks as disabled carries its reason and no edit.
+     *
+     * @param params the document, the range to act on and the kinds the client asked for, passed to the session as is
+     * @return one action per choice the session offers; empty when the document is not a project source
+     */
     override def codeAction(params: CodeActionParams): CompletableFuture[java.util.List[LspEither[Command, CodeAction]]] =
       onRead("codeAction", params.getTextDocument, java.util.List.of[LspEither[Command, CodeAction]]()) { (s, path) =>
         val requested = Option(params.getContext.getOnly).map(_.asScala.toSeq).getOrElse(Seq.empty)
+
         s.codeActions(path, lineColumn(params.getRange.getStart), lineColumn(params.getRange.getEnd), requested)
           .map { (choice, changes) =>
             val action = new CodeAction(choice.title)
@@ -803,20 +1062,35 @@ final class ScalaLanguageServer(
           }.asJava
       }
 
-    /** Returns the symbol-name range that a following rename request may edit. */
+    /**
+     * Returns the symbol-name range that a following rename request may edit.
+     *
+     * Runs on a read thread.
+     *
+     * @param params the document and position of the symbol
+     * @return the range of the symbol's name as the first alternative; `null` when the document is not a project source
+     */
     override def prepareRename(params: PrepareRenameParams)
         : CompletableFuture[LspEither3[Range, PrepareRenameResult, PrepareRenameDefaultBehavior]] =
       onRead("prepareRename", params.getTextDocument, null) { (s, path) =>
         LspEither3.forFirst[Range, PrepareRenameResult, PrepareRenameDefaultBehavior](range(s.prepareRename(path, lineColumn(params.getPosition))))
       }
 
-    /** Returns workspace edits for a rename, cancelling if the source changes while they are computed. */
+    /**
+     * Returns workspace edits for a rename, cancelling if the source changes while they are computed.
+     *
+     * Runs on the documents thread. A `Rename.Refused` thrown by the session fails the request with its message.
+     *
+     * @param params the document and position of the symbol, and its new name
+     * @return one versioned document edit per file the session changes; empty when the document is not a project source
+     */
     override def rename(params: RenameParams): CompletableFuture[WorkspaceEdit] =
       onEditsRequest("rename", params.getTextDocument, new WorkspaceEdit()) { (s, path) =>
         val edits = s.rename(path, lineColumn(params.getPosition), params.getNewName).map { file =>
           val document = new VersionedTextDocumentIdentifier(file.path.toUri.toString, versions.get(file.path))
           LspEither.forLeft[TextDocumentEdit, ResourceOperation](new TextDocumentEdit(document, textEdits(file.changes)))
         }
+
         new WorkspaceEdit(edits.asJava)
       }
 
@@ -828,7 +1102,15 @@ final class ScalaLanguageServer(
     private def spanLocations(found: Seq[SourceSpan]): LspEither[java.util.List[? <: Location], java.util.List[? <: LocationLink]] =
       LspEither.forLeft(found.map(location).asJava)
 
-    /** Returns occurrences of the symbol at the position, marking writes separately from reads. */
+    /**
+     * Returns occurrences of the symbol at the position, marking writes separately from reads.
+     *
+     * Runs on a read thread.
+     *
+     * @param params the document and position of the symbol
+     * @return one highlight per occurrence the session reports, of kind write or read; empty when the document is not
+     *         a project source
+     */
     override def documentHighlight(params: DocumentHighlightParams): CompletableFuture[java.util.List[? <: DocumentHighlight]] =
       onRead("documentHighlight", params.getTextDocument, java.util.List.of[DocumentHighlight]()) { (s, path) =>
         s.highlights(path, lineColumn(params.getPosition)).map { o =>
@@ -836,37 +1118,65 @@ final class ScalaLanguageServer(
         }.asJava
       }
 
-    /** Returns the nested declarations displayed in the document outline. */
+    /**
+     * Returns the nested declarations displayed in the document outline.
+     *
+     * Runs on a read thread.
+     *
+     * @param params the document to outline
+     * @return the top-level declarations as document symbols, each carrying its nested children; empty when the
+     *         document is not a project source
+     */
     override def documentSymbol(params: DocumentSymbolParams)
         : CompletableFuture[java.util.List[LspEither[SymbolInformation, DocumentSymbol]]] =
       onRead("documentSymbol", params.getTextDocument, java.util.List.of[LspEither[SymbolInformation, DocumentSymbol]]()) { (s, path) =>
         /** Converts an outline declaration and its nested children to LSP document symbols. */
         def symbol(o: OutlineSymbol): DocumentSymbol = {
           val converted = new DocumentSymbol(o.name, lspSymbolKind(o.kind), range(o.range), range(o.nameRange), o.detail)
+
           converted.setChildren(o.children.map(symbol).asJava)
           converted
         }
+
         s.outline(path).map(o => LspEither.forRight[SymbolInformation, DocumentSymbol](symbol(o))).asJava
       }
 
-    /** Returns the full semantic-token stream for a project source. */
+    /**
+     * Returns the full semantic-token stream for a project source.
+     *
+     * Runs on a read thread.
+     *
+     * @param params the document to color
+     * @return the session's tokens as encoded by `SemanticColoring`; empty when the document is not a project source
+     */
     override def semanticTokensFull(params: SemanticTokensParams): CompletableFuture[SemanticTokens] =
       onRead("semanticTokens", params.getTextDocument, new SemanticTokens(java.util.List.of[Integer]())) { (s, path) =>
         val data = SemanticColoring.encode(s.semanticTokens(path))
+
         new SemanticTokens(data.map(Integer.valueOf).asJava)
       }
 
-    /** Returns foldable code, comments, imports and regions in a project source. */
+    /**
+     * Returns foldable code, comments, imports and regions in a project source.
+     *
+     * Runs on a read thread.
+     *
+     * @param params the document to fold
+     * @return one range per fold the session reports, with its kind set for comments, imports and regions and left
+     *         unset for code; empty when the document is not a project source
+     */
     override def foldingRange(params: FoldingRangeRequestParams): CompletableFuture[java.util.List[FoldingRange]] =
       onRead("foldingRange", params.getTextDocument, java.util.List.of[FoldingRange]()) { (s, path) =>
         s.foldingRanges(path).map { fold =>
           val r = new FoldingRange(fold.startLine, fold.endLine)
+
           fold.kind match {
             case Fold.Comment => r.setKind(FoldingRangeKind.Comment)
             case Fold.Imports => r.setKind(FoldingRangeKind.Imports)
             case Fold.Region => r.setKind(FoldingRangeKind.Region)
             case Fold.Code => ()
           }
+
           r
         }.asJava
       }
@@ -891,6 +1201,7 @@ final class ScalaLanguageServer(
           if (current) publishDiagnostics(path, version)
         }
       }
+
       pendingDiagnostics.put(path, ScheduledDiagnostics(task,
         diagnostics.schedule(task, DiagnosticsDelayMs, TimeUnit.MILLISECONDS)))
     }
@@ -919,6 +1230,7 @@ final class ScalaLanguageServer(
   /** Encodes the documented host identity without retaining PSI or depending on case-class deserialization. */
   private def hierarchyData(target: HierarchyTarget): JsonObject = {
     val data = new JsonObject
+
     data.addProperty("uri", target.uri)
     data.addProperty("offset", target.offset)
     data.addProperty("name", target.name)
@@ -931,8 +1243,10 @@ final class ScalaLanguageServer(
       (request: (ProjectSession, Path, HierarchyTarget) => T): CompletableFuture[T] = {
     val target = data match {
       case values: JsonObject =>
+        /** Reads a string member, absent when the member is missing or not a JSON string. */
         def string(key: String): Option[String] = Option(values.get(key))
           .filter(v => v.isJsonPrimitive && v.getAsJsonPrimitive.isString).map(_.getAsString)
+
         for {
           uri <- string("uri")
           name <- string("name")
@@ -942,6 +1256,7 @@ final class ScalaLanguageServer(
         } yield HierarchyTarget(uri, offset, name, string("libraryClass"))
       case _ => None
     }
+
     target match {
       case Some(found) => onRead(kind, new TextDocumentIdentifier(found.uri), outside)((s, path) => request(s, path, found))
       case None => CompletableFuture.completedFuture(outside)
@@ -952,6 +1267,7 @@ final class ScalaLanguageServer(
   private def callHierarchyItem(item: HierarchyItem): CallHierarchyItem = {
     val result = new CallHierarchyItem(item.name, lspSymbolKind(item.kind), item.location.path.toUri.toString,
       range(item.location.range), range(item.selectionRange))
+
     result.setData(hierarchyData(item.target))
     result
   }
@@ -960,6 +1276,7 @@ final class ScalaLanguageServer(
   private def typeHierarchyItem(item: HierarchyItem): TypeHierarchyItem = {
     val result = new TypeHierarchyItem(item.name, lspSymbolKind(item.kind), item.location.path.toUri.toString,
       range(item.location.range), range(item.selectionRange))
+
     result.setData(hierarchyData(item.target))
     result
   }
@@ -967,6 +1284,11 @@ final class ScalaLanguageServer(
   /** Converts a host diagnostic to LSP severity, range and source fields. */
   private def diagnostic(problem: FileProblem): org.eclipse.lsp4j.Diagnostic = {
     val converted = new org.eclipse.lsp4j.Diagnostic(new Range(position(problem.start), position(problem.end)), problem.message)
+    val tags = Seq(
+      Option.when(problem.deprecated)(org.eclipse.lsp4j.DiagnosticTag.Deprecated),
+      Option.when(problem.unnecessary)(org.eclipse.lsp4j.DiagnosticTag.Unnecessary),
+    ).flatten
+
     converted.setSeverity(problem.severity match {
       case ProblemSeverity.Error => DiagnosticSeverity.Error
       case ProblemSeverity.Warning => DiagnosticSeverity.Warning
@@ -974,11 +1296,8 @@ final class ScalaLanguageServer(
     })
     converted.setSource(problem.source)
     problem.inspectionId.foreach(converted.setCode)
-    val tags = Seq(
-      Option.when(problem.deprecated)(org.eclipse.lsp4j.DiagnosticTag.Deprecated),
-      Option.when(problem.unnecessary)(org.eclipse.lsp4j.DiagnosticTag.Unnecessary),
-    ).flatten
     if (tags.nonEmpty) converted.setTags(tags.asJava)
+
     converted
   }
 
@@ -1055,6 +1374,7 @@ final class ScalaLanguageServer(
         suggestion.prefixText, suggestion.lookup, suggestion.identity)
       item.setCommand(new Command(suggestion.label, CompleteInsertion, arguments.asJava))
     }
+
     item
   }
 
@@ -1071,6 +1391,7 @@ final class ScalaLanguageServer(
       }
       information
     }
+
     new SignatureHelp(signatures.asJava, found.active.map(Integer.valueOf).getOrElse(Integer.valueOf(0)), null)
   }
 
@@ -1079,6 +1400,7 @@ final class ScalaLanguageServer(
     if (followUp.changes.nonEmpty) {
       val edit = new TextDocumentEdit(new VersionedTextDocumentIdentifier(uri, version), textEdits(followUp.changes))
       val workspaceEdit = new WorkspaceEdit(java.util.List.of(LspEither.forLeft[TextDocumentEdit, ResourceOperation](edit)))
+
       client.applyEdit(new ApplyWorkspaceEditParams(workspaceEdit, "completion")).thenAccept { response =>
         if (response.isApplied && showsDocuments) {
           val show = new ShowDocumentParams(uri)
@@ -1105,9 +1427,11 @@ final class ScalaLanguageServer(
   private def testSelection(params: ExecuteCommandParams): Option[TestRun.Selection] =
     Option(params.getArguments).map(_.asScala.toSeq) match {
       case Some(Seq(json: JsonObject)) =>
+        /** Reads a non-blank string member, absent when the member is missing, not a JSON string or blank. */
         def string(name: String): Option[String] = Option(json.get(name)).collect {
           case value: JsonPrimitive if value.isString && !value.getAsString.isBlank => value.getAsString
         }
+
         for {
           target <- string("target")
           framework <- string("framework").filter(TestRun.Frameworks.contains)
@@ -1116,8 +1440,10 @@ final class ScalaLanguageServer(
       case _ => None
     }
 
+  /** Shows a finished run's summary to the client: as an error if it failed, a warning if ignored, else information. */
   private def showTestResult(result: TestRun.Result): Unit = {
     val kind = if (result.failed) MessageType.Error else if (result.ignored) MessageType.Warning else MessageType.Info
+
     client.showMessage(new MessageParams(kind, result.summary))
   }
 
@@ -1125,10 +1451,24 @@ final class ScalaLanguageServer(
 
   /** Workspace-level commands, symbol queries and build/source watch notifications. */
   private object Workspace extends LspServices.Workspace {
-    /** Configuration changes are not applied; module settings come from the imported build. */
+    /**
+     * Configuration changes are not applied; module settings come from the imported build.
+     *
+     * @param params the changed settings, which are ignored
+     */
     override def didChangeConfiguration(params: DidChangeConfigurationParams): Unit = ()
 
-    /** Executes a test selection or completion insert handler; unknown commands are invalid parameters. */
+    /**
+     * Executes a test selection or completion insert handler; unknown commands are invalid parameters.
+     *
+     * A test selection runs on the test-run thread and the request completes when the run ends; starting one while
+     * another is in progress fails with `RequestFailed`. A completion insertion runs on the documents thread and
+     * completes with `null`. A malformed test selection, a completion insertion without six primitive arguments and
+     * an unknown command fail with `InvalidParams`.
+     *
+     * @param params the command name and its JSON arguments, as `completionItem` or the code lens gave them
+     * @return a future completing with `null` once the command has run, or failing with the protocol error
+     */
     override def executeCommand(params: ExecuteCommandParams): CompletableFuture[AnyRef] = params.getCommand match {
       case RunTest => executeTest(params)
       case CompleteInsertion =>
@@ -1138,10 +1478,12 @@ final class ScalaLanguageServer(
         else {
           val uri = arguments(0).getAsString
           val start = LineColumn(arguments(1).getAsInt, arguments(2).getAsInt)
+
           onSource("completion insertion", new TextDocumentIdentifier(uri), null) { (s, path) =>
             val prefixText = arguments(3).getAsString
             val lookup = arguments(4).getAsString
             val identity = arguments(5).getAsString
+
             s.insertCompletion(path, start, prefixText, lookup, identity)
               .foreach(applyFollowUp(uri, versions.get(path), _))
             null
@@ -1150,7 +1492,15 @@ final class ScalaLanguageServer(
       case other => CompletableFuture.failedFuture(requestError(ResponseErrorCode.InvalidParams, s"unknown command: $other"))
     }
 
-    /** Searches project-wide symbols matching the client's query. */
+    /**
+     * Searches project-wide symbols matching the client's query.
+     *
+     * Runs on the documents thread.
+     *
+     * @param params the query text
+     * @return the `WorkspaceSymbol` alternative with one entry per symbol the session finds, in its order, each located
+     *         by its source span and carrying its container name when it has one
+     */
     override def symbol(params: WorkspaceSymbolParams): CompletableFuture[LspEither[java.util.List[? <: SymbolInformation], java.util.List[? <: WorkspaceSymbol]]] =
       onDocuments("workspaceSymbol") { s =>
         val symbols = s.workspaceSymbols(params.getQuery).map { found =>
@@ -1158,13 +1508,22 @@ final class ScalaLanguageServer(
           found.container.foreach(symbol.setContainerName)
           symbol
         }
+
         LspEither.forRight[java.util.List[? <: SymbolInformation], java.util.List[? <: WorkspaceSymbol]](symbols.asJava)
       }
 
-    /** Reimports after build or source-file changes, then refreshes diagnostics for tracked files. */
+    /**
+     * Reimports after build or source-file changes, then refreshes diagnostics for tracked files.
+     *
+     * Runs on the documents thread. The import reloads the BSP workspace only when a changed file is part of the build
+     * definition.
+     *
+     * @param params the created, changed or deleted files; entries whose URI is not a `file:` URI are ignored
+     */
     override def didChangeWatchedFiles(params: DidChangeWatchedFilesParams): Unit = onDocuments("build change") { s =>
       val paths = params.getChanges.asScala.toSeq.map(_.getUri).filter(_.startsWith("file:")).map(pathOf)
       val buildChanged = paths.exists(BuildDefinition.isPart)
+
       HostLog.info(s"${if (buildChanged) "build definition changed" else "source files created or deleted"}: ${paths.mkString(", ")}")
       importAgain(s, reload = buildChanged)
       versions.keySet.forEach(scheduleDiagnostics)
@@ -1172,33 +1531,53 @@ final class ScalaLanguageServer(
   }
 }
 
-/** Runs the suite or test selection carried by a code lens. */
+/** The command that runs the suite or test selection carried by a code lens. */
 private val RunTest = "scalaAnalyzer.runTest"
 
-/** Replays insertion after the client has inserted a completion item's lookup text. */
+/** The command that replays insertion after the client has inserted a completion item's lookup text. */
 private val CompleteInsertion = "scalaAnalyzer.completeInsertion"
 
 /** Which files define an sbt build: the client watches them, and a change to one reloads the build. */
 private object BuildDefinition {
+  /** Watcher glob for sbt build files at any depth. */
   val SbtFiles = "**/*.sbt"
+
+  /** Watcher glob for the Scala sources of a build's `project` directory. */
   val ProjectFiles = "**/project/*.scala"
+
+  /** Watcher glob for the `build.properties` file of a build's `project` directory. */
   val BuildProperties = "**/project/build.properties"
 
-  /** Whether `path` can change sbt's build definition and therefore requires a BSP workspace reload. */
+  /**
+   * Whether `path` can change sbt's build definition and therefore requires a BSP workspace reload.
+   *
+   * @param path changed file; must have a file name, so not a filesystem root
+   * @return `true` for any `.sbt` file, and for a `.scala` file or `build.properties` directly inside a directory
+   *         named `project`; `false` otherwise
+   */
   def isPart(path: Path): Boolean = {
     val name = path.getFileName.toString
     val inProject = Option(path.getParent).exists(_.getFileName.toString == "project")
+
     name.endsWith(".sbt") || (inProject && (name.endsWith(".scala") || name == "build.properties"))
   }
 }
 
 /** Latencies by request kind: counts and maxima since the server started, percentiles over the latest requests. */
 private final class RequestStats {
-  // Enough recent requests of a kind for stable percentiles, few enough that memory stays flat.
+  /** Enough recent requests of a kind for stable percentiles, few enough that memory stays flat. */
   private val Window = 512
 
-  /** Aggregate count, recent-window percentiles and lifetime maximum for one request kind. */
-  final case class Summary(count: Long, p50: Long, p95: Long, max: Long)
+  /**
+   * Aggregate count, recent-window percentiles and lifetime maximum for one request kind.
+   *
+   * @param kind request kind the figures belong to
+   * @param count requests recorded since startup
+   * @param p50 median duration over the recent window, in milliseconds
+   * @param p95 95th-percentile duration over the recent window, in milliseconds
+   * @param max longest duration since startup, in milliseconds
+   */
+  final case class Summary(kind: String, count: Long, p50: Long, p95: Long, max: Long)
 
   /** Retains one request kind's lifetime totals and bounded latency window. */
   private final class Kind {
@@ -1210,24 +1589,41 @@ private final class RequestStats {
     val recent = new java.util.ArrayDeque[Long]()
   }
 
+  /** The totals and window of each kind in name order; guarded by its own monitor. */
   private val kinds = new java.util.TreeMap[String, Kind]()
 
-  /** Adds one duration to the kind's lifetime totals and bounded percentile window. */
+  /**
+   * Adds one duration to the kind's lifetime totals and bounded percentile window.
+   *
+   * Safe to call from any thread: updates and `summary` exclude each other.
+   *
+   * @param kind request kind the duration belongs to; its statistics are created on first use
+   * @param ms request duration in milliseconds
+   */
   def record(kind: String, ms: Long): Unit = kinds.synchronized {
     val stats = kinds.computeIfAbsent(kind, _ => new Kind)
+
     stats.count += 1
     stats.max = math.max(stats.max, ms)
     stats.recent.addLast(ms)
     if (stats.recent.size > Window) stats.recent.removeFirst()
   }
 
-  /** Returns per-kind summaries in stable name order. */
-  def summary: Seq[(String, Summary)] = kinds.synchronized {
+  /**
+   * Returns per-kind summaries in stable name order.
+   *
+   * Safe to call from any thread: it excludes concurrent `record` calls, so each summary is internally consistent.
+   *
+   * @return one summary per kind recorded so far, ordered by kind name; empty before any request is recorded
+   */
+  def summary: Seq[Summary] = kinds.synchronized {
     kinds.asScala.toSeq.map { (name, stats) =>
       val sorted = stats.recent.asScala.toVector.sorted
+
       /** Selects the existing window's upper quantile rank, clamped to its final sample. */
       def percentile(p: Double): Long = sorted(math.min(sorted.size - 1, (p * sorted.size).toInt))
-      name -> Summary(stats.count, percentile(0.5), percentile(0.95), stats.max)
+
+      Summary(name, stats.count, percentile(0.5), percentile(0.95), stats.max)
     }
   }
 }

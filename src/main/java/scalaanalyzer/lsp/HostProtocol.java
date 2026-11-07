@@ -14,11 +14,19 @@ import java.util.concurrent.CompletableFuture;
  * Clients may implement these extensions to display import state and diagnostics about the server itself.
  */
 public final class HostProtocol {
+  /** Prevents instantiation: this class only groups the protocol types. */
   private HostProtocol() {}
 
-  /** The server's lifecycle state and a human-readable description of its current work. */
+  /**
+   * The server's lifecycle state and a human-readable description of its current work.
+   *
+   * Instances are immutable and travel as the payload of the {@code scalaAnalyzer/state} notification.
+   */
   public static final class ServerState {
+    /** The lifecycle state: {@code starting}, {@code importing}, {@code ready} or {@code failed}. */
     public final String state;
+
+    /** The human-readable activity or failure description that goes with {@link #state}. */
     public final String message;
 
     /**
@@ -37,6 +45,8 @@ public final class HostProtocol {
   public interface Client extends LanguageClient {
     /**
      * Reports a server lifecycle transition.
+     *
+     * Sent as the {@code scalaAnalyzer/state} notification, so the client sends no reply.
      *
      * @param state current lifecycle state and activity description
      */
