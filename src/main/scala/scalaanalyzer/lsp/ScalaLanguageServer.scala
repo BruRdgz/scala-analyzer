@@ -1464,8 +1464,8 @@ final class ScalaLanguageServer(
      *
      * A test selection runs on the test-run thread and the request completes when the run ends; starting one while
      * another is in progress fails with `RequestFailed`. A completion insertion runs on the documents thread and
-     * completes with `null`. A malformed test selection, a completion insertion without six primitive arguments and
-     * an unknown command fail with `InvalidParams`.
+     * completes with `null`. A malformed test selection, a completion insertion without six primitive arguments (the
+     * second and the third numbers) and an unknown command fail with `InvalidParams`.
      *
      * @param params the command name and its JSON arguments, as `completionItem` or the code lens gave them
      * @return a future completing with `null` once the command has run, or failing with the protocol error
@@ -1474,8 +1474,10 @@ final class ScalaLanguageServer(
       case RunTest => executeTest(params)
       case CompleteInsertion =>
         // lsp4j hands the arguments over as JSON: the ones completionItem gave.
-        val arguments = params.getArguments.asScala.toSeq.collect { case json: JsonPrimitive => json }
-        if (arguments.size != 6) CompletableFuture.failedFuture(requestError(ResponseErrorCode.InvalidParams, s"$CompleteInsertion: $arguments"))
+        // The protocol lets a client leave `arguments` out; the line and the column are the two numbers.
+        val arguments = Option(params.getArguments).map(_.asScala.toSeq).getOrElse(Seq.empty).collect { case json: JsonPrimitive => json }
+        if (arguments.size != 6 || !arguments(1).isNumber || !arguments(2).isNumber)
+          CompletableFuture.failedFuture(requestError(ResponseErrorCode.InvalidParams, s"$CompleteInsertion: $arguments"))
         else {
           val uri = arguments(0).getAsString
           val start = LineColumn(arguments(1).getAsInt, arguments(2).getAsInt)

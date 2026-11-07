@@ -1,6 +1,6 @@
 package scalaanalyzer.lsp
 
-import com.google.gson.{Gson, JsonObject}
+import com.google.gson.{Gson, JsonObject, JsonPrimitive}
 import com.intellij.psi.PsiManager
 import org.eclipse.lsp4j.*
 import org.eclipse.lsp4j.jsonrpc.ResponseErrorException
@@ -425,6 +425,33 @@ class LanguageServerTest extends munit.FunSuite {
     error.getCause match {
       case response: ResponseErrorException => assertEquals(response.getResponseError.getCode, ResponseErrorCode.InvalidParams.getValue)
       case other => fail(s"unexpected command failure: $other")
+    }
+  }
+
+  test("rejects malformed completionInsertion arguments") {
+    def primitives(values: Any*): JavaList[Object] =
+      JavaList.of(values.map {
+        case number: Int => new JsonPrimitive(Integer.valueOf(number))
+        case text: String => new JsonPrimitive(text)
+      }*)
+
+    val malformed = Seq(
+      "no arguments" -> null,
+      "a line that is not a number" -> primitives("file:///none.scala", "abc", 0, "pre", "lookup", "identity"),
+      "a column that is not a number" -> primitives("file:///none.scala", 0, "abc", "pre", "lookup", "identity"),
+      "a missing argument" -> primitives("file:///none.scala", 0, 0, "pre", "lookup"),
+    )
+
+    for ((description, arguments) <- malformed) {
+      val error = intercept[ExecutionException] {
+        server.getWorkspaceService.executeCommand(new ExecuteCommandParams("scalaAnalyzer.completeInsertion", arguments))
+          .get(30, TimeUnit.SECONDS)
+      }
+      error.getCause match {
+        case response: ResponseErrorException =>
+          assertEquals(response.getResponseError.getCode, ResponseErrorCode.InvalidParams.getValue, description)
+        case other => fail(s"$description: unexpected command failure: $other")
+      }
     }
   }
 
