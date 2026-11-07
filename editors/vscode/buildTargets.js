@@ -35,7 +35,9 @@ function snapshotOf(targets) {
     const root = item(name, 'package', { id, description: `Scala ${scalaVersion}`, tooltip: id, collapsibleState: collapsed, contextValue: 'target' });
     const parts = [];
     if (dependsOn.length > 0) parts.push(group('Depends on', 'references', dependsOn.map(dependency)));
-    if (libraries.length > 0) parts.push(group(`Libraries (${libraries.length})`, 'library', libraries.map(library)));
+    // The server keeps classpath order; by file name, as IntelliJ's External Libraries, a jar is easier to find.
+    const byFileName = [...libraries].sort((a, b) => path.basename(a).localeCompare(path.basename(b)));
+    if (libraries.length > 0) parts.push(group(`Libraries (${libraries.length})`, 'library', byFileName.map(library)));
     parts.push(item(sourceFileCount === 1 ? '1 source file' : `${sourceFileCount} source files`, 'file-code'));
     children.set(root, parts);
     return root;
