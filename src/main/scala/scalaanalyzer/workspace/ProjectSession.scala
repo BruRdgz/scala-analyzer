@@ -683,32 +683,37 @@ final class ProjectSession private (
   def compileBuild(): Set[Path] = buildLock.synchronized {
     ensureUsable()
 
-    val previousProblems = buildProblems.get
-    val compiledProblems = build.compile().diagnostics
+    storeBuildProblems(build.compile().diagnostics)
+  }
 
-    buildProblems.set(compiledProblems)
-    (previousProblems.keySet ++ compiledProblems.keySet)
-      .filter(path => previousProblems.get(path) != compiledProblems.get(path) && files.containsKey(path))
+  /** Replaces the stored build diagnostics; returns the registered sources whose diagnostics differ from the old ones. */
+  private def storeBuildProblems(compiled: Map[Path, Seq[CompilerDiagnostic]]): Set[Path] = {
+    val previous = buildProblems.getAndSet(compiled)
+
+    (previous.keySet ++ compiled.keySet)
+      .filter(path => previous.get(path) != compiled.get(path) && files.containsKey(path))
   }
 
   /**
    * Compiles a test target and captures its environment under the BSP guard, without taking a host lock.
    *
    * This blocks on BSP like `compileBuild`, and stores the build diagnostics published so far, whether or not the
-   * compilation succeeded. Unlike `compileBuild`, it does not report which sources changed, so the editor sees the new
-   * diagnostics only when a source's problems are next requested. A failed compilation is reported as an exception
-   * after its diagnostics are stored.
+   * compilation succeeded. `changed` receives the registered sources whose stored diagnostics changed, as
+   * `compileBuild` returns them, once they are stored and before a failed compilation is reported, so it also runs
+   * for a failed one. It runs on the calling thread under the BSP guard and must not block. A failed compilation is
+   * reported as an exception after that.
    *
    * @param target BSP target to compile and to capture the test environment of
+   * @param changed receives the sources that may need their diagnostics republished
    * @return the target's test environment, captured after its successful compilation
    * @throws IllegalStateException when the target does not compile, or the session is closed or unavailable
    */
-  def prepareTestRun(target: String): TestRun.Environment = buildLock.synchronized {
+  def prepareTestRun(target: String, changed: Set[Path] => Unit): TestRun.Environment = buildLock.synchronized {
     ensureUsable()
 
     val compiled = build.compile(target)
 
-    buildProblems.set(compiled.diagnostics)
+    changed(storeBuildProblems(compiled.diagnostics))
     if (!compiled.succeeded) throw new IllegalStateException(s"compilation failed for $target; see compiler diagnostics")
 
     build.testEnvironment(target)

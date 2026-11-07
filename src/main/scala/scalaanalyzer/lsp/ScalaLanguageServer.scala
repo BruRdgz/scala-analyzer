@@ -1417,7 +1417,7 @@ final class ScalaLanguageServer(
     case None => CompletableFuture.failedFuture(requestError(ResponseErrorCode.InvalidParams,
       s"$RunTest: expected one object with target, framework (${TestRun.Frameworks.mkString(", ")}), suite and an optional testName"))
     case Some(selection) =>
-      try testRuns.start(selection, () => session.join().prepareTestRun(selection.target),
+      try testRuns.start(selection, () => session.join().prepareTestRun(selection.target, _.foreach(scheduleDiagnostics)),
         line => client.logMessage(new MessageParams(MessageType.Info, line)), showTestResult)
       catch {
         case e: IllegalStateException => CompletableFuture.failedFuture(requestError(ResponseErrorCode.RequestFailed, e.getMessage))

@@ -1533,6 +1533,27 @@ class LanguageServerTest extends munit.FunSuite {
     }
   }
 
+  test("a test run's compile reports the sources whose build diagnostics changed, also when it fails") {
+    val session = ProjectSession.open(TestHost.host, fixture)
+    val target = fixture.toFile.toURI.toString + "#core/Test"
+    val original = Files.readString(greeting)
+    val reported = scala.collection.mutable.Buffer.empty[Set[Path]]
+    try {
+      Files.writeString(greeting, original + "\nobject Broken { val x: Int = \"s\" }\n")
+      intercept[IllegalStateException](session.prepareTestRun(target, reported += _))
+      // `contains`: the compile may report other files too.
+      assert(reported.last.contains(greeting), reported.toString)
+
+      Files.writeString(greeting, original)
+      session.prepareTestRun(target, reported += _)
+      assert(reported.last.contains(greeting), reported.toString)
+    } finally {
+      Files.writeString(greeting, original)
+      session.close()
+      releaseModules()
+    }
+  }
+
   test("source checks do not wait for an ongoing diagnostic read") {
     val session = ProjectSession.open(TestHost.host, fixture)
     val executor = Executors.newSingleThreadExecutor(r => new Thread(r, "session-diagnostic-test"))
