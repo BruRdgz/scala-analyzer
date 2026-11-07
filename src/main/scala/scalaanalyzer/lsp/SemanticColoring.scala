@@ -57,8 +57,8 @@ object SemanticColoring {
   /**
    * Encodes semantic tokens as LSP delta tuples.
    *
-   * Tokens are sorted by position. Equal ranges keep the last input token; later overlapping ranges are dropped.
-   * Input positions and lengths use UTF-16 code units and each token must fit within one line. An empty input
+   * Tokens are sorted by position. Tokens that start at the same position keep the last input token, whatever their
+   * lengths; later overlapping ranges are dropped. Input positions and lengths use UTF-16 code units and each token must fit within one line. An empty input
    * encodes to an empty sequence.
    *
    * @param tokens tokens expressed in the language model's categories
@@ -66,8 +66,9 @@ object SemanticColoring {
    *         token, in position order
    */
   def encode(tokens: Seq[SemanticToken]): Seq[Int] = {
-    val lastPerRange = tokens.groupMapReduce(token => (token.start, token.length))(identity)((_, later) => later).values
-    val ordered = lastPerRange.toSeq.sortBy(token => (token.start.line, token.start.column))
+    // One token per start makes the sort key unique, so the order of `values` cannot decide which token survives.
+    val lastPerStart = tokens.groupMapReduce(_.start)(identity)((_, later) => later).values
+    val ordered = lastPerStart.toSeq.sortBy(token => (token.start.line, token.start.column))
     val kept = ordered.foldLeft(Vector.empty[SemanticToken]) { (acc, next) =>
       acc.lastOption match {
         case Some(last) if last.start.line == next.start.line && next.start.column < last.start.column + last.length => acc
