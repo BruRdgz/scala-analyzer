@@ -48,7 +48,64 @@
         "editor.defaultFormatter": "brurdgz.scala-analyzer"
       }
     },
+    "taskDefinitions": [
+      {
+        "type": "scala-analyzer",
+        "required": [
+          "task"
+        ],
+        "properties": {
+          "task": {
+            "type": "string",
+            "enum": [
+              "compile"
+            ],
+            "description": "The build task to run: compile builds every Scala target and reports its diagnostics in the Problems panel."
+          }
+        }
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "scalaAnalyzer.typeInfo",
+          "when": "editorLangId == scala",
+          "group": "navigation"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "scalaAnalyzer.typeInfo",
+          "when": "editorLangId == scala"
+        }
+      ]
+    },
     "commands": [
+      {
+        "command": "scalaAnalyzer.menu",
+        "title": "Show Menu",
+        "category": "scala-analyzer"
+      },
+      {
+        "command": "scalaAnalyzer.compile",
+        "title": "Compile Build",
+        "category": "scala-analyzer"
+      },
+      {
+        "command": "scalaAnalyzer.reimport",
+        "title": "Reimport Build",
+        "category": "scala-analyzer"
+      },
+      {
+        "command": "scalaAnalyzer.restart",
+        "title": "Restart Server",
+        "category": "scala-analyzer"
+      },
+      {
+        "command": "scalaAnalyzer.typeInfo",
+        "title": "Show Type Info",
+        "category": "scala-analyzer"
+      },
       {
         "command": "scalaAnalyzer.showStatus",
         "title": "Show Status",
@@ -65,6 +122,7 @@
     "vscode-languageclient": "11.0.0"
   },
   "devDependencies": {
+    "@types/vscode": "1.91.0",
     "@vscode/test-electron": "3.1.0",
     "@vscode/vsce": "4.1.0"
   },

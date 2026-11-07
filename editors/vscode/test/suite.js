@@ -22,6 +22,15 @@ async function journey() {
   const definitions = await vscode.commands.executeCommand('vscode.executeDefinitionProvider', uri, position);
   assert(definitions.some(item => (item.uri || item.targetUri).fsPath.endsWith('Greeting.scala')),
     'the installed VSIX must navigate to the source declaration');
+  const tasks = await vscode.tasks.fetchTasks({ type: 'scala-analyzer' });
+  assert(tasks.some(task => task.name === 'compile' && task.group?.id === vscode.TaskGroup.Build.id),
+    'the installed VSIX must provide the compile build task');
+  const editor = vscode.window.activeTextEditor;
+  const constructor = new vscode.Position(line, document.lineAt(line).text.indexOf('Greeting("world")') + 1);
+  editor.selection = new vscode.Selection(constructor, constructor);
+  const type = await vscode.commands.executeCommand('scalaAnalyzer.typeInfo');
+  assert(typeof type === 'string' && type.includes('Greeting'),
+    'the installed VSIX must return the type of the expression at the cursor');
 }
 
 exports.run = async () => {
