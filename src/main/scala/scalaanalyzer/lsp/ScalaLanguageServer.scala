@@ -825,7 +825,7 @@ final class ScalaLanguageServer(
           arguments.addProperty("suite", lens.suite)
           lens.testName.foreach(arguments.addProperty("testName", _))
           val title = if (lens.testName.isDefined) "Run test" else "Run suite"
-          new CodeLens(range(lens.range), new Command(title, "scalaAnalyzer.runTest", JavaList.of[Object](arguments)), null)
+          new CodeLens(range(lens.range), new Command(title, RunTest, JavaList.of[Object](arguments)), null)
         }.asJava
       }
 
@@ -1216,7 +1216,8 @@ final class ScalaLanguageServer(
       try {
         // A file the build no longer has (deleted, or out of every module) has no problems left.
         val problems = timed("problems", System.nanoTime()) {
-          if (session.join().isSource(path)) session.join().problems(path) else Seq.empty
+          val opened = session.join()
+          if (opened.isSource(path)) opened.problems(path) else Seq.empty
         }
         if (isCurrent(path, version))
           client.publishDiagnostics(new PublishDiagnosticsParams(path.toUri.toString, problems.map(diagnostic).asJava, version))

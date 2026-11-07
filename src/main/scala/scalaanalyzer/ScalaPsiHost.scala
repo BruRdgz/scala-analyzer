@@ -1,25 +1,23 @@
 package scalaanalyzer
 
 import com.intellij.codeInsight.daemon.impl.{AnnotationHolderImpl, AnnotationSessionImpl}
-import com.intellij.lang.annotation.HighlightSeverity
-import com.intellij.openapi.application.Application
+import com.intellij.lang.annotation.{Annotation, Annotator, HighlightSeverity}
 import com.intellij.openapi.fileTypes.FileTypeRegistry
 import com.intellij.openapi.module.Module
-import com.intellij.openapi.progress.ProgressManager
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.util.{Key, TextRange, UserDataHolderBase}
 import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.psi.{PsiElement, PsiErrorElement, PsiFile, PsiJavaFile, PsiManager, SyntaxTraverser}
+import com.intellij.psi.impl.PsiManagerEx
 import com.intellij.psi.util.{CachedValue, CachedValueProvider, CachedValuesManager, PsiModificationTracker}
-import com.intellij.util.Processor
 import org.jetbrains.plugins.scala.lang.psi.api.ScalaFile
 import org.jetbrains.plugins.scala.lang.psi.impl.ScalaPsiElementFactory
 import org.jetbrains.plugins.scala.project.{ProjectContext, ScalaFeatures}
 
 import scalaanalyzer.language.{ChangeEngine, CodeActions, Completion, InlayHints, Inspections, ParameterInfo, Rename, SelectionRanges}
-import scalaanalyzer.platform.{CallLog, Descriptors, ExtensionBean, HostBootstrap, HostDispatchThread, HostLock, HostPsiDocumentManager, Host_ModuleRootManager, Host_OrderEnumerator, ImportIndex, LibraryFileSystem, SourceFile, SymbolIndex, WordIndex, dispatch, tableProxy}
+import scalaanalyzer.platform.{Descriptors, ExtensionBean, HostBootstrap, HostDispatchThread, HostLock, HostPsiDocumentManager, Host_ModuleRootManager, Host_OrderEnumerator, ImportIndex, LibraryFileSystem, SourceFile, SymbolIndex, WordIndex, dispatch, tableProxy}
 
-import java.nio.file.{Files, Path}
+import java.nio.file.Path
 import java.util.concurrent.ConcurrentHashMap
 
 import scala.jdk.CollectionConverters.*
@@ -48,7 +46,7 @@ final case class HostConfig(
 /**
  * Scala PSI and type checker hosted without an IntelliJ application container. The host installs three fixed
  * tables — an `Application` object, a root extension area and a `Project` object — and then only consumes the
- * plugin's PSI. Whatever is not in a table fails loudly and is recorded in [[CallLog]].
+ * plugin's PSI. Whatever is not in a table fails loudly and is recorded in [[scalaanalyzer.platform.CallLog]].
  *
  * Methods that change the project take the host write lock themselves, which cancels the queries running meanwhile.
  * Query methods say whether they take read access themselves.
@@ -297,25 +295,34 @@ final class ScalaPsiHost private[scalaanalyzer] (
    * @throws Rename.Refused when the position has no renameable symbol, the name is invalid or the rename conflicts
    */
   def rename(file: PsiFile, offset: Int, newName: String): Seq[(PsiFile, Seq[ChangeEngine.Edit])] = {
+    /** Puts each file's text back and commits it; non-cancelable so that a cancelled query cannot leave a renamed file. */
+    def restore(originals: Seq[(PsiFile, String)]): Unit =
+      com.intellij.openapi.progress.ProgressManager.getInstance.executeNonCancelableSection((() => {
+        val documents = com.intellij.psi.PsiDocumentManager.getInstance(project)
+        originals.foreach { (f, text) =>
+          val document = documents.getDocument(f)
+          documents.doPostponedOperationsAndUnblockDocument(document)
+          replaceText(f, 0, document.getTextLength, text)
+        }
+      }): Runnable)
+
+    /** Performs the plan, restoring the files' texts even when it fails; returns the texts before and after. */
+    def performAndRestore(plan: Rename.Plan): (Seq[(PsiFile, String)], Seq[String]) = {
+      val originals = plan.files.map(f => f -> f.getText)
+
+      try {
+        // The platform changes physical PSI inside a command or an undo-transparent action; the host has no undo.
+        com.intellij.openapi.command.CommandProcessor.getInstance.runUndoTransparentAction(() => Rename.perform(plan))
+        (originals, plan.files.map(_.getText))
+      } finally restore(originals)
+    }
+
     val (originals, changed) = try HostLock.writeIntent {
       // Keep the read plan valid until its write: another editor change must not enter between the two.
       val target = renameTarget(file, offset)
       val plan = read(Rename.plan(target, newName))
-      HostLock.write {
-        val originals = plan.files.map(f => f -> f.getText)
-        try {
-          // The platform changes physical PSI inside a command or an undo-transparent action; the host has no undo.
-          com.intellij.openapi.command.CommandProcessor.getInstance.runUndoTransparentAction(() => Rename.perform(plan))
-          (originals, plan.files.map(_.getText))
-        } finally com.intellij.openapi.progress.ProgressManager.getInstance.executeNonCancelableSection((() => {
-          val documents = com.intellij.psi.PsiDocumentManager.getInstance(project)
-          originals.foreach { (f, text) =>
-            val document = documents.getDocument(f)
-            documents.doPostponedOperationsAndUnblockDocument(document)
-            replaceText(f, 0, document.getTextLength, text)
-          }
-        }): Runnable)
-      }
+
+      HostLock.write(performAndRestore(plan))
     } finally HostDispatchThread.drain()
 
     originals.zip(changed)
@@ -351,8 +358,7 @@ final class ScalaPsiHost private[scalaanalyzer] (
     importIndex.removeFile(file)
     modules.removeSource(virtualFile)
     // The file store lets go of its view provider (and PSI): a file opened again at the same path is a new file.
-    // The host's PsiManager is a PsiManagerEx (the platform's `PsiManagerEx.getInstanceEx` makes the same cast).
-    PsiManager.getInstance(project).asInstanceOf[com.intellij.psi.impl.PsiManagerEx].getFileManager.setViewProvider(virtualFile, null)
+    PsiManagerEx.getInstanceEx(project).getFileManager.setViewProvider(virtualFile, null)
 
     psiChanged()
   }
@@ -650,16 +656,18 @@ final class ScalaPsiHost private[scalaanalyzer] (
     syntaxErrors(file).filter(_.range.intersects(range)) ++ annotatorProblems(file, touched)
   }
 
-  /** Runs the plugin's annotator on `elements`, keeping the annotations that carry a message. */
-  private def annotatorProblems(file: ScalaFile, elements: SyntaxTraverser[PsiElement]): Seq[Diagnostic] = {
-    val annotator = new org.jetbrains.plugins.scala.annotator.ScalaAnnotator
-
-    val annotations = AnnotationSessionImpl.computeWithSession(file, /* batchMode = */ false, annotator, { holder =>
+  /** Runs `annotator` over `elements` in a fresh annotation session and returns what it reported, in order. */
+  private def annotate(file: ScalaFile, annotator: Annotator, elements: java.lang.Iterable[PsiElement]): Seq[Annotation] =
+    AnnotationSessionImpl.computeWithSession(file, /* batchMode = */ false, annotator, { holder =>
       // The session's holder is declared as `AnnotationHolder`; it is the `AnnotationHolderImpl` the session creates.
       val impl = holder.asInstanceOf[AnnotationHolderImpl]
       elements.forEach(e => impl.runAnnotatorWithContext(e))
       impl.asScala.toSeq
     })
+
+  /** Runs the plugin's annotator on `elements`, keeping the annotations that carry a message. */
+  private def annotatorProblems(file: ScalaFile, elements: SyntaxTraverser[PsiElement]): Seq[Diagnostic] = {
+    val annotations = annotate(file, new org.jetbrains.plugins.scala.annotator.ScalaAnnotator, elements)
 
     annotations.collect {
       case a if a.getMessage != null =>
@@ -690,13 +698,7 @@ final class ScalaPsiHost private[scalaanalyzer] (
         .map(new TextRange(info.getStartOffset, info.getEndOffset) -> _)
     }
 
-    val annotator = new org.jetbrains.plugins.scala.highlighter.ScalaColorSchemeAnnotator
-    val annotations = AnnotationSessionImpl.computeWithSession(file, /* batchMode = */ false, annotator, { holder =>
-      // The session's holder is declared as `AnnotationHolder`; it is the `AnnotationHolderImpl` the session creates.
-      val impl = holder.asInstanceOf[AnnotationHolderImpl]
-      elements.foreach(e => impl.runAnnotatorWithContext(e))
-      impl.asScala.toSeq
-    })
+    val annotations = annotate(file, new org.jetbrains.plugins.scala.highlighter.ScalaColorSchemeAnnotator, elements.asJava)
 
     fromVisitor ++ annotations.flatMap { a =>
       Option(a.getTextAttributes).map(new TextRange(a.getStartOffset, a.getEndOffset) -> _)
