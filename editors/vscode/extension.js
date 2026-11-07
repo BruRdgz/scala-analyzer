@@ -12,6 +12,9 @@ const { LanguageClient, State } = require('vscode-languageclient/node');
 /** @type {LanguageClient} */
 let client;
 
+/** @type {vscode.TextEditorDecorationType} */
+let typeHint;
+
 const icons = { starting: '$(loading~spin)', importing: '$(sync~spin)', ready: '$(check)', failed: '$(error)', stopped: '$(circle-slash)' };
 
 const menuItems = [
@@ -21,6 +24,9 @@ const menuItems = [
   { label: '$(info) Show status', command: 'scalaAnalyzer.showStatus' },
   { label: '$(output) Show log file', command: 'scalaAnalyzer.showLog' },
 ];
+
+// Long enough to read a one-line compile summary.
+const statusMessageMs = 5000;
 
 const plural = (count, word) => `${count} ${word}${count === 1 ? '' : 's'}`;
 
@@ -60,9 +66,25 @@ async function showTypeInfo() {
     vscode.window.showErrorMessage(`scala-analyzer: type info failed: ${error.message}`);
     return undefined;
   }
-  // A message's `detail` is only shown for modal messages, so the lines are joined instead.
-  vscode.window.showInformationMessage(text ? text.split('\n').join(' · ') : 'No type at the cursor');
+  // Shown at the end of the line, as IntelliJ shows its hint by the caret; the next move or edit clears it.
+  const end = editor.document.lineAt(editor.selection.end.line).range.end;
+  const label = text ? text.split('\n').join(' · ') : 'no type here';
+  editor.setDecorations(typeHint, [{ range: new vscode.Range(end, end), renderOptions: { after: { contentText: label } } }]);
   return text;
+}
+
+function registerTypeHint(context) {
+  typeHint = vscode.window.createTextEditorDecorationType({
+    after: { margin: '0 0 0 2em', color: new vscode.ThemeColor('editorCodeLens.foreground'), fontStyle: 'italic' },
+  });
+  const clear = editor => editor.setDecorations(typeHint, []);
+  context.subscriptions.push(
+    typeHint,
+    vscode.window.onDidChangeTextEditorSelection(({ textEditor }) => clear(textEditor)),
+    vscode.workspace.onDidChangeTextDocument(({ document }) => {
+      vscode.window.visibleTextEditors.filter(editor => editor.document === document).forEach(clear);
+    }),
+  );
 }
 
 async function reimport() {
@@ -100,20 +122,24 @@ function registerCommands(context) {
   }));
 }
 
-// The terminal only relays the server's compile result; the server publishes the diagnostics itself.
+// The terminal only relays the server's compile result and stays hidden (see compileTask): the outcome shows briefly
+// in the status bar, and a failed compile opens the Problems panel, where the server publishes the diagnostics.
 function compileTerminal() {
   const written = new vscode.EventEmitter();
   const closed = new vscode.EventEmitter();
   const finish = (line, exitCode) => {
     written.fire(`${line}\r\n`);
+    vscode.window.setStatusBarMessage(`${exitCode === 0 ? '$(check)' : '$(error)'} ${line}`, statusMessageMs);
     closed.fire(exitCode);
   };
   const run = async () => {
     try {
       const { succeeded, errors, warnings } = await client.sendRequest('scalaAnalyzer/compile');
       finish(`${succeeded ? 'Compiled' : 'Compilation failed'}: ${plural(errors, 'error')}, ${plural(warnings, 'warning')}`, succeeded ? 0 : 1);
+      if (!succeeded) await vscode.commands.executeCommand('workbench.actions.view.problems');
     } catch (error) {
       finish(error.message, 1);
+      vscode.window.showErrorMessage(`scala-analyzer: compile failed: ${error.message}`);
     }
   };
   return { onDidWrite: written.event, onDidClose: closed.event, open: run, close: () => {} };
@@ -123,6 +149,7 @@ function compileTask(definition) {
   const task = new vscode.Task(definition, vscode.TaskScope.Workspace, 'compile', 'scala-analyzer',
     new vscode.CustomExecution(async () => compileTerminal()), []);
   task.group = vscode.TaskGroup.Build;
+  task.presentationOptions = { reveal: vscode.TaskRevealKind.Never };
   return task;
 }
 
@@ -155,6 +182,7 @@ async function activate(context) {
 
   createStatusBar(context);
   registerCommands(context);
+  registerTypeHint(context);
   registerBuildTask(context);
   context.subscriptions.push(client);
   await client.start();

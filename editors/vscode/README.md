@@ -12,9 +12,10 @@ for Scala files and also handles Java files in that workspace.
 Click the **Scala** status bar item for a menu, or run the commands from the palette (category `scala-analyzer`):
 **Compile Build**, **Reimport Build**, **Restart Server**, **Show Type Info**, **Show Status** and **Show Log File**.
 Compiling is also the workspace build task, so **Ctrl+Shift+B** runs it (or add
-`{ "type": "scala-analyzer", "task": "compile" }` to `tasks.json`); the diagnostics appear in the Problems panel.
-**Show Type Info** shows the type of the selection or the expression at the cursor, in the editor context menu
-for Scala files. It has no default key (IntelliJ's Ctrl+Shift+P opens VS Code's command palette); bind one in
+`{ "type": "scala-analyzer", "task": "compile" }` to `tasks.json`). Its outcome shows briefly in the status bar; a
+failed compile opens the Problems panel with the diagnostics.
+**Show Type Info** shows the type of the selection or the expression at the cursor at the end of its line, until the
+next move or edit; it is in the editor context menu for Scala files. It has no default key (IntelliJ's Ctrl+Shift+P opens VS Code's command palette); bind one in
 `keybindings.json`: `{ "key": "<your key>", "command": "scalaAnalyzer.typeInfo", "when": "editorLangId == scala" }`.
 
 The server provides diagnostics, completion, Markdown hover, navigation, formatting, symbols and previewed
