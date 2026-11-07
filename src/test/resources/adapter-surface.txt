@@ -77,6 +77,7 @@ Application.service org.jetbrains.plugins.scala.lang.psi.api.expr.ExpectedTypes
 Application.service org.jetbrains.plugins.scala.scalaMeta.ScalaMetaApi
 Application.service org.jetbrains.plugins.scala.settings.ScalaApplicationSettings
 Application.service(null) com.intellij.codeInsight.completion.NewRdCompletionSupport
+Application.service(null) com.intellij.openapi.module.ModuleTypeManager
 Application.service(null) com.intellij.psi.ParsingDiagnostics$ParserDiagnosticsHandler
 Application.service(null) com.intellij.psi.impl.source.tree.mvcc.PsiVersioningGarbageCollector
 Application.tryRunReadAction
