@@ -2,8 +2,10 @@
 
 ## Unreleased
 
+- `scalaAnalyzer/buildTargets` lists the build's targets with their identity, Scala version, dependencies, library jars
+  and source file count.
 - `scalaAnalyzer/compile` compiles the build on request and answers whether it succeeded, with its error and warning
-  counts.
+  counts; given a `target` identity, it compiles only that target.
 - `scalaAnalyzer/reimport` reloads the build server's workspace and imports the build again on request.
 - `scalaAnalyzer/typeInfo` answers what the IDE's Type Info action shows for a caret or a selected expression.
 - `scalaAnalyzer.completeInsertion` with missing or non-numeric arguments now fails with `InvalidParams`.

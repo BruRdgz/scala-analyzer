@@ -543,21 +543,45 @@ final class ScalaLanguageServer(
   }
 
   /**
-   * Compiles the build and schedules diagnostics for the sources whose build problems changed.
+   * Lists the targets of the imported build.
+   *
+   * Runs on the documents thread, so it describes the build as the imports sent before it left it.
+   *
+   * @return a future containing the targets sorted by name, then by identity; it fails when the project is not open
+   */
+  override def buildTargets(): CompletableFuture[JavaList[HostProtocol.BuildTarget]] =
+    onDocuments[JavaList[HostProtocol.BuildTarget]]("buildTargets") { s =>
+      s.buildTargets().map { target =>
+        new HostProtocol.BuildTarget(
+          target.id,
+          target.name,
+          target.scalaVersion,
+          target.dependsOn.asJava,
+          target.libraries.map(_.toAbsolutePath.toString).asJava,
+          target.sourceFileCount,
+        )
+      }.asJava
+    }
+
+  /**
+   * Compiles the build, or one target of it, and schedules diagnostics for the sources whose build problems changed.
    *
    * Runs on the builds thread, as the compile on save does, and is shown as progress. A build that does not compile
    * still answers: its errors are counted in the report.
    *
+   * @param params the target to compile; `null`, or parameters without a target, compile the whole build
    * @return a future containing the compilation's outcome and its error and warning counts; it fails when the
-   *         project is not open or the compile could not run
+   *         project is not open, the target is not one of the build's, or the compile could not run
    */
-  override def compile(): CompletableFuture[HostProtocol.CompileReport] = answered("compile", builds.execute) { s =>
-    val compilation = withProgress("scala-analyzer: compiling the build")(_ => s.compileBuild())
+  override def compile(params: HostProtocol.CompileParams): CompletableFuture[HostProtocol.CompileReport] =
+    answered("compile", builds.execute) { s =>
+      val target = Option(params).flatMap(compileParams => Option(compileParams.target))
+      val compilation = withProgress("scala-analyzer: compiling the build")(_ => s.compileBuild(target))
 
-    compilation.changed.foreach(scheduleDiagnostics)
+      compilation.changed.foreach(scheduleDiagnostics)
 
-    new HostProtocol.CompileReport(compilation.succeeded, compilation.errors, compilation.warnings)
-  }
+      new HostProtocol.CompileReport(compilation.succeeded, compilation.errors, compilation.warnings)
+    }
 
   /**
    * Imports the build again after reloading the build server's workspace, then schedules diagnostics for every

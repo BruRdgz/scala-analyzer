@@ -481,6 +481,19 @@ class LanguageServerTest extends munit.FunSuite {
     assert(requests.containsKey("didChange") && requests.containsKey("problems"), requests)
   }
 
+  test("lists the build's targets sorted by name, with their dependencies, libraries and sources") {
+    val targets = server.buildTargets().get(1, TimeUnit.MINUTES).asScala.toSeq
+    val keys = targets.map(target => (target.name, target.id))
+    assertEquals(targets.size, 8)
+    assertEquals(keys, keys.sorted)
+    val core = targets.find(_.name == "core").getOrElse(fail(s"no core target in ${targets.map(_.name)}"))
+    val app = targets.find(_.name == "app").getOrElse(fail(s"no app target in ${targets.map(_.name)}"))
+    assertEquals(app.dependsOn.asScala.toSeq, Seq(core.id))
+    assertEquals(app.scalaVersion, "2.13.18")
+    assert(app.libraries.asScala.exists(_.endsWith("scala-library-2.13.18.jar")), app.libraries)
+    assert(core.sourceFileCount > 0, core.sourceFileCount)
+  }
+
   test("tells the user, and its status, when the project cannot be opened") {
     val noBuild = Files.createTempDirectory("scala-analyzer-no-build")
     val client = new RecordingClient
@@ -1445,7 +1458,15 @@ class LanguageServerTest extends munit.FunSuite {
   }
 
   test("compiles the build on request and reports its outcome") {
-    val report = server.compile().get(5, TimeUnit.MINUTES)
+    val report = server.compile(null).get(5, TimeUnit.MINUTES)
+    assert(report.succeeded)
+    assertEquals(report.errors, 0)
+  }
+
+  test("compiles one build target on request") {
+    val targets = server.buildTargets().get(1, TimeUnit.MINUTES).asScala
+    val core = targets.find(_.name == "core").getOrElse(fail(s"no core target in ${targets.map(_.name)}"))
+    val report = server.compile(new HostProtocol.CompileParams(core.id)).get(5, TimeUnit.MINUTES)
     assert(report.succeeded)
     assertEquals(report.errors, 0)
   }

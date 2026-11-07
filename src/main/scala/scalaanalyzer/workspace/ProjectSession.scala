@@ -683,20 +683,55 @@ final class ProjectSession private (
   def moduleCount: Int = imported.size
 
   /**
-   * Compiles the build and replaces the stored build diagnostics.
+   * Describes the build's targets as the last completed import left them.
+   *
+   * Takes no lock: during an import it describes the previous one, so callers that run it with the imports, as the
+   * LSP documents executor does, see a finished import.
+   *
+   * @return one description per imported module, sorted by name, then by stable identity
+   * @throws IllegalStateException when the session is closed or unavailable
+   */
+  def buildTargets(): Seq[ProjectSession.TargetSummary] = {
+    ensureUsable()
+
+    imported
+      .map { module =>
+        ProjectSession.TargetSummary(
+          id = module.spec.stableId,
+          name = module.spec.name,
+          scalaVersion = module.spec.scalaVersion,
+          dependsOn = module.spec.dependsOn,
+          libraries = module.spec.classpath,
+          sourceFileCount = module.sources.size,
+        )
+      }
+      .sortBy(target => (target.name, target.id))
+  }
+
+  /**
+   * Compiles the build, or one target of it, and replaces the stored build diagnostics.
    *
    * This blocks on BSP and does not save editor buffers; document compilation is handled separately by `problems`.
    * Document operations can continue during compilation. Imports and closure wait for its BSP request to finish.
-   * The build can report compilation errors without throwing, in which case its diagnostics are still stored.
+   * The build can report compilation errors without throwing, in which case its diagnostics are still stored. The
+   * build keeps the diagnostics of the targets that were not compiled as their last compile left them, so a target's
+   * compilation also reports those.
    *
+   * @param target stable identity of the target to compile (`TargetSummary.id`, the BSP target URI); `None` compiles
+   *               every target
    * @return whether the build compiled, the number of errors and warnings among all the diagnostics it published (of
    *         registered sources or not), and the registered sources whose stored diagnostics changed and may need
    *         republishing
+   * @throws IllegalArgumentException when `target` is not a Scala target of the build
+   * @throws IllegalStateException when the session is closed or unavailable
    */
-  def compileBuild(): ProjectSession.BuildCompilation = buildLock.synchronized {
+  def compileBuild(target: Option[String] = None): ProjectSession.BuildCompilation = buildLock.synchronized {
     ensureUsable()
 
-    val compiled = build.compile()
+    val compiled = target match {
+      case Some(id) => build.compile(id)
+      case None => build.compile()
+    }
     val severities = compiled.diagnostics.values.flatten.map(_.severity).toSeq
     val changed = storeBuildProblems(compiled.diagnostics)
 
@@ -766,6 +801,25 @@ object ProjectSession {
    * @param sourceFileCount number of registered project sources when the import completed
    */
   private[scalaanalyzer] final case class Snapshot(moduleCount: Int, sourceFileCount: Int)
+
+  /**
+   * Describes one build target: the imported module's identity, compiler and dependencies, without host internals.
+   *
+   * @param id stable identity of the module, which is its BSP target URI
+   * @param name display name, which several targets may share
+   * @param scalaVersion Scala version of the target
+   * @param dependsOn stable identities of the modules this one directly depends on
+   * @param libraries jars on the target's classpath; the class output of other targets is not among them
+   * @param sourceFileCount number of project sources the build assigns to the target
+   */
+  final case class TargetSummary(
+    id: String,
+    name: String,
+    scalaVersion: String,
+    dependsOn: Seq[String],
+    libraries: Seq[Path],
+    sourceFileCount: Int,
+  )
 
   /**
    * Captures what compiling the build produced: its outcome, diagnostic counts and the sources to republish.

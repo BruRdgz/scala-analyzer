@@ -7,6 +7,7 @@ import org.eclipse.lsp4j.jsonrpc.services.JsonRequest;
 import org.eclipse.lsp4j.services.LanguageClient;
 import org.eclipse.lsp4j.services.LanguageServer;
 
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 
@@ -14,7 +15,7 @@ import java.util.concurrent.CompletableFuture;
  * Defines host-specific state notifications and requests alongside LSP.
  *
  * Clients may implement these extensions to display import state and diagnostics about the server itself, and to
- * compile or import the build and ask for a type on request.
+ * list the build's targets, compile or import the build and ask for a type on request.
  */
 public final class HostProtocol {
   /** Prevents instantiation: this class only groups the protocol types. */
@@ -41,6 +42,75 @@ public final class HostProtocol {
     public ServerState(String state, String message) {
       this.state = state;
       this.message = message;
+    }
+  }
+
+  /**
+   * One build target of the imported build, as the server knows it.
+   *
+   * Instances are immutable and travel as the elements of the result of the {@code scalaAnalyzer/buildTargets}
+   * request.
+   */
+  public static final class BuildTarget {
+    /** The target's stable identity, which {@link CompileParams#target} and {@link #dependsOn} refer to. */
+    public final String id;
+
+    /** The target's display name, which several targets may share. */
+    public final String name;
+
+    /** The Scala version the target is compiled with. */
+    public final String scalaVersion;
+
+    /** The identities of the targets this one directly depends on, in the build's order. */
+    public final List<String> dependsOn;
+
+    /** The absolute paths of the jar files on the target's classpath, without the output of other targets. */
+    public final List<String> libraries;
+
+    /** The number of project sources that belong to the target. */
+    public final int sourceFileCount;
+
+    /**
+     * Creates a build target description.
+     *
+     * @param id the target's stable identity
+     * @param name the target's display name
+     * @param scalaVersion the Scala version the target is compiled with
+     * @param dependsOn identities of the targets this one directly depends on
+     * @param libraries absolute paths of the jar files on the target's classpath
+     * @param sourceFileCount number of project sources that belong to the target
+     */
+    public BuildTarget(
+        String id, String name, String scalaVersion, List<String> dependsOn, List<String> libraries,
+        int sourceFileCount) {
+      this.id = id;
+      this.name = name;
+      this.scalaVersion = scalaVersion;
+      this.dependsOn = dependsOn;
+      this.libraries = libraries;
+      this.sourceFileCount = sourceFileCount;
+    }
+  }
+
+  /**
+   * The target a {@code scalaAnalyzer/compile} request compiles.
+   *
+   * The field is mutable so that Gson can fill it in.
+   */
+  public static final class CompileParams {
+    /** The identity of the target to compile, as {@link BuildTarget#id} reports it; absent for the whole build. */
+    public String target;
+
+    /** Creates empty parameters for the JSON deserializer to fill in. */
+    public CompileParams() {}
+
+    /**
+     * Creates the parameters of a compile request.
+     *
+     * @param target the identity of the target to compile, or {@code null} for the whole build
+     */
+    public CompileParams(String target) {
+      this.target = target;
     }
   }
 
@@ -126,15 +196,29 @@ public final class HostProtocol {
     CompletableFuture<Map<String, Object>> status();
 
     /**
-     * Compiles the build and republishes the diagnostics of the sources whose build problems changed.
+     * Lists the targets of the imported build.
+     *
+     * The request waits for the import in progress, if any, and describes the build as that import left it.
+     *
+     * @return a future containing the targets sorted by name, then by identity; it fails if the project is not open
+     */
+    @JsonRequest("scalaAnalyzer/buildTargets")
+    CompletableFuture<List<BuildTarget>> buildTargets();
+
+    /**
+     * Compiles the build, or one target of it, and republishes the diagnostics of the sources whose build problems
+     * changed.
      *
      * The compilation runs apart from document requests. A build that does not compile still answers: its errors are
-     * counted in the report. The request fails if the project is not open or the compilation cannot run.
+     * counted in the report. The request fails if the project is not open, the target is not one of the build's, or
+     * the compilation cannot run.
      *
+     * @param params the target to compile; a request without parameters, or without a target, compiles the whole
+     *               build
      * @return a future containing whether the build compiled and how many errors and warnings it reported
      */
     @JsonRequest("scalaAnalyzer/compile")
-    CompletableFuture<CompileReport> compile();
+    CompletableFuture<CompileReport> compile(CompileParams params);
 
     /**
      * Reloads the build server's workspace and imports the build again, as when the build definition changed.
