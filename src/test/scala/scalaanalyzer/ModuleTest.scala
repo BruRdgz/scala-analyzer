@@ -33,6 +33,17 @@ class ModuleTest extends munit.FunSuite {
     finally host.closeSource(file)
   }
 
+  // The plugin tells an sbt build module from a source module by its module type (ModuleExt.hasBuildModuleType) before
+  // it reads the module's Scala SDK, so every file open asks the host for one.
+  test("a host module has a module type, which is not an sbt build module's") {
+    val file = host.openFile(Path.of(s"/${scala213.spec.name}/ModuleTypeProbe.scala"), "object ModuleTypeProbe", scala213)
+    try {
+      val module = host.read(com.intellij.openapi.module.ModuleUtilCore.findModuleForPsiElement(file))
+      assert(module != null, "the file has no module")
+      assertEquals(com.intellij.openapi.module.ModuleType.get(module).getId, "EMPTY_MODULE")
+    } finally host.closeSource(file)
+  }
+
   test("each module resolves against its own classpath") {
     val source = "object UsesLazyList { val l = LazyList(1, 2) }"
     assertEquals(errorsIn(scala213, source), Seq.empty)

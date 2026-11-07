@@ -117,7 +117,7 @@ import com.intellij.openapi.editor.markup.TextAttributes
 import com.intellij.openapi.extensions.{ExtensionDescriptor, LoadingOrder, PluginDescriptor}
 import com.intellij.openapi.fileEditor.FileDocumentManager
 import com.intellij.openapi.fileTypes.{BinaryFileTypeDecompilers, FileType}
-import com.intellij.openapi.module.{JdkApiCompatibilityService, ModuleManager}
+import com.intellij.openapi.module.{JdkApiCompatibilityService, ModuleManager, ModuleTypeManager}
 import com.intellij.openapi.project.{DefaultProjectFactory, DumbUtil, IncompleteDependenciesService}
 import com.intellij.openapi.projectRoots.{JavaVersionService, JavaVersionServiceImpl}
 import com.intellij.openapi.roots.{
@@ -764,6 +764,8 @@ private[scalaanalyzer] object HostBootstrap {
       appServices.register(classOf[TailTypeFactory])(new FrontendFriendlyTailTypeFactory)
       // No IDE preference store; editor settings use their own defaults when this optional service is absent.
       appServices.registerNull(classOf[PropertiesComponent])
+      // ModuleType.get answers the EMPTY type when this service is absent: the host's modules have no IDE module type.
+      appServices.registerNull(classOf[ModuleTypeManager])
       appServices.register(classOf[EditorSettingsExternalizable])(
         new EditorSettingsExternalizable(new EditorSettingsExternalizable.OsSpecificState))
       appServices.register(classOf[CodeInsightSettings])(new CodeInsightSettings)

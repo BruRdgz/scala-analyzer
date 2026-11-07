@@ -106,6 +106,9 @@ lazy val root = (project in file("."))
       // UsageViewUtil, which describes the elements in the platform's rename conflicts. Only this jar.
       "com.jetbrains.intellij.platform" % "usage-view" % platformVersion intransitive(),
       "com.jetbrains.intellij.platform" % "lang" % platformVersion intransitive(),
+      // ModuleType and ModuleTypeManager: the plugin asks a module's type (an sbt build module's SbtModuleType) before it
+      // reads the module's Scala SDK. The host has no ModuleTypeManager service, so every module is of the EMPTY type.
+      "com.jetbrains.intellij.platform" % "lang-core" % platformVersion intransitive(),
       // Java's highlighting keys (JavaHighlightInfoTypes), which the plugin's Scala highlighting keys derive from; quick
       // documentation (hover) renders signatures with them. Only these jars (and their message bundle); the host has
       // no colors.
