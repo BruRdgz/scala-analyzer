@@ -36,7 +36,7 @@ import org.jetbrains.plugins.scala.lang.refactoring.util.ScalaNamesUtil
 import org.jetbrains.plugins.scala.lang.scaladoc.parser.ScalaDocElementTypes
 import org.jetbrains.plugins.scala.structureView.element.Element
 
-import scalaanalyzer.{LineColumn, ScalaPsiHost}
+import scalaanalyzer.{LineColumn, LineRange, ScalaPsiHost}
 import scalaanalyzer.build.{CompileSpec, CompilerDiagnostic, DocumentCompiler, ScalafmtFormatting}
 import scalaanalyzer.platform.{HostLog, LibraryFile, SourceFile}
 
@@ -165,8 +165,9 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
             val sourceDocument = document(sourceFile)
 
             TestLenses.in(sourceFile, module.module).map { lens =>
-              val range = position(sourceDocument, lens.range.getStartOffset) ->
-                position(sourceDocument, lens.range.getEndOffset)
+              val range = LineRange(
+                position(sourceDocument, lens.range.getStartOffset),
+                position(sourceDocument, lens.range.getEndOffset))
 
               TestLens(range, target, lens.framework, lens.suite, lens.testName)
             }
@@ -202,10 +203,10 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
    *
    * @param path registered project-source path
    * @param positions carets, in the desired result order
-   * @return one chain per caret, in the order of `positions`, each of start/end ranges smallest first; empty for a
-   *         file that is not Scala
+   * @return one chain per caret, in the order of `positions`, each of ranges smallest first; empty for a file that is
+   *         not Scala
    */
-  def selectionRanges(path: Path, positions: Seq[LineColumn]): Seq[Seq[(LineColumn, LineColumn)]] = file(path) match {
+  def selectionRanges(path: Path, positions: Seq[LineColumn]): Seq[Seq[LineRange]] = file(path) match {
     case sourceFile: ScalaFile => host.read {
       val sourceDocument = document(sourceFile)
 
@@ -214,7 +215,7 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
         val ranges = host.selectionRanges(sourceFile, cursor)
         val chain = if (ranges.isEmpty) Seq(new TextRange(cursor, cursor)) else ranges
 
-        chain.map(r => position(sourceDocument, r.getStartOffset) -> position(sourceDocument, r.getEndOffset))
+        chain.map(r => LineRange(position(sourceDocument, r.getStartOffset), position(sourceDocument, r.getEndOffset)))
       }
     }
     case _ => Seq.empty
@@ -260,12 +261,11 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
    * @param useTabs whether the IntelliJ formatter indents with tabs; scalafmt ignores it
    * @return the changes against the current buffer; empty for a file that is not Scala
    */
-  def formatting(path: Path, range: Option[(LineColumn, LineColumn)], indentSize: Int, useTabs: Boolean)
-      : Seq[TextChange] =
+  def formatting(path: Path, range: Option[LineRange], indentSize: Int, useTabs: Boolean): Seq[TextChange] =
     file(path) match {
       case sourceFile: ScalaFile =>
-        val selected = host.read(range.map { (start, end) =>
-          new TextRange(offset(document(sourceFile), start), offset(document(sourceFile), end))
+        val selected = host.read(range.map { r =>
+          new TextRange(offset(document(sourceFile), r.start), offset(document(sourceFile), r.end))
         })
         // The plugin defaults to the IntelliJ formatter for range requests even when scalafmt is selected.
         val config = if (range.isEmpty) ScalafmtFormatting.configFor(root, path) else None
@@ -294,13 +294,13 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
    * @param range start and end of the text to replace, or `None` to replace the complete document
    * @param replacement text that takes the place of the range
    */
-  def change(path: Path, range: Option[(LineColumn, LineColumn)], replacement: String): Unit = {
+  def change(path: Path, range: Option[LineRange], replacement: String): Unit = {
     val sourceFile = file(path)
     // Only this thread edits documents, so reading one needs no lock; and an edit must not be cancelled as the
     // queries a newer edit cancels are.
     val sourceDocument = document(sourceFile)
-    val (start, end) = range.fold((0, sourceDocument.getTextLength)) { (from, to) =>
-      (offset(sourceDocument, from), offset(sourceDocument, to))
+    val (start, end) = range.fold((0, sourceDocument.getTextLength)) { r =>
+      (offset(sourceDocument, r.start), offset(sourceDocument, r.end))
     }
 
     host.edit(sourceFile, start, end, replacement)
@@ -481,7 +481,7 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
 
         Some(SourceSpan(
           source.path,
-          position(sourceDocument, range.getStartOffset) -> position(sourceDocument, range.getEndOffset)))
+          LineRange(position(sourceDocument, range.getStartOffset), position(sourceDocument, range.getEndOffset))))
       case _ => None
     }
 
@@ -599,7 +599,7 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
    * @return start and end of the name to rename
    * @throws Rename.Refused when the position has no renameable project-source target or no name
    */
-  def prepareRename(path: Path, at: LineColumn): (LineColumn, LineColumn) = {
+  def prepareRename(path: Path, at: LineColumn): LineRange = {
     val sourceFile = file(path)
     val cursor = host.read(offset(document(sourceFile), at))
 
@@ -611,7 +611,7 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
       val name = reference.orElse(declarationNamedAt(sourceFile, cursor).map(_.getNameIdentifier.getTextRange))
         .getOrElse(throw new Rename.Refused(Seq("There is no name to rename here.")))
 
-      position(document(sourceFile), name.getStartOffset) -> position(document(sourceFile), name.getEndOffset)
+      LineRange(position(document(sourceFile), name.getStartOffset), position(document(sourceFile), name.getEndOffset))
     }
   }
 
@@ -685,7 +685,7 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
   }
 
   /** Converts ranges in either a source buffer or library PSI, which need not have a document. */
-  private def fileRange(file: PsiFile, range: TextRange): (LineColumn, LineColumn) = {
+  private def fileRange(file: PsiFile, range: TextRange): LineRange = {
     val text = file.getText
 
     /** Converts an offset of `text` to its zero-based line and UTF-16 column. */
@@ -694,7 +694,7 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
       LineColumn(position.line, position.column)
     }
 
-    at(range.getStartOffset) -> at(range.getEndOffset)
+    LineRange(at(range.getStartOffset), at(range.getEndOffset))
   }
 
   /** Re-resolves request data to a class or method, or `None` when its name or offset no longer matches. */
@@ -831,8 +831,8 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
       }
 
       /** Converts a PSI range within this document to workspace coordinates. */
-      def span(range: TextRange): (LineColumn, LineColumn) =
-        position(sourceDocument, range.getStartOffset) -> position(sourceDocument, range.getEndOffset)
+      def span(range: TextRange): LineRange =
+        LineRange(position(sourceDocument, range.getStartOffset), position(sourceDocument, range.getEndOffset))
 
       val declaration = named.getNavigationElement match {
         case owner: PsiNameIdentifierOwner
@@ -871,8 +871,8 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
         val sourceDocument = document(scalaFile)
 
         /** Converts a PSI range within this document to workspace coordinates. */
-        def span(range: TextRange): (LineColumn, LineColumn) =
-          position(sourceDocument, range.getStartOffset) -> position(sourceDocument, range.getEndOffset)
+        def span(range: TextRange): LineRange =
+          LineRange(position(sourceDocument, range.getStartOffset), position(sourceDocument, range.getEndOffset))
 
         /** Flattens unnamed initializer blocks and retains nested named declarations. */
         def symbols(node: TreeElement): Seq[OutlineSymbol] = node match {
@@ -910,8 +910,8 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
         val sourceDocument = document(javaFile)
 
         /** Converts a PSI range within this document to workspace coordinates. */
-        def span(range: TextRange): (LineColumn, LineColumn) =
-          position(sourceDocument, range.getStartOffset) -> position(sourceDocument, range.getEndOffset)
+        def span(range: TextRange): LineRange =
+          LineRange(position(sourceDocument, range.getStartOffset), position(sourceDocument, range.getEndOffset))
 
         /** Builds a named declaration's symbol with its members in source order; an unnamed one yields its members. */
         def symbols(psi: PsiNameIdentifierOwner): Seq[OutlineSymbol] = {

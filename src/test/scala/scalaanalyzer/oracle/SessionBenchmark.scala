@@ -1,6 +1,6 @@
 package scalaanalyzer.oracle
 
-import scalaanalyzer.{HostConfig, LineColumn, ScalaPsiHost}
+import scalaanalyzer.{HostConfig, LineColumn, LineRange, ScalaPsiHost}
 import scalaanalyzer.platform.{CallLog}
 import scalaanalyzer.workspace.{ProjectSession}
 
@@ -92,13 +92,13 @@ object SessionBenchmark {
         val path = editFile.getOrElse(scalaFiles(round % scalaFiles.size))
         val lines = session.text(path).split("\n", -1)
         val end = LineColumn(lines.length - 1, lines.last.length)
-        session.change(path, Some(end -> end), "\n// edit")
+        session.change(path, Some(LineRange(end, end)), "\n// edit")
         measure("problems after an edit")(session.problems(path))
         measure("semantic tokens after an edit")(session.semanticTokens(path))
         positions.find(_._1 == path).foreach { (_, at) =>
           measure("completion after an edit")(session.completion(path, at))
         }
-        session.change(path, Some(end -> LineColumn(end.line + 1, "// edit".length)), "")
+        session.change(path, Some(LineRange(end, LineColumn(end.line + 1, "// edit".length))), "")
         usedHeapMb()
       }
 

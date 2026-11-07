@@ -2,7 +2,7 @@ package scalaanalyzer.workspace
 
 import com.intellij.psi.PsiFile
 
-import scalaanalyzer.{HostModule, LineColumn, ScalaPsiHost}
+import scalaanalyzer.{HostModule, LineColumn, LineRange, ScalaPsiHost}
 import scalaanalyzer.build.{
   BspImport, BuildConnection, CompileSpec, CompilerDiagnostic, DocumentCompiler, ImportedModule, ScalafmtFormatting,
   TestRun,
@@ -215,9 +215,9 @@ final class ProjectSession private (
    *
    * @param path registered project-source path
    * @param positions carets in zero-based lines and UTF-16 columns, in the desired result order
-   * @return one chain per caret, in the order of `positions`, each of start/end ranges smallest first
+   * @return one chain per caret, in the order of `positions`, each of ranges smallest first
    */
-  def selectionRanges(path: Path, positions: Seq[LineColumn]): Seq[Seq[(LineColumn, LineColumn)]] =
+  def selectionRanges(path: Path, positions: Seq[LineColumn]): Seq[Seq[LineRange]] =
     language.selectionRanges(path, positions)
 
   /**
@@ -244,12 +244,12 @@ final class ProjectSession private (
    * use the IntelliJ formatter. Formatter failures propagate to the caller.
    *
    * @param path registered project-source path
-   * @param range optional start/end positions in zero-based lines and UTF-16 columns; `None` selects the whole file
+   * @param range optional range in zero-based lines and UTF-16 columns; `None` selects the whole file
    * @param indentSize positive indentation size used by the IntelliJ formatter
    * @param useTabs whether the IntelliJ formatter should indent with tabs
    * @return the changes against the current buffer; empty for a source that is not Scala
    */
-  def formatting(path: Path, range: Option[(LineColumn, LineColumn)], indentSize: Int, useTabs: Boolean): Seq[TextChange] =
+  def formatting(path: Path, range: Option[LineRange], indentSize: Int, useTabs: Boolean): Seq[TextChange] =
     language.formatting(path, range, indentSize, useTabs)
 
   /**
@@ -258,10 +258,10 @@ final class ProjectSession private (
    * This updates in-memory state without saving to disk and can cancel running host queries.
    *
    * @param path registered project-source path
-   * @param range start/end positions in zero-based lines and UTF-16 columns; `None` replaces the entire buffer
+   * @param range range in zero-based lines and UTF-16 columns; `None` replaces the entire buffer
    * @param replacement text to put in place of the selected range
    */
-  def change(path: Path, range: Option[(LineColumn, LineColumn)], replacement: String): Unit =
+  def change(path: Path, range: Option[LineRange], replacement: String): Unit =
     language.change(path, range, replacement)
 
   /**
@@ -362,7 +362,7 @@ final class ProjectSession private (
    * @param at referenced or declared symbol position in zero-based lines and UTF-16 columns
    * @return start and end of the name to rename
    */
-  def prepareRename(path: Path, at: LineColumn): (LineColumn, LineColumn) = language.prepareRename(path, at)
+  def prepareRename(path: Path, at: LineColumn): LineRange = language.prepareRename(path, at)
 
   /**
    * Computes project-source edits for renaming a symbol.

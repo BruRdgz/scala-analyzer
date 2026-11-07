@@ -1,6 +1,6 @@
 package scalaanalyzer.language
 
-import scalaanalyzer.LineColumn
+import scalaanalyzer.{LineColumn, LineRange}
 
 import java.nio.file.Path
 
@@ -42,7 +42,7 @@ final case class FileProblem(
  * @param range start and exclusive end positions in zero-based lines and UTF-16 columns
  * @param write whether the plugin classifies the occurrence as a write
  */
-final case class Occurrence(range: (LineColumn, LineColumn), write: Boolean)
+final case class Occurrence(range: LineRange, write: Boolean)
 
 /**
  * A range in a source file.
@@ -50,7 +50,7 @@ final case class Occurrence(range: (LineColumn, LineColumn), write: Boolean)
  * @param path source path, including a materialized library source when navigating outside the project
  * @param range start and exclusive end positions in zero-based lines and UTF-16 columns
  */
-final case class SourceSpan(path: Path, range: (LineColumn, LineColumn))
+final case class SourceSpan(path: Path, range: LineRange)
 
 /**
  * A project symbol found by name.
@@ -155,7 +155,7 @@ final case class InlineHint(at: LineColumn, text: String)
  * @param testName plugin runner selection, absent when running the whole suite
  */
 final case class TestLens(
-  range: (LineColumn, LineColumn),
+  range: LineRange,
   target: String,
   framework: String,
   suite: String,
@@ -212,8 +212,8 @@ final case class OutlineSymbol(
   name: String,
   detail: String,
   kind: WorkspaceSymbolKind,
-  range: (LineColumn, LineColumn),
-  nameRange: (LineColumn, LineColumn),
+  range: LineRange,
+  nameRange: LineRange,
   children: Seq[OutlineSymbol],
 )
 
@@ -282,7 +282,7 @@ final case class HierarchyItem(
   name: String,
   kind: WorkspaceSymbolKind,
   location: SourceSpan,
-  selectionRange: (LineColumn, LineColumn),
+  selectionRange: LineRange,
   target: HierarchyTarget,
 )
 
@@ -292,4 +292,4 @@ final case class HierarchyItem(
  * @param item caller for incoming edges, callee for outgoing edges
  * @param ranges call-site ranges; empty for an override edge without a call site
  */
-final case class HierarchyCall(item: HierarchyItem, ranges: Seq[(LineColumn, LineColumn)])
+final case class HierarchyCall(item: HierarchyItem, ranges: Seq[LineRange])

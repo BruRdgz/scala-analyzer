@@ -8,7 +8,7 @@ import org.eclipse.lsp4j.jsonrpc.ResponseErrorException
 import org.eclipse.lsp4j.jsonrpc.messages.{Either as LspEither, Either3 as LspEither3, ResponseError, ResponseErrorCode, Tuple}
 import org.eclipse.lsp4j.services.*
 
-import scalaanalyzer.{LineColumn, ScalaPsiHost}
+import scalaanalyzer.{LineColumn, LineRange, ScalaPsiHost}
 import scalaanalyzer.build.{ScalafmtFormatting, TestRun}
 import scalaanalyzer.language.{Completion, CompletionChoice, CompletionFollowUp, FileProblem, Fold, HierarchyItem, HierarchyTarget, OutlineSymbol, ProblemSeverity, Rename, SignatureChoices, SourceSpan, TextChange, WorkspaceSymbolKind}
 import scalaanalyzer.platform.{CallLog, HostLock, HostLog}
@@ -719,8 +719,7 @@ final class ScalaLanguageServer(
         sourcePath(s, params.getTextDocument.getUri).foreach { path =>
           versions.put(path, params.getTextDocument.getVersion)
           for (change <- params.getContentChanges.asScala) {
-            val range = Option(change.getRange).map(r => (lineColumn(r.getStart), lineColumn(r.getEnd)))
-            s.change(path, range, change.getText)
+            s.change(path, Option(change.getRange).map(lineRange), change.getText)
           }
           scheduleDiagnostics(path)
         }
@@ -889,10 +888,8 @@ final class ScalaLanguageServer(
      */
     override def rangeFormatting(params: DocumentRangeFormattingParams): CompletableFuture[java.util.List[? <: TextEdit]] =
       onEditsRequest("rangeFormatting", params.getTextDocument, java.util.List.of[TextEdit]()) { (s, path) =>
-        val range = params.getRange
         val options = params.getOptions
-        textEdits(s.formatting(path, Some(lineColumn(range.getStart) -> lineColumn(range.getEnd)), options.getTabSize,
-          !options.isInsertSpaces))
+        textEdits(s.formatting(path, Some(lineRange(params.getRange)), options.getTabSize, !options.isInsertSpaces))
       }
 
     /**
@@ -1308,14 +1305,17 @@ final class ScalaLanguageServer(
   /** Converts a session line and UTF-16 column to an LSP position. */
   private def position(at: LineColumn): Position = new Position(at.line, at.column)
 
-  /** Converts a pair of session positions to an LSP range. */
-  private def range(span: (LineColumn, LineColumn)): Range = new Range(position(span._1), position(span._2))
+  /** Converts a session range to an LSP range. */
+  private def range(span: LineRange): Range = new Range(position(span.start), position(span.end))
+
+  /** Converts an LSP range to the session's equivalent coordinates. */
+  private def lineRange(r: Range): LineRange = LineRange(lineColumn(r.getStart), lineColumn(r.getEnd))
 
   /** Converts a project source span to a URI-backed LSP location. */
   private def location(span: SourceSpan): Location = new Location(span.path.toUri.toString, range(span.range))
 
   /** Converts a session text change to an LSP text edit. */
-  private def textEdit(change: TextChange): TextEdit = new TextEdit(range(change.start -> change.end), change.text)
+  private def textEdit(change: TextChange): TextEdit = new TextEdit(range(LineRange(change.start, change.end)), change.text)
 
   /** Converts a sequence of session edits to the Java list expected by LSP4J. */
   private def textEdits(changes: Seq[TextChange]): java.util.List[TextEdit] = changes.map(textEdit).asJava
@@ -1369,7 +1369,7 @@ final class ScalaLanguageServer(
     // The suggestions come ordered: by rank, the editor keeps that order instead of sorting them by label.
     item.setSortText(f"$rank%06d")
     item.setFilterText(suggestion.lookup)
-    item.setTextEdit(LspEither.forLeft(new TextEdit(range(choice.start -> choice.end), suggestion.lookup)))
+    item.setTextEdit(LspEither.forLeft(new TextEdit(range(LineRange(choice.start, choice.end)), suggestion.lookup)))
     if (suggestion.hasHandler && appliesEdits) {
       val arguments: Seq[AnyRef] = Seq(uri, Integer.valueOf(choice.start.line), Integer.valueOf(choice.start.column),
         suggestion.prefixText, suggestion.lookup, suggestion.identity)
@@ -1405,7 +1405,7 @@ final class ScalaLanguageServer(
       client.applyEdit(new ApplyWorkspaceEditParams(workspaceEdit, "completion")).thenAccept { response =>
         if (response.isApplied && showsDocuments) {
           val show = new ShowDocumentParams(uri)
-          show.setSelection(range(followUp.caret -> followUp.caret))
+          show.setSelection(range(LineRange(followUp.caret, followUp.caret)))
           show.setTakeFocus(true)
           client.showDocument(show)
         }
