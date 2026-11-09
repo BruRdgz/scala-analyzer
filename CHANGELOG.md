@@ -1,7 +1,12 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 — 2026-11-09
 
+- Sources changed on disk while they are not open in the editor (a checkout, a formatter) take their new text, and a
+  source closed without saving returns to its file; before, both kept stale text until the next import.
+- Java sources with a call that throws a checked exception get their diagnostics again, with the unhandled exception
+  reported; the host lacked an extension point that the check reads.
+- **Insert gap with concatenation** is offered inside string literals: its preview moves the caret along the line.
 - Code lenses run main classes (objects with a `main` method, `App` objects and Scala 3 `@main` methods) through the
   new `scalaAnalyzer.runMain` command: it compiles the target, launches the class with BSP's run environment and logs
   its output. A test run and a main run share the one active run; the VS Code extension shows a cancellable

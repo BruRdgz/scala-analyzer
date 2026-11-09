@@ -40,7 +40,8 @@ Beta 1 remains implemented but untagged, and Beta 2 closed without inspections.
    before the next dependency upgrade: use a matching platform/plugin pair, review generated adapter diffs, and run
    the adapter surface plus semantic checks for changed boundaries. The surface test is one gate, not a compatibility
    verdict on its own.
-2. Decide whether inspections belong in a later milestone. They are not part of Beta 1 or Beta 2.
+2. Inspections: decided in 0.2. A selected set runs per file and over the whole project (Inspect Code); widening the
+   set is open work, judged inspection by inspection.
 
 #### Current package ownership
 
@@ -135,6 +136,25 @@ Closed on 2026-10-30 (`v0.1.0-b2`) without inspections: their milestone is still
 - A platform upgrade process, with the adapter surface test as its gate.
 - Third-party license listing for the binary distribution.
 - Editor extensions published.
+
+## 0.2 — release (2026-11-09)
+
+Toward the IDE's UI in the editor, the logic in the server and the VS Code extension thin:
+
+- Build: compile the build or one target on request (the build task, Ctrl+Shift+B), reimport, and a Scala Build view
+  of the targets with their dependencies and libraries.
+- Show Type Info; Run main lenses beside the test lenses, one run at a time, cancellable from the editor.
+- Inspect Code over the whole project, generated sources skipped.
+- Sources follow their files on disk while they are not open in the editor.
+
+## Next — 0.3
+
+- Move a class or file from the editor's file explorer (`workspace/willRenameFiles` over the plugin's move handler).
+- Go to Test and Go to Super.
+- Inspect Code reports "Unused expression without side effects" on the patterns of `case` clauses that follow a guard
+  whose `if` ends its line (`HostBootstrap`, the application table proxy): check whether the plugin in the IDE does the
+  same before treating it as a host problem.
+- Each to decide: extract/introduce refactorings as code actions, Change Signature, debugging (DAP), worksheets.
 
 ## Later
 

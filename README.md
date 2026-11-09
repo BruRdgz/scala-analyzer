@@ -26,7 +26,7 @@ It exposes editor features through the **Language Server Protocol (LSP)** and im
 **Build Server Protocol (BSP)**. A VS Code extension is included; other editors can connect over stdio.
 
 > **Renaming from scala-psi-host:** release 0.1.0 artifacts retain the old name. The instructions below describe
-> the renamed distribution. Existing users should follow the [migration notes](CHANGELOG.md#unreleased).
+> the renamed distribution. Existing users should follow the [migration notes](CHANGELOG.md#020--2026-11-09).
 
 ## Features
 
