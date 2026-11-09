@@ -32,7 +32,7 @@ It exposes editor features through the **Language Server Protocol (LSP)** and im
 
 | Area | Capabilities |
 | --- | --- |
-| Diagnostics | Scala plugin and compiler diagnostics; current-buffer compilation for Scala 3; selected native inspections, also over the whole project (Inspect Code). |
+| Diagnostics | Scala plugin and compiler diagnostics; current-buffer compilation for Scala 3; selected native inspections, also over the whole project (Inspect Code, listed by group, inspection and file in VS Code's Inspection Results view). |
 | Completion | Automatic imports, insertion handlers, signature help and inlay hints. |
 | Navigation | Definitions, type definitions, references, implementations, call/type hierarchies and workspace symbols; library sources and decompiled classes. |
 | Documentation | Markdown hover with declaration context, parameters, return values and linked references. |

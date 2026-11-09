@@ -1334,6 +1334,10 @@ class LanguageServerTest extends munit.FunSuite {
         .get(1, TimeUnit.MINUTES).asScala.map(_.getRight)
       val action = actions.find(a => a.getDisabled == null && a.getTitle.startsWith("Simplify"))
         .getOrElse(fail(actions.toString))
+      // The fix and the suppressions name the problem they are about by the diagnostic the client showed.
+      val suppressions = actions.filter(_.getTitle.startsWith("Suppress"))
+      assert(suppressions.nonEmpty, actions.toString)
+      for (about <- action +: suppressions) assertEquals(about.getDiagnostics.asScala.toSeq, Seq(simplification), about.getTitle)
       val edit = action.getEdit.getDocumentChanges.get(0).getLeft
       assertEquals(edit.getTextDocument.getVersion, Integer.valueOf(170))
       val lineStart = text.indexOf('\n') + 1
@@ -1693,6 +1697,19 @@ class LanguageServerTest extends munit.FunSuite {
       Using.resource(Files.walk(fixture.resolve(module).resolve("src")))(_.iterator().asScala.toVector)
     }.filter(_.toString.endsWith(".scala"))
     assertEquals(report.filesInspected, scalaSources.size)
+  }
+
+  test("an inspection report describes each inspection that reported, with the plugin's name and group") {
+    val report = server.inspect().get(5, TimeUnit.MINUTES)
+    val described = report.inspections.asScala.map(description => description.id -> description).toMap
+    val codes = report.files.asScala.flatMap(_.getDiagnostics.asScala).map(_.getCode.getLeft).toSet
+
+    assertEquals(described.keySet, codes)
+    assertEquals(report.inspections.size, described.size)
+    // Unused imports come out of the unused-declaration inspection, which the plugin registers as "Unused declaration".
+    val unusedImport = described("ScalaUnusedImport")
+    assertEquals(unusedImport.displayName, "Unused declaration")
+    assertEquals(unusedImport.groupPath.asScala.toSeq, Seq("Scala", "General"))
   }
 
   test("an inspection publishes nothing: the client decides how to show its problems") {

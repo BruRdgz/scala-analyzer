@@ -65,11 +65,27 @@
         }
       }
     ],
+    "viewsContainers": {
+      "panel": [
+        {
+          "id": "scalaAnalyzerInspection",
+          "title": "Inspection Results",
+          "icon": "$(search)"
+        }
+      ]
+    },
     "views": {
       "explorer": [
         {
           "id": "scalaAnalyzer.buildTargets",
           "name": "Scala Build",
+          "when": "scalaAnalyzer.active"
+        }
+      ],
+      "scalaAnalyzerInspection": [
+        {
+          "id": "scalaAnalyzer.inspectionResults",
+          "name": "Inspection Results",
           "when": "scalaAnalyzer.active"
         }
       ]
@@ -78,6 +94,10 @@
       {
         "view": "scalaAnalyzer.buildTargets",
         "contents": "No build targets yet. They appear here once the build has been imported."
+      },
+      {
+        "view": "scalaAnalyzer.inspectionResults",
+        "contents": "No inspection results yet.\n[Inspect Code](command:scalaAnalyzer.inspect)"
       }
     ],
     "menus": {
@@ -103,6 +123,16 @@
           "command": "scalaAnalyzer.inspect",
           "when": "view == scalaAnalyzer.buildTargets",
           "group": "navigation"
+        },
+        {
+          "command": "scalaAnalyzer.inspect",
+          "when": "view == scalaAnalyzer.inspectionResults",
+          "group": "navigation@1"
+        },
+        {
+          "command": "scalaAnalyzer.clearInspection",
+          "when": "view == scalaAnalyzer.inspectionResults",
+          "group": "navigation@2"
         }
       ],
       "view/item/context": [
@@ -110,9 +140,27 @@
           "command": "scalaAnalyzer.compileTarget",
           "when": "view == scalaAnalyzer.buildTargets && viewItem == target",
           "group": "inline"
+        },
+        {
+          "command": "scalaAnalyzer.applyInspectionFix",
+          "when": "view == scalaAnalyzer.inspectionResults && viewItem == problem",
+          "group": "inline@1"
+        },
+        {
+          "command": "scalaAnalyzer.suppressInspection",
+          "when": "view == scalaAnalyzer.inspectionResults && viewItem == problem",
+          "group": "inline@2"
         }
       ],
       "commandPalette": [
+        {
+          "command": "scalaAnalyzer.applyInspectionFix",
+          "when": "false"
+        },
+        {
+          "command": "scalaAnalyzer.suppressInspection",
+          "when": "false"
+        },
         {
           "command": "scalaAnalyzer.typeInfo",
           "when": "editorLangId == scala"
@@ -156,7 +204,20 @@
       {
         "command": "scalaAnalyzer.clearInspection",
         "title": "Clear Inspection Results",
-        "category": "scala-analyzer"
+        "category": "scala-analyzer",
+        "icon": "$(clear-all)"
+      },
+      {
+        "command": "scalaAnalyzer.applyInspectionFix",
+        "title": "Apply Fix",
+        "category": "scala-analyzer",
+        "icon": "$(wrench)"
+      },
+      {
+        "command": "scalaAnalyzer.suppressInspection",
+        "title": "Suppress Inspection",
+        "category": "scala-analyzer",
+        "icon": "$(eye-closed)"
       },
       {
         "command": "scalaAnalyzer.restart",
@@ -189,7 +250,7 @@
     "@vscode/vsce": "4.1.0"
   },
   "scripts": {
-    "check": "node --check extension.js && node --check buildTargets.js && node --check inspect.js",
+    "check": "node --check extension.js && node --check buildTargets.js && node --check inspect.js && node --check inspectionTree.js",
     "package": "vsce package",
     "test:installed": "node test/run.js"
   },

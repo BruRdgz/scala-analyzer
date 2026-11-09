@@ -172,6 +172,35 @@ public final class HostProtocol {
   }
 
   /**
+   * How the IDE presents one inspection in its inspection results.
+   *
+   * Instances are immutable and travel in the {@code scalaAnalyzer/inspect} result.
+   */
+  public static final class InspectionDescription {
+    /** The inspection id; the {@code code} of each of the inspection's diagnostics. */
+    public final String id;
+
+    /** The inspection's name, such as {@code Redundant block}. */
+    public final String displayName;
+
+    /** The groups that contain the inspection, outermost first, such as {@code Scala}, {@code General}. */
+    public final List<String> groupPath;
+
+    /**
+     * Creates an inspection description.
+     *
+     * @param id the inspection id that its diagnostics carry as their code
+     * @param displayName the inspection's name
+     * @param groupPath the groups that contain the inspection, outermost first
+     */
+    public InspectionDescription(String id, String displayName, List<String> groupPath) {
+      this.id = id;
+      this.displayName = displayName;
+      this.groupPath = groupPath;
+    }
+  }
+
+  /**
    * The outcome of a project-wide inspection.
    *
    * Instances are immutable and travel as the result of the {@code scalaAnalyzer/inspect} request.
@@ -183,15 +212,20 @@ public final class HostProtocol {
     /** The inspection problems by source, in path order; only the sources that have some, and never a version. */
     public final List<PublishDiagnosticsParams> files;
 
+    /** The description of each inspection that reported a problem, keyed by the code of its diagnostics; none repeats. */
+    public final List<InspectionDescription> inspections;
+
     /**
      * Creates an inspection result.
      *
      * @param filesInspected number of sources the inspection covered
      * @param files the problems of the sources that have some
+     * @param inspections the description of each inspection that reported a problem
      */
-    public InspectReport(int filesInspected, List<PublishDiagnosticsParams> files) {
+    public InspectReport(int filesInspected, List<PublishDiagnosticsParams> files, List<InspectionDescription> inspections) {
       this.filesInspected = filesInspected;
       this.files = files;
+      this.inspections = inspections;
     }
   }
 
@@ -265,8 +299,8 @@ public final class HostProtocol {
      * nothing: the client decides how to show the result. It runs apart from document requests, is shown as progress
      * and ends early, answering a cancellation error, when the client cancels it.
      *
-     * @return a future containing the number of sources inspected and the problems found; it fails if the project is
-     *         not open
+     * @return a future containing the number of sources inspected, the problems found and the name and group of each
+     *         inspection that found some; it fails if the project is not open
      */
     @JsonRequest("scalaAnalyzer/inspect")
     CompletableFuture<InspectReport> inspect();

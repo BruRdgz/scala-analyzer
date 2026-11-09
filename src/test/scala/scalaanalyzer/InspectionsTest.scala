@@ -139,6 +139,31 @@ class InspectionsTest extends munit.FunSuite {
     }
   }
 
+  test("an inspection problem offers its fix and the plugin's suppressions, each naming the problem") {
+    val cases = Seq(
+      ("RemoveRedundantReturn", "object Inspect { def f: Int = { return 1 } }", "Suppress for statement"),
+      ("ScalaUnusedImport", "import scala.util.Try\nobject Inspect", "Suppress for file"),
+    )
+    for ((id, text, title) <- cases) {
+      val file = open("Inspect", text)
+      try {
+        val problem = host.inspect(file).find(_.inspectionId.contains(id)).getOrElse(fail(id))
+        // The file's diagnostics are not cached, as when a client shows a problem that it asks the fixes of at once.
+        val actions = host.codeActions(file, problem.range, withInspections = true)
+          .filter(_.problems.exists(about => about.inspectionId.contains(id) && about.range == problem.range))
+        val (suppressions, fixes) = actions.partition(_.title.startsWith("Suppress"))
+        assert(fixes.exists(fix => fix.disabled.isEmpty && fix.edits.nonEmpty), actions.toString)
+        val suppression = suppressions.find(_.title == title).getOrElse(fail(actions.toString))
+        assertEquals(suppression.disabled, None)
+        val suppressed = TestHost.applyEdits(text, suppression.edits)
+        assert(suppressed.contains(s"//noinspection $id"), suppressed)
+        assertEquals(host.read(file.getText), text)
+        host.edit(file, 0, text.length, suppressed)
+        assert(!host.diagnostics(file).exists(_.inspectionId.contains(id)), suppressed)
+      } finally host.closeSource(file)
+    }
+  }
+
   test("Scala suppression comments suppress the selected inspection") {
     val cases = Seq(
       "object Inspect {\n //noinspection SimplifyBoolean\n def f(b: Boolean): Boolean = b == true\n}",

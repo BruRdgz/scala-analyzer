@@ -614,10 +614,12 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
    * @param start selection start
    * @param end selection end; equal to `start` for a caret request
    * @param only action kinds to accept, with their descendants; empty accepts every contextual fix and refactoring
-   * @return each accepted action paired with its edits; empty for a file that is not Scala
+   * @param withInspections whether the caller shows inspection problems here, whose fixes are wanted at once
+   * @return each accepted action paired with its edits, and the problems it fixes or suppresses in its result; empty
+   *         for a file that is not Scala
    */
-  def codeActions(path: Path, start: LineColumn, end: LineColumn, only: Seq[String] = Seq.empty)
-      : Seq[(CodeActionResult, Seq[TextChange])] = host.read {
+  def codeActions(path: Path, start: LineColumn, end: LineColumn, only: Seq[String] = Seq.empty,
+      withInspections: Boolean = false): Seq[(CodeActionResult, Seq[TextChange])] = host.read {
     file(path) match {
       case sourceFile: ScalaFile =>
         val sourceDocument = document(sourceFile)
@@ -627,8 +629,8 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
 
         val contextual =
           if (accepts("quickfix") || accepts("refactor.rewrite"))
-            host.codeActions(sourceFile, new TextRange(offset(sourceDocument, start), offset(sourceDocument, end)))
-              .filter(choice => accepts(choice.kind))
+            host.codeActions(sourceFile, new TextRange(offset(sourceDocument, start), offset(sourceDocument, end)),
+              withInspections).filter(choice => accepts(choice.kind))
           else Seq.empty
         val source =
           if (only.nonEmpty && accepts("source.organizeImports")) Seq(host.organizeImports(sourceFile))
@@ -636,7 +638,7 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
         val choices = contextual ++ source
 
         choices.map { choice =>
-          CodeActionResult(choice.title, choice.kind, choice.disabled) ->
+          CodeActionResult(choice.title, choice.kind, choice.disabled, pluginProblems(sourceDocument, choice.problems)) ->
             choice.edits.map(textChange(sourceDocument, _))
         }
       case _ => Seq.empty

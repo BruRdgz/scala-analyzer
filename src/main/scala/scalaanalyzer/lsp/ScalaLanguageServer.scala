@@ -593,8 +593,9 @@ final class ScalaLanguageServer(
    * Runs on the builds thread, as a compile does, and is shown as progress with the file being inspected. Each source is
    * read on its own, so edits go on between sources. A client's cancellation ends the run before the next source.
    *
-   * @return a future containing the number of sources inspected and the problems of those that have some, in path
-   *         order; it fails when the project is not open, and with `RequestCancelled` when the client cancels it
+   * @return a future containing the number of sources inspected, the problems of those that have some, in path
+   *         order, and the description of each inspection that reported a problem; it fails when the project is not
+   *         open, and with `RequestCancelled` when the client cancels it
    */
   override def inspect(): CompletableFuture[HostProtocol.InspectReport] =
     answered("inspect", builds.execute) { s =>
@@ -609,7 +610,12 @@ final class ScalaLanguageServer(
         }
       }
 
-      new HostProtocol.InspectReport(sources.size, files.asJava)
+      val reported = files.flatMap(_.getDiagnostics.asScala).flatMap(problem => Option(problem.getCode)).map(_.getLeft).toSet
+      val inspections = s.inspectionDescriptions.filter(description => reported(description.id)).map { description =>
+        new HostProtocol.InspectionDescription(description.id, description.displayName, description.groupPath.asJava)
+      }
+
+      new HostProtocol.InspectReport(sources.size, files.asJava, inspections.asJava)
     }
 
   /** Inspects one source, once more if an edit cancelled the first attempt; a cancelled request is not retried. */
@@ -1171,19 +1177,27 @@ final class ScalaLanguageServer(
     /**
      * Returns applicable code actions, with versioned edits for actions that can be applied immediately.
      *
-     * Runs on a read thread. An action the session marks as disabled carries its reason and no edit.
+     * Runs on a read thread. An action the session marks as disabled carries its reason and no edit. An action that
+     * fixes or suppresses a problem lists, as its diagnostics, the context's diagnostics that report that problem.
      *
-     * @param params the document, the range to act on and the kinds the client asked for, passed to the session as is
+     * @param params the document, the range to act on, the kinds the client asked for and the diagnostics it shows
+     *               there; the session gets the range and the kinds as they are
      * @return one action per choice the session offers; empty when the document is not a project source
      */
     override def codeAction(params: CodeActionParams): CompletableFuture[java.util.List[LspEither[Command, CodeAction]]] =
       onRead("codeAction", params.getTextDocument, java.util.List.of[LspEither[Command, CodeAction]]()) { (s, path) =>
         val requested = Option(params.getContext.getOnly).map(_.asScala.toSeq).getOrElse(Seq.empty)
+        val shown = params.getContext.getDiagnostics.asScala.toSeq
+        val inspectionIds = s.inspectionDescriptions.map(_.id).toSet
+        val showsInspections = shown.exists(problem => Option(problem.getCode).exists(code => inspectionIds(code.getLeft)))
 
-        s.codeActions(path, lineColumn(params.getRange.getStart), lineColumn(params.getRange.getEnd), requested)
+        s.codeActions(path, lineColumn(params.getRange.getStart), lineColumn(params.getRange.getEnd), requested, showsInspections)
           .map { (choice, changes) =>
             val action = new CodeAction(choice.title)
             action.setKind(choice.kind)
+            val fixed = choice.problems.map(ScalaLanguageServer.this.diagnostic)
+            val reporting = shown.filter(problem => fixed.exists(reports(problem, _)))
+            if (reporting.nonEmpty) action.setDiagnostics(reporting.asJava)
             choice.disabled match {
               case Some(reason) => action.setDisabled(new CodeActionDisabled(reason))
               case None =>
@@ -1434,6 +1448,10 @@ final class ScalaLanguageServer(
 
     converted
   }
+
+  /** Whether a client's diagnostic is the one this server published for `problem`: the same range, code and message. */
+  private def reports(shown: org.eclipse.lsp4j.Diagnostic, problem: org.eclipse.lsp4j.Diagnostic): Boolean =
+    shown.getRange == problem.getRange && shown.getCode == problem.getCode && shown.getMessage == problem.getMessage
 
   /** Converts the LSP's zero-based UTF-16 position to the session's equivalent coordinate. */
   private def lineColumn(p: Position): LineColumn = LineColumn(p.getLine, p.getCharacter)

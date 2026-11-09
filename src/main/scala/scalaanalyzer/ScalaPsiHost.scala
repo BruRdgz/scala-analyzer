@@ -14,7 +14,7 @@ import org.jetbrains.plugins.scala.lang.psi.api.ScalaFile
 import org.jetbrains.plugins.scala.lang.psi.impl.ScalaPsiElementFactory
 import org.jetbrains.plugins.scala.project.{ProjectContext, ScalaFeatures}
 
-import scalaanalyzer.language.{ChangeEngine, CodeActions, Completion, InlayHints, Inspections, ParameterInfo, Rename, SelectionRanges}
+import scalaanalyzer.language.{ChangeEngine, CodeActions, Completion, InlayHints, InspectionDescription, Inspections, ParameterInfo, Rename, SelectionRanges}
 import scalaanalyzer.platform.{Descriptors, ExtensionBean, HostBootstrap, HostDispatchThread, HostLock, HostPsiDocumentManager, Host_ModuleRootManager, Host_OrderEnumerator, ImportIndex, LibraryFileSystem, SourceFile, SymbolIndex, WordIndex, dispatch, tableProxy}
 
 import java.nio.file.Path
@@ -573,18 +573,21 @@ final class ScalaPsiHost private[scalaanalyzer] (
    * Text actions for the selected range, preserving their annotator fixes and previewing on file copies. Until the
    * file's diagnostics are computed, only what the range touches is analyzed and inspection fixes are left out: the
    * first request on an opened file does not wait for the whole file's analysis, and editors ask again when the
-   * diagnostics arrive.
+   * diagnostics arrive. A caller that already shows inspection problems in the range asks for their fixes with
+   * `withInspections`, since the editor will not ask again.
    *
    * Runs under read access.
    *
    * @param file Scala source being queried
    * @param range UTF-16 range the actions apply to
-   * @return the actions available for the range
+   * @param withInspections whether to run the inspections for their fixes when the file's diagnostics are not cached
+   * @return the actions available for the range; those that fix or suppress an inspection problem say which
    */
-  def codeActions(file: ScalaFile, range: TextRange): Seq[CodeActions.Choice] = read {
+  def codeActions(file: ScalaFile, range: TextRange, withInspections: Boolean = false): Seq[CodeActions.Choice] = read {
     val computed = Option(file.getUserData(diagnosticsCache)).filter(_.hasUpToDateValue).map(_.getValue)
+    def uncached = problemsAround(file, range) ++ (if (withInspections) inspections.diagnostics(file) else Seq.empty)
 
-    actions.collect(file, range, computed.getOrElse(problemsAround(file, range)))
+    actions.collect(file, range, computed.getOrElse(uncached))
   }
 
   /**
@@ -653,6 +656,13 @@ final class ScalaPsiHost private[scalaanalyzer] (
    * @return the inspection problems and their plugin fixes with UTF-16 source ranges
    */
   def inspect(file: ScalaFile): Seq[Diagnostic] = HostLock.query(inspections.diagnostics(file))
+
+  /**
+   * Describes every inspection that [[inspect]] may report, as the IDE names and groups it.
+   *
+   * @return one description for each inspection id that a diagnostic's `inspectionId` can carry
+   */
+  def inspectionDescriptions: Seq[InspectionDescription] = inspections.descriptions
 
   /** Runs the syntax check, the annotator and the inspections over the whole file. */
   private def collectDiagnostics(file: ScalaFile): Seq[Diagnostic] =
