@@ -29,8 +29,14 @@ final case class CompileSpec(
  * @param spec host module identity, dependencies and PSI settings
  * @param sources Scala and Java source paths owned by the target
  * @param compile settings for compiling current document text
+ * @param generatedSources the part of `sources` the build marks as generated; empty when it marks none
  */
-final case class ImportedModule(spec: ModuleSpec, sources: Seq[Path], compile: CompileSpec)
+final case class ImportedModule(
+  spec: ModuleSpec,
+  sources: Seq[Path],
+  compile: CompileSpec,
+  generatedSources: Set[Path] = Set.empty,
+)
 
 /**
  * A compiler problem in a source file.

@@ -144,6 +144,9 @@ private[scalaanalyzer] object HostLock {
       if (cancelled) indicator.cancel()
     }
 
+    /** Whether the request was cancelled. */
+    private[HostLock] def isCancelled: Boolean = cancelled
+
     /**
      * Stops tracking a query's indicator once the query has finished.
      *
@@ -153,6 +156,14 @@ private[scalaanalyzer] object HostLock {
   }
 
   private val requestCancellation = new ThreadLocal[RequestCancellation]
+
+  /**
+   * Whether the request that the current thread runs in [[cancelledBy]] has been cancelled.
+   *
+   * @return `true` after the request's cancellation, which stays cancelled; `false` for a request still wanted and
+   *         for a thread outside [[cancelledBy]]
+   */
+  def isRequestCancelled: Boolean = Option(requestCancellation.get()).exists(_.isCancelled)
 
   /**
    * Runs `body` with its queries cancelled by `cancellation`.

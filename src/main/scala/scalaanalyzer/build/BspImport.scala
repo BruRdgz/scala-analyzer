@@ -105,7 +105,10 @@ final class BuildConnection private[scalaanalyzer] (
         classDirectory = Path.of(URI.create(options.getClassDirectory)),
         scalacOptions = options.getOptions.asScala.toSeq,
       )
-      ImportedModule(spec, sourcesById.get(target.getId).toSeq.flatMap(BspImport.sourceFiles), compile)
+      val items = sourcesById.get(target.getId).toSeq
+
+      ImportedModule(spec, items.flatMap(BspImport.sourceFiles), compile,
+        generatedSources = items.flatMap(BspImport.generatedSourceFiles).toSet)
     }
 
     BspImport.dependenciesFirst(imported)
@@ -518,6 +521,17 @@ object BspImport {
   /** The only source extensions the host imports from BSP targets. */
   private def isSource(path: Path): Boolean = path.toString.endsWith(".scala") || path.toString.endsWith(".java")
 
+  /** Resolves one BSP source entry to its existing Scala and Java files: a directory is walked, sorted by path. */
+  private def filesOf(source: SourceItem): Seq[Path] = {
+    val path = Path.of(URI.create(source.getUri))
+
+    if (!Files.exists(path)) Seq.empty
+    else if (Files.isDirectory(path))
+      Using.resource(Files.walk(path))(_.iterator().asScala.filter(isSource).toVector.sorted)
+    else if (isSource(path)) Seq(path)
+    else Seq.empty
+  }
+
   /**
    * Resolves existing Scala and Java files from a BSP source item, expanding directory entries recursively.
    *
@@ -527,14 +541,18 @@ object BspImport {
    * @return the files in entry order; the files found under one directory entry are sorted by path
    */
   private[scalaanalyzer] def sourceFiles(item: SourcesItem): Seq[Path] =
-    item.getSources.asScala.toSeq.flatMap { source =>
-      val path = Path.of(URI.create(source.getUri))
-      if (!Files.exists(path)) Seq.empty
-      else if (Files.isDirectory(path))
-        Using.resource(Files.walk(path))(_.iterator().asScala.filter(isSource).toVector.sorted)
-      else if (isSource(path)) Seq(path)
-      else Seq.empty
-    }
+    item.getSources.asScala.toSeq.flatMap(filesOf)
+
+  /**
+   * Resolves the files of a BSP source item that the build marks as generated.
+   *
+   * A generated directory entry makes every file under it generated, as in `sourceFiles`' expansion.
+   *
+   * @param item source entries of one build target
+   * @return the generated files among `sourceFiles(item)`
+   */
+  private[scalaanalyzer] def generatedSourceFiles(item: SourcesItem): Set[Path] =
+    item.getSources.asScala.filter(_.getGenerated).flatMap(filesOf).toSet
 
   /**
    * Retains published diagnostics per source and target, replacing or appending according to BSP's reset flag.

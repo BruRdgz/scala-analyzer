@@ -15,7 +15,7 @@ final class LspServices {
    * {@link LanguageClientAware}, and declares the host's {@code scalaAnalyzer/} requests.
    *
    * Subclasses implement what those interfaces leave abstract, including {@code status}, {@code buildTargets},
-   * {@code compile}, {@code reimport} and {@code typeInfo}.
+   * {@code compile}, {@code reimport}, {@code inspect} and {@code typeInfo}.
    */
   abstract static class Server implements LanguageServer, LanguageClientAware, HostProtocol.Server {}
 

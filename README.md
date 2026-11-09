@@ -32,7 +32,7 @@ It exposes editor features through the **Language Server Protocol (LSP)** and im
 
 | Area | Capabilities |
 | --- | --- |
-| Diagnostics | Scala plugin and compiler diagnostics; current-buffer compilation for Scala 3; selected native inspections. |
+| Diagnostics | Scala plugin and compiler diagnostics; current-buffer compilation for Scala 3; selected native inspections, also over the whole project (Inspect Code). |
 | Completion | Automatic imports, insertion handlers, signature help and inlay hints. |
 | Navigation | Definitions, type definitions, references, implementations, call/type hierarchies and workspace symbols; library sources and decompiled classes. |
 | Documentation | Markdown hover with declaration context, parameters, return values and linked references. |
@@ -169,7 +169,10 @@ is partial, indexes are kept in memory, and each process serves one workspace.
   from the JDK running the server.
 - Native inspections cover deprecation, selected redundancies, explicit unused imports and unannotated
   declarations confined to the file. Wildcard/given import warnings and whole-project dead-code analysis are
-  outside this scope. Dialog-dependent actions, file/package moves and optional automatic renames are unavailable;
+  outside this scope. Inspect Code (`scalaAnalyzer/inspect`) runs only these inspections, on the Scala sources that
+  the build does not mark as generated; it does not report syntax, type or compiler errors. The VS Code extension
+  shows its result in a separate list and omits files whose live diagnostics are already shown; other clients receive
+  every file's problems and must avoid showing them twice. Dialog-dependent actions, file/package moves and optional automatic renames are unavailable;
   code actions are limited to current-file previews.
 - Some completion contributors require IDE services that are unavailable. Live templates have no snippet tab stops;
   completion followed by handler edits takes two undo steps.

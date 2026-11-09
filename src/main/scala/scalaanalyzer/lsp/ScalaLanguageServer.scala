@@ -588,6 +588,36 @@ final class ScalaLanguageServer(
     }
 
   /**
+   * Runs the selected inspections over the project's Scala sources and answers their problems; nothing is published.
+   *
+   * Runs on the builds thread, as a compile does, and is shown as progress with the file being inspected. Each source is
+   * read on its own, so edits go on between sources. A client's cancellation ends the run before the next source.
+   *
+   * @return a future containing the number of sources inspected and the problems of those that have some, in path
+   *         order; it fails when the project is not open, and with `RequestCancelled` when the client cancels it
+   */
+  override def inspect(): CompletableFuture[HostProtocol.InspectReport] =
+    answered("inspect", builds.execute) { s =>
+      val sources = s.inspectableSources
+      val files = withProgress("scala-analyzer: inspecting the project") { progress =>
+        sources.zipWithIndex.flatMap { (path, index) =>
+          if (HostLock.isRequestCancelled) throw new ProcessCanceledException
+          progress(s"${index + 1}/${sources.size} ${path.getFileName}")
+
+          val problems = inspected(s, path)
+          Option.when(problems.nonEmpty)(new PublishDiagnosticsParams(path.toUri.toString, problems.map(diagnostic).asJava))
+        }
+      }
+
+      new HostProtocol.InspectReport(sources.size, files.asJava)
+    }
+
+  /** Inspects one source, once more if an edit cancelled the first attempt; a cancelled request is not retried. */
+  private def inspected(s: ProjectSession, path: Path): Seq[FileProblem] =
+    try s.inspect(path)
+    catch { case _: ProcessCanceledException if !HostLock.isRequestCancelled => s.inspect(path) }
+
+  /**
    * Imports the build again after reloading the build server's workspace, then schedules diagnostics for every
    * tracked document.
    *

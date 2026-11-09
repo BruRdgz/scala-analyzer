@@ -10,7 +10,8 @@ Open a Scala workspace with a BSP connection (`sbt bspConfig` for sbt). The exte
 for Scala files and also handles Java files in that workspace.
 
 Click the **Scala** status bar item for a menu, or run the commands from the palette (category `scala-analyzer`):
-**Compile Build**, **Reimport Build**, **Restart Server**, **Show Type Info**, **Show Status** and **Show Log File**.
+**Compile Build**, **Reimport Build**, **Inspect Code**, **Clear Inspection Results**, **Restart Server**,
+**Show Type Info**, **Show Status** and **Show Log File**.
 Compiling is also the workspace build task, so **Ctrl+Shift+B** runs it (or add
 `{ "type": "scala-analyzer", "task": "compile" }` to `tasks.json`). Its outcome shows briefly in the status bar; a
 failed compile opens the Problems panel with the diagnostics.
@@ -18,9 +19,14 @@ failed compile opens the Problems panel with the diagnostics.
 next move or edit; it is in the editor context menu for Scala files. It has no default key (IntelliJ's Ctrl+Shift+P opens VS Code's command palette); bind one in
 `keybindings.json`: `{ "key": "<your key>", "command": "scalaAnalyzer.typeInfo", "when": "editorLangId == scala" }`.
 
+**Inspect Code** runs the server's inspections over every Scala source of the build (not the generated ones) and lists
+their problems in the Problems panel, with a cancellable progress notification. The results are a snapshot: the next
+run replaces them and **Clear Inspection Results** removes them. A file whose live diagnostics are already shown
+(opened, or touched by a compile) keeps those instead, so it is not listed twice.
+
 The **Scala Build** view in the Explorer lists the build's targets with their Scala version, the targets they depend
 on, their libraries and their source file count. It refreshes whenever the build is (re)imported; its title bar
-compiles or reimports the build, and the button on a target compiles just that target.
+compiles, reimports or inspects the build, and the button on a target compiles just that target.
 
 The server provides diagnostics, completion, Markdown hover, navigation, formatting, symbols and previewed
 code actions. Supported platforms for the packaged server are Linux x64 and macOS Intel/Apple Silicon.

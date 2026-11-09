@@ -1,5 +1,6 @@
 package scalaanalyzer.lsp;
 
+import org.eclipse.lsp4j.PublishDiagnosticsParams;
 import org.eclipse.lsp4j.Range;
 import org.eclipse.lsp4j.TextDocumentIdentifier;
 import org.eclipse.lsp4j.jsonrpc.services.JsonNotification;
@@ -15,7 +16,7 @@ import java.util.concurrent.CompletableFuture;
  * Defines host-specific state notifications and requests alongside LSP.
  *
  * Clients may implement these extensions to display import state and diagnostics about the server itself, and to
- * list the build's targets, compile or import the build and ask for a type on request.
+ * list the build's targets, compile or import the build, inspect the project's code and ask for a type on request.
  */
 public final class HostProtocol {
   /** Prevents instantiation: this class only groups the protocol types. */
@@ -170,6 +171,30 @@ public final class HostProtocol {
     }
   }
 
+  /**
+   * The outcome of a project-wide inspection.
+   *
+   * Instances are immutable and travel as the result of the {@code scalaAnalyzer/inspect} request.
+   */
+  public static final class InspectReport {
+    /** The number of sources the inspection covered, with or without problems. */
+    public final int filesInspected;
+
+    /** The inspection problems by source, in path order; only the sources that have some, and never a version. */
+    public final List<PublishDiagnosticsParams> files;
+
+    /**
+     * Creates an inspection result.
+     *
+     * @param filesInspected number of sources the inspection covered
+     * @param files the problems of the sources that have some
+     */
+    public InspectReport(int filesInspected, List<PublishDiagnosticsParams> files) {
+      this.filesInspected = filesInspected;
+      this.files = files;
+    }
+  }
+
   /** What the server sends a client that knows its messages. */
   public interface Client extends LanguageClient {
     /**
@@ -230,6 +255,21 @@ public final class HostProtocol {
      */
     @JsonRequest("scalaAnalyzer/reimport")
     CompletableFuture<Void> reimport();
+
+    /**
+     * Runs the host's selected inspections over the project's Scala sources and returns their problems, as the IDE's
+     * Inspect Code does.
+     *
+     * Only inspections run: no syntax errors, annotator problems or compiler diagnostics. Generated sources are
+     * skipped, and so are Java sources. The request reads each source's current buffer, saved or not, and publishes
+     * nothing: the client decides how to show the result. It runs apart from document requests, is shown as progress
+     * and ends early, answering a cancellation error, when the client cancels it.
+     *
+     * @return a future containing the number of sources inspected and the problems found; it fails if the project is
+     *         not open
+     */
+    @JsonRequest("scalaAnalyzer/inspect")
+    CompletableFuture<InspectReport> inspect();
 
     /**
      * Describes the type under a caret or of a selected expression, as the IDE's Type Info action does.

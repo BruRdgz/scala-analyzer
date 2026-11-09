@@ -37,7 +37,7 @@ import org.jetbrains.plugins.scala.lang.refactoring.util.ScalaNamesUtil
 import org.jetbrains.plugins.scala.lang.scaladoc.parser.ScalaDocElementTypes
 import org.jetbrains.plugins.scala.structureView.element.Element
 
-import scalaanalyzer.{LineColumn, LineRange, ScalaPsiHost}
+import scalaanalyzer.{Diagnostic, LineColumn, LineRange, ScalaPsiHost}
 import scalaanalyzer.build.{CompileSpec, CompilerDiagnostic, DocumentCompiler, ScalafmtFormatting}
 import scalaanalyzer.platform.{HostLog, LibraryFile, SourceFile}
 
@@ -343,13 +343,7 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
       case scalaFile: ScalaFile =>
         val reading = host.read {
           val sourceDocument = document(scalaFile)
-          val plugin = host.diagnostics(scalaFile)
-            .filter(_.severity.compareTo(HighlightSeverity.WEAK_WARNING) >= 0)
-            .map { p =>
-              FileProblem(problemSeverity(p.severity), position(sourceDocument, p.range.getStartOffset),
-                position(sourceDocument, p.range.getEndOffset), p.message, "scala-plugin", p.inspectionId,
-                p.deprecated, p.unnecessary)
-            }
+          val plugin = pluginProblems(sourceDocument, host.diagnostics(scalaFile))
 
           PluginReading(plugin, host.isCompilerHighlighted(scalaFile), sourceDocument.getText)
         }
@@ -376,6 +370,27 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
         }
       }
       case _ => Seq.empty
+    }
+
+  /**
+   * Collects the problems of the plugin's selected inspections in a Scala source, without the annotator, the syntax
+   * check or any compiler.
+   *
+   * @param path registered project-source path
+   * @return the inspection problems of at least weak-warning severity, labelled `scala-plugin`; empty for a source
+   *         that is not Scala
+   */
+  def inspect(path: Path): Seq[FileProblem] = file(path) match {
+    case scalaFile: ScalaFile => host.read(pluginProblems(document(scalaFile), host.inspect(scalaFile)))
+    case _ => Seq.empty
+  }
+
+  /** Converts the plugin's problems of at least weak-warning severity to the document's coordinates; the caller reads. */
+  private def pluginProblems(sourceDocument: Document, found: Seq[Diagnostic]): Seq[FileProblem] =
+    found.filter(_.severity.compareTo(HighlightSeverity.WEAK_WARNING) >= 0).map { p =>
+      FileProblem(problemSeverity(p.severity), position(sourceDocument, p.range.getStartOffset),
+        position(sourceDocument, p.range.getEndOffset), p.message, "scala-plugin", p.inspectionId,
+        p.deprecated, p.unnecessary)
     }
 
   /**

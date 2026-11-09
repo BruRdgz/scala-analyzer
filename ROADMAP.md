@@ -12,8 +12,8 @@ agrees with the host, and the cases that do not agree are explained in the READM
 The host already provides Scala 2/3 diagnostics, navigation, project-wide text search, symbols, folding, semantic tokens,
 completion, signature help, inlay hints, selection ranges, IntelliJ/scalafmt formatting, rename, organize imports, and
 previewable code actions. The documented limitations remain in [README.md](README.md#known-limitations): compiler-index
-searches and Java class indexing are incomplete, some UI-dependent actions and hints are unavailable, and inspections
-are not run.
+searches and Java class indexing are incomplete, some UI-dependent actions and hints are unavailable, and only a
+selected set of inspections runs, per file and over the whole project (Inspect Code).
 
 **Verification checkpoint:** before the organization work, `sbt test` passed 108 tests. After the bootstrap,
 resource-lifecycle, stable-module-identity, and package changes, `sbt test` passed 112/112. The final import and

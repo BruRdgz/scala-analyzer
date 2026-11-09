@@ -1,5 +1,6 @@
 package scalaanalyzer
 
+import ch.epfl.scala.bsp4j.{BuildTargetIdentifier, SourceItem, SourceItemKind, SourcesItem}
 import com.google.gson.JsonObject
 import com.intellij.lang.annotation.HighlightSeverity
 
@@ -11,6 +12,7 @@ import java.nio.channels.SocketChannel
 import java.nio.file.{Files, Path}
 
 import scala.concurrent.duration.*
+import scala.jdk.CollectionConverters.*
 import scala.util.{Try, Using}
 
 /**
@@ -62,6 +64,27 @@ class BspImportTest extends munit.FunSuite {
     assertEquals(app.sources.map(fixture.relativize(_).toString), Seq("app/src/main/scala/app/Main.scala"))
     assert(!module("core").spec.scalacOptions.contains("-Xsource:3"))
     assert(module("core").sources.map(fixture.relativize(_).toString).contains("core/src/main/java/core/Shout.java"))
+  }
+
+  test("a generated source entry marks every file under it as generated") {
+    val directory = Files.createTempDirectory("bsp-sources")
+    try {
+      def write(name: String): Path = {
+        val file = directory.resolve(name)
+        Files.createDirectories(file.getParent)
+        Files.writeString(file, "object X")
+      }
+      val generated = write("generated/Gen.scala")
+      val handwritten = write("handwritten/Hand.scala")
+      val one = write("One.scala")
+      val item = new SourcesItem(new BuildTargetIdentifier("target"), java.util.List.of(
+        new SourceItem(directory.resolve("generated").toUri.toString, SourceItemKind.DIRECTORY, true),
+        new SourceItem(directory.resolve("handwritten").toUri.toString, SourceItemKind.DIRECTORY, false),
+        new SourceItem(one.toUri.toString, SourceItemKind.FILE, true)))
+
+      assertEquals(BspImport.sourceFiles(item).toSet, Set(generated, handwritten, one))
+      assertEquals(BspImport.generatedSourceFiles(item), Set(generated, one))
+    } finally Using.resource(Files.walk(directory))(_.iterator().asScala.toSeq.reverse.foreach(Files.delete))
   }
 
   test("module ordering rejects duplicate identities, unknown dependencies and ambiguous shared sources") {

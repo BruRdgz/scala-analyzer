@@ -294,6 +294,38 @@ final class ProjectSession private (
     } finally readLock.unlock()
   }
 
+  /**
+   * Lists the registered Scala sources that a project-wide inspection covers.
+   *
+   * Sources the build marks as generated are left out, as are Java sources. Takes no lock: during an import the
+   * registry can change, and `inspect` answers for a source that has left it. Does not check the session's state.
+   *
+   * @return the Scala source paths of the last imported modules that are registered now, sorted by path
+   */
+  def inspectableSources: Seq[Path] = {
+    val generated = imported.flatMap(_.generatedSources).toSet
+
+    sourceFiles.filter(path => path.toString.endsWith(".scala") && !generated(path)).sorted
+  }
+
+  /**
+   * Collects the problems of the host's selected inspections in one source, as the IDE's Inspect Code does.
+   *
+   * This may run concurrently with session operations and waits for import application. It reads the source's current
+   * buffer, saved or not, and runs no annotator or compiler: see `problems` for the live diagnostics.
+   *
+   * @param path registered project-source path
+   * @return the inspection problems; empty for a source that is not Scala, or that an import removed meanwhile
+   */
+  def inspect(path: Path): Seq[FileProblem] = {
+    val readLock = importSnapshotLock.readLock()
+    readLock.lock()
+    try {
+      ensureUsable()
+      if (files.containsKey(path)) language.inspect(path) else Seq.empty
+    } finally readLock.unlock()
+  }
+
   /** Finds a source's owning module compile settings while the caller holds the import guard. */
   private def moduleSpec(file: PsiFile): Option[CompileSpec] =
     host.modules.ofFile(file.getViewProvider.getVirtualFile).flatMap(m => compileSpecs.get(m.spec.stableId))

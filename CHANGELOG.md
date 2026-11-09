@@ -12,6 +12,11 @@
   counts; given a `target` identity, it compiles only that target and counts the problems of that target and its
   dependencies. An unknown target fails with `InvalidParams`.
 - `scalaAnalyzer/reimport` reloads the build server's workspace and imports the build again on request.
+- `scalaAnalyzer/inspect` runs the selected native inspections over every Scala source of the build, as the IDE's Inspect
+  Code does, and answers the number of sources inspected and the problems of those that have some. It reads the
+  sources' current buffers, skips generated sources (as the build reports them) and Java sources, publishes nothing,
+  is shown as progress and stops when the client cancels it. The VS Code extension adds **Inspect Code** and
+  **Clear Inspection Results**; it lists the problems of the files that the live diagnostics do not already show.
 - `scalaAnalyzer/typeInfo` answers what the IDE's Type Info action shows for a caret or a selected expression.
 - `scalaAnalyzer.completeInsertion` with missing or non-numeric arguments now fails with `InvalidParams`.
 - Semantic tokens that start at the same position keep the last one, whatever its length, in a defined order.

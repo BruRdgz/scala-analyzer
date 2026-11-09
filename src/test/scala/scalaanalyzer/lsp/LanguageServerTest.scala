@@ -19,6 +19,7 @@ import java.util.concurrent.{CompletableFuture, CountDownLatch, ExecutionExcepti
 
 import scala.concurrent.duration.*
 import scala.jdk.CollectionConverters.*
+import scala.util.Using
 
 /**
  * The language server end to end: a client and the server connected through JSON-RPC streams, on the BSP fixture
@@ -1670,6 +1671,88 @@ class LanguageServerTest extends munit.FunSuite {
     Client.states.clear()
     server.reimport().get(5, TimeUnit.MINUTES)
     assertEquals(statesUntil(Client, "ready"), Seq("importing", "ready"))
+  }
+
+  /** The start lines of one code's inspection problems in one source of a report, in line order. */
+  private def inspected(report: HostProtocol.InspectReport, path: Path, code: String): Seq[Int] = report.files.asScala
+    .filter(_.getUri == path.toUri.toString)
+    .flatMap(_.getDiagnostics.asScala)
+    .filter(_.getCode.getLeft == code)
+    .map(_.getRange.getStart.getLine)
+    .sorted
+    .toSeq
+
+  test("inspects every Scala source of the build, listing the problems of those that have some") {
+    val report = server.inspect().get(5, TimeUnit.MINUTES)
+    // Counter.scala imports `mutable` (line 2) and `Try` (line 3) without using them.
+    assertEquals(inspected(report, counter, "ScalaUnusedImport"), Seq(2, 3))
+    assert(!report.files.asScala.exists(_.getUri == greeting.toUri.toString), "Greeting.scala has no problems")
+    assert(report.files.asScala.forall(file => !file.getDiagnostics.isEmpty && file.getVersion == null), report.files)
+    // Java sources are not inspected.
+    val scalaSources = Seq("app", "core", "core3").flatMap { module =>
+      Using.resource(Files.walk(fixture.resolve(module).resolve("src")))(_.iterator().asScala.toVector)
+    }.filter(_.toString.endsWith(".scala"))
+    assertEquals(report.filesInspected, scalaSources.size)
+  }
+
+  test("an inspection publishes nothing: the client decides how to show its problems") {
+    // Diagnostics are published in the order they were scheduled: once Greeting's arrive, the earlier ones have.
+    def publishedUntilGreeting(version: Int): Set[String] = {
+      server.getTextDocumentService.didOpen(new DidOpenTextDocumentParams(
+        new TextDocumentItem(greeting.toUri.toString, "scala", version, Files.readString(greeting))))
+      val uris = Set.newBuilder[String]
+      var arrived = false
+      while (!arrived) {
+        val next = Option(Client.published.poll(30, TimeUnit.SECONDS)).getOrElse(fail(s"no diagnostics for Greeting.scala $version"))
+        uris += next.getUri
+        arrived = next.getUri == greeting.toUri.toString && next.getVersion == version
+      }
+      uris.result()
+    }
+    publishedUntilGreeting(60)
+    val report = server.inspect().get(5, TimeUnit.MINUTES)
+    val withProblems = report.files.asScala.map(_.getUri).toSet
+    assert(withProblems.contains(counter.toUri.toString), withProblems)
+    assertEquals(publishedUntilGreeting(61).intersect(withProblems), Set.empty[String])
+  }
+
+  test("inspects the editor's unsaved text, and the file again once it is closed") {
+    val service = server.getTextDocumentService
+    val unused = Files.readString(shape).replace("package core\n", "package core\n\nimport scala.util.Try\n")
+    // A request on a document waits for the notifications sent before it; an inspection does not.
+    def settled(): Unit = service.documentSymbol(new DocumentSymbolParams(document(shape))).get(1, TimeUnit.MINUTES)
+    def unusedImports() = inspected(server.inspect().get(5, TimeUnit.MINUTES), shape, "ScalaUnusedImport")
+
+    assertEquals(unusedImports(), Seq.empty[Int])
+    service.didOpen(new DidOpenTextDocumentParams(new TextDocumentItem(shape.toUri.toString, "scala", 1, unused)))
+    settled()
+    assertEquals(unusedImports(), Seq(2))
+    service.didClose(new DidCloseTextDocumentParams(document(shape)))
+    settled()
+    assertEquals(unusedImports(), Seq.empty[Int])
+  }
+
+  test("a cancelled inspection answers cancellation and leaves the builds thread free") {
+    val holding = new CountDownLatch(1)
+    val release = new CountDownLatch(1)
+    val edit = Executors.newSingleThreadExecutor()
+    val loggedErrors = HostLog.count(HostLog.Level.Error)
+    try {
+      // An edit in progress holds the inspection at its first source, as a long run would be held.
+      edit.execute { () =>
+        HostLock.write {
+          holding.countDown()
+          release.await(1, TimeUnit.MINUTES)
+        }
+      }
+      assert(holding.await(30, TimeUnit.SECONDS), "the edit did not start")
+      server.inspect().cancel(true)
+    } finally {
+      release.countDown()
+      edit.shutdown()
+    }
+    assert(server.compile(null).get(5, TimeUnit.MINUTES).succeeded)
+    assertEquals(HostLog.count(HostLog.Level.Error), loggedErrors)
   }
 
   test("a client that does not apply the server's edits gets suggestions without commands") {

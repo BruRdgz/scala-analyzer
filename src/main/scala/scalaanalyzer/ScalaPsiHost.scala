@@ -643,6 +643,17 @@ final class ScalaPsiHost private[scalaanalyzer] (
       CachedValueProvider.Result.create(collectDiagnostics(file), PsiModificationTracker.MODIFICATION_COUNT), false)
   }
 
+  /**
+   * Collects only the host's selected native inspections, as the IDE's Inspect Code runs them.
+   *
+   * Syntax errors and annotator problems are left out, and nothing is cached: a project-wide run inspects each file
+   * once. The rules of [[diagnostics]] for inspections apply.
+   *
+   * @param file Scala source to inspect under cancellable read access
+   * @return the inspection problems and their plugin fixes with UTF-16 source ranges
+   */
+  def inspect(file: ScalaFile): Seq[Diagnostic] = HostLock.query(inspections.diagnostics(file))
+
   /** Runs the syntax check, the annotator and the inspections over the whole file. */
   private def collectDiagnostics(file: ScalaFile): Seq[Diagnostic] =
     syntaxErrors(file) ++ annotatorProblems(file, SyntaxTraverser.psiTraverser(file)) ++ inspections.diagnostics(file)

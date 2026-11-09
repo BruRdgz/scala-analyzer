@@ -98,6 +98,11 @@
           "command": "scalaAnalyzer.reimport",
           "when": "view == scalaAnalyzer.buildTargets",
           "group": "navigation"
+        },
+        {
+          "command": "scalaAnalyzer.inspect",
+          "when": "view == scalaAnalyzer.buildTargets",
+          "group": "navigation"
         }
       ],
       "view/item/context": [
@@ -143,6 +148,17 @@
         "icon": "$(sync)"
       },
       {
+        "command": "scalaAnalyzer.inspect",
+        "title": "Inspect Code",
+        "category": "scala-analyzer",
+        "icon": "$(search)"
+      },
+      {
+        "command": "scalaAnalyzer.clearInspection",
+        "title": "Clear Inspection Results",
+        "category": "scala-analyzer"
+      },
+      {
         "command": "scalaAnalyzer.restart",
         "title": "Restart Server",
         "category": "scala-analyzer"
@@ -173,7 +189,7 @@
     "@vscode/vsce": "4.1.0"
   },
   "scripts": {
-    "check": "node --check extension.js && node --check buildTargets.js",
+    "check": "node --check extension.js && node --check buildTargets.js && node --check inspect.js",
     "package": "vsce package",
     "test:installed": "node test/run.js"
   },
