@@ -171,6 +171,7 @@ Project.service com.intellij.codeInsight.ExternalAnnotationsManager
 Project.service com.intellij.codeInsight.InferredAnnotationsManager
 Project.service com.intellij.codeInsight.JavaProjectCodeInsightSettings
 Project.service com.intellij.codeInsight.daemon.impl.analysis.HighlightingLevelManager
+Project.service com.intellij.codeInspection.InspectionManager
 Project.service com.intellij.codeInspection.ex.EntryPointsManager
 Project.service com.intellij.ide.util.PropertiesComponent
 Project.service com.intellij.lang.injection.InjectedLanguageManager
