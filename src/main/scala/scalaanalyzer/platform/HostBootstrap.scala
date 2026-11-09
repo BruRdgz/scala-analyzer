@@ -10,7 +10,7 @@ import com.intellij.ide.highlighter.HtmlFileHighlighter
 import com.intellij.lang.documentation.{ClientDocumentationSettings, DocumentationSettings}
 import com.intellij.lang.html.HTMLLanguage
 import com.intellij.lang.java.JavaLanguage
-import com.intellij.psi.{PsiErrorElement, PsiFile}
+import com.intellij.psi.{PsiErrorElement, PsiFile, PsiParserFacade}
 import com.intellij.psi.codeStyle.FileIndentOptionsProvider
 import com.intellij.psi.impl.source.tree.TreeCopyHandler
 import com.intellij.lang.{DefaultASTFactory, DefaultASTFactoryImpl, Language, LanguageASTFactory, LanguageCommenters, LanguageExtensionPoint, LanguageParserDefinitions, ParserDefinition, PsiBuilderFactory}
@@ -63,7 +63,7 @@ import com.intellij.codeInsight.highlighting.HighlightErrorFilter
 import com.intellij.codeInsight.multiverse.{CodeInsightContextManager, CodeInsightContexts, MultiverseEnabler}
 import com.intellij.codeInsight.navigation.{ClassImplementationsSearch, MethodImplementationsSearch}
 import com.intellij.codeInsight.runner.JavaMainMethodProvider
-import com.intellij.codeInspection.SuppressManager
+import com.intellij.codeInspection.{GlobalInspectionContext, InspectionManager, InspectionManagerBase, SuppressManager}
 import com.intellij.codeInspection.ex.{EntryPointsManager, EntryPointsManagerBase}
 import com.intellij.concurrency.JobLauncher
 import com.intellij.core.{CoreJavaFileCodeStyleFacade, CoreJobLauncher, CorePsiPackageImplementationHelper}
@@ -162,7 +162,8 @@ import com.intellij.psi.controlFlow.ControlFlowFactory
 import com.intellij.psi.impl.{
   DocumentCommitProcessor, JavaClassSupersImpl, JavaPsiFacadeImpl, JavaPsiImplementationHelper,
   JvmPsiConversionHelperImpl, PsiCachedValuesFactory, PsiElementFactoryImpl, PsiFileFactoryImpl,
-  PsiJavaModuleModificationTracker, PsiModificationTrackerImpl, PsiNameHelperImpl, PsiSubstitutorFactoryImpl,
+  PsiJavaModuleModificationTracker, PsiModificationTrackerImpl, PsiNameHelperImpl, PsiParserFacadeImpl,
+  PsiSubstitutorFactoryImpl,
   ResolveScopeManager
 }
 import com.intellij.psi.impl.cache.impl.id.IdIndexers
@@ -1084,6 +1085,13 @@ private[scalaanalyzer] object HostBootstrap {
           case ("getCurrentSnapshot", _) => ImmutableEntityStorage.Companion.empty()
         })
       projectServices.register(classOf[GuessManager])(new GuessManagerImpl(project))
+      // Problem descriptors for the local inspections and their suppress actions; the host has no global inspection run.
+      projectServices.register(classOf[InspectionManager])(new InspectionManagerBase(project) {
+        override def createNewGlobalContext(): GlobalInspectionContext = CallLog.unsupported("InspectionManager.globalContext")
+        override def createNewGlobalContext(reuse: Boolean): GlobalInspectionContext = createNewGlobalContext()
+      })
+      // Comments and whitespace built from text, as the suppress actions write `//noinspection`.
+      projectServices.register(classOf[PsiParserFacade])(new PsiParserFacadeImpl(project))
       projectServices.register(classOf[ControlFlowFactory]) {
         val factory = new ControlFlowFactory(project)
         Disposer.register(root, factory)

@@ -1,6 +1,7 @@
 package scalaanalyzer.language
 
 import com.intellij.codeInsight.daemon.HighlightDisplayKey
+import com.intellij.codeInsight.daemon.impl.actions.AbstractBatchSuppressByNoInspectionCommentFix
 import com.intellij.codeInsight.intention.IntentionAction
 import com.intellij.codeInsight.intention.preview.IntentionPreviewInfo
 import com.intellij.codeInspection.*
@@ -8,7 +9,8 @@ import com.intellij.codeInspection.ex.QuickFixWrapper
 import com.intellij.lang.annotation.HighlightSeverity
 import com.intellij.modcommand.ModCommandService
 import com.intellij.openapi.progress.ProgressManager
-import com.intellij.psi.{PsiAnnotationOwner, SyntaxTraverser}
+import com.intellij.openapi.project.Project
+import com.intellij.psi.{PsiAnnotationOwner, PsiElement, PsiFile, SyntaxTraverser}
 import com.intellij.psi.search.LocalSearchScope
 import com.intellij.psi.search.searches.ReferencesSearch
 import com.intellij.psi.util.PsiTreeUtil
@@ -25,7 +27,7 @@ import org.jetbrains.plugins.scala.lang.psi.api.toplevel.imports.{ScImportExpr, 
 import org.jetbrains.plugins.scala.lang.psi.api.toplevel.typedef.ScMember
 
 import scalaanalyzer.Diagnostic
-import scalaanalyzer.platform.{CallLog, ExtensionBean}
+import scalaanalyzer.platform.ExtensionBean
 
 import java.util.{Locale, ResourceBundle}
 
@@ -41,7 +43,8 @@ private[language] object Inspections {
    *
    * Rebuilds the unused-declaration removal and the redundant-cast removal on copied PSI and applies them there;
    * parameter/type deletion, which invokes Safe Delete, is excluded. A fix known to mutate its captured original
-   * expression instead of the copy is answered with an empty preview. Any other fix is left to the caller.
+   * expression instead of the copy is answered with an empty preview. A suppression writes its comment into the copy.
+   * Any other fix is left to the caller.
    *
    * @param action quick fix, or the intention wrapping one, to preview
    * @param copy preview copy that the rebuilt fix mutates
@@ -62,8 +65,16 @@ private[language] object Inspections {
       "org.jetbrains.plugins.scala.codeInspection.controlFlow.ScalaUnusedExpressionInspection$AddReturnQuickFix")
 
     if (capturesOriginal) Some(IntentionPreviewInfo.EMPTY)
-    else if (!removal && !cast) None
     else fix match {
+      case suppression: Suppression => Some(suppression.applyTo(copy))
+      case _ if !removal && !cast => None
+      case _ => Some(rebuiltPreview(fix, copy, removal, cast))
+    }
+  }
+
+  /** Applies the unused-declaration or redundant-cast removal, rebuilt on the copy's PSI. */
+  private def rebuiltPreview(fix: LocalQuickFix, copy: ScalaFile, removal: Boolean, cast: Boolean): IntentionPreviewInfo =
+    fix match {
       case anchored: LocalQuickFixOnPsiElement =>
         val target = PsiTreeUtil.findSameElementInCopy(anchored.getStartElement, copy)
         val candidates: Seq[LocalQuickFixOnPsiElement] = target match {
@@ -81,10 +92,31 @@ private[language] object Inspections {
         candidates.filter(_.getText == anchored.getText) match {
           case Seq(rebuilt) =>
             rebuilt.applyFix()
-            Some(IntentionPreviewInfo.DIFF)
-          case _ => Some(IntentionPreviewInfo.EMPTY)
+            IntentionPreviewInfo.DIFF
+          case _ => IntentionPreviewInfo.EMPTY
         }
-      case _ => Some(IntentionPreviewInfo.EMPTY)
+      case _ => IntentionPreviewInfo.EMPTY
+    }
+
+  /**
+   * One of the plugin's `//noinspection` suppressions, anchored at its problem's element.
+   *
+   * The platform gives suppressions no preview, and the wrapper the IDE offers them through builds a problem
+   * descriptor that a copy's element cannot anchor; the anchor lets the preview find that element in the copy.
+   *
+   * @param element the problem's element in the inspected file
+   * @param fix the plugin's suppression for the problem's inspection
+   */
+  private[language] final class Suppression(element: PsiElement, fix: AbstractBatchSuppressByNoInspectionCommentFix)
+      extends LocalQuickFixOnPsiElement(element) {
+    override def getText: String = fix.getText
+    override def getFamilyName: String = fix.getFamilyName
+    override def invoke(project: Project, file: PsiFile, start: PsiElement, end: PsiElement): Unit = fix.invoke(project, start)
+
+    /** Writes the suppression into the copy, at the problem's element there. */
+    def applyTo(copy: ScalaFile): IntentionPreviewInfo = {
+      fix.invoke(copy.getProject, PsiTreeUtil.findSameElementInCopy(getStartElement, copy))
+      IntentionPreviewInfo.DIFF
     }
   }
 }
@@ -162,10 +194,7 @@ final class Inspections(descriptors: Seq[ExtensionBean]) {
 
   /** Runs complete visitor lifecycles and preserves the plugin's problem ranges and messages. */
   private def collect(file: ScalaFile): Seq[Diagnostic] = {
-    val manager = new InspectionManagerBase(file.getProject) {
-      override def createNewGlobalContext(): GlobalInspectionContext = CallLog.unsupported("InspectionManager.globalContext")
-      override def createNewGlobalContext(reuse: Boolean): GlobalInspectionContext = createNewGlobalContext()
-    }
+    val manager = InspectionManager.getInstance(file.getProject)
     val elements = SyntaxTraverser.psiTraverser(file).asScala.toVector
     tools.flatMap { bean =>
       // `tools` holds only local inspection registrations, whose implementation classes are LocalInspectionTool.
@@ -258,10 +287,10 @@ final class Inspections(descriptors: Seq[ExtensionBean]) {
         range -> action
       }
       // The IDE offers these beside the problem's fixes; the host previews them like any other fix.
-      val suppressions = SuppressIntentionActionFromFix
-        .convertBatchToSuppressIntentionActions(suppressor.getSuppressActions(problem.getPsiElement, id))
-        .toSeq
-        .map(range -> _)
+      val suppressions = suppressor.getSuppressActions(problem.getPsiElement, id).toSeq.collect {
+        case fix: AbstractBatchSuppressByNoInspectionCommentFix =>
+          range -> QuickFixWrapper.wrap(problem, new Inspections.Suppression(problem.getPsiElement, fix))
+      }
       Diagnostic(severity, range, ProblemDescriptorUtil.renderDescriptionMessage(problem, problem.getPsiElement),
         fixes ++ suppressions, Some(id), deprecated = id == "ScalaDeprecation", unnecessary = unnecessary)
     }

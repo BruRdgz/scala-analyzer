@@ -3,7 +3,6 @@ package scalaanalyzer.language
 import com.intellij.codeInsight.intention.IntentionAction
 import com.intellij.codeInsight.intention.preview.{IntentionPreviewInfo, IntentionPreviewUtils}
 import com.intellij.codeInsight.unwrap.UnwrapDescriptor
-import com.intellij.codeInspection.SuppressIntentionAction
 import com.intellij.lang.surroundWith.SurroundDescriptor
 import com.intellij.modcommand.{ActionContext, ModCommandAction, ModCommandExecutor}
 import com.intellij.openapi.editor.Editor
@@ -125,16 +124,11 @@ final class CodeActions(intentionClasses: Seq[String], descriptorClasses: Seq[St
                 new ScalaImportOptimizer().processFile(copy).run()
                 IntentionPreviewInfo.DIFF
               } else Inspections.previewFix(action, copy).getOrElse {
-                action match {
-                  // The platform gives these no preview of their own: they write a comment through `invoke`.
-                  case suppression: SuppressIntentionAction =>
-                    suppression.invoke(project, previewEditor, copy)
-                    IntentionPreviewInfo.DIFF
-                  case _ if commandAction == null => action.generatePreview(project, previewEditor, copy)
-                  case _ =>
-                    val command = commandAction.perform(ActionContext.from(editor, file))
-                    ModCommandExecutor.getInstance.executeForFileCopy(command, copy)
-                    IntentionPreviewInfo.DIFF
+                if (commandAction == null) action.generatePreview(project, previewEditor, copy)
+                else {
+                  val command = commandAction.perform(ActionContext.from(editor, file))
+                  ModCommandExecutor.getInstance.executeForFileCopy(command, copy)
+                  IntentionPreviewInfo.DIFF
                 }
               }
             }
