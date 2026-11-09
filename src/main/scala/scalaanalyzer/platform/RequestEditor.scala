@@ -82,6 +82,13 @@ private[scalaanalyzer] final class RequestEditor(
     removeSelection()
   }
 
+  /** Moves the caret by `columns` characters, stopping at the ends of its line, and collapses its selection. */
+  private def moveWithinLine(columns: Int): Unit = {
+    val line = document.getLineNumber(caretOffset)
+
+    moveCaret((caretOffset + columns).max(document.getLineStartOffset(line)).min(document.getLineEndOffset(line)))
+  }
+
   /** Collapses both selection bounds to the current caret. */
   private def removeSelection(): Unit = {
     selectionStart = caretOffset
@@ -155,6 +162,12 @@ private[scalaanalyzer] final class RequestEditor(
     case ("getAllCarets", _) => java.util.List.of(caret)
     case ("moveToOffset", Array(at: Integer)) =>
       moveCaret(at.intValue)
+      null
+    // Intentions move the caret along the line they edited; a move across lines or extending a selection would need
+    // the IDE's visual columns, which the request editor does not have.
+    case ("moveCaretRelatively", Array(columns: Integer, lines: Integer, withSelection: java.lang.Boolean, _, _))
+        if lines.intValue == 0 && !withSelection.booleanValue =>
+      moveWithinLine(columns.intValue)
       null
   }
 

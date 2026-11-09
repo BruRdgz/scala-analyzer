@@ -575,6 +575,9 @@ class EditingTest extends munit.FunSuite {
         "object Action { val a = 1; val b = 2; val x = !(a != b)\n}"),
       ("object wrapper { val string: String = ???; val value: Int = <caret>string }", "Change type 'Int' to 'String'",
         "object wrapper { val string: String = ???; val value: String = string }"),
+      // Its preview moves the caret along the line after inserting the gap.
+      ("object Gap { val s = \"ab<caret>cd\" }", "Insert gap with concatenation",
+        "object Gap { val s = \"ab\" +  + \"cd\" }"),
     )
     TestHost.libraryReport
     for ((marked, title, expected) <- cases) {
