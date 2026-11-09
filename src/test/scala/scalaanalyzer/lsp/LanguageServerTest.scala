@@ -639,6 +639,29 @@ class LanguageServerTest extends munit.FunSuite {
     assertEquals(locations.map(l => (l.getUri, l.getRange.getStart)), Seq((counter.toUri.toString, new Position(8, 6))))
   }
 
+  // `Greeting("world")` (line 6 of Main.scala, columns 31-39 once the earlier test has changed the line, 34-42 before)
+  // is a case class's synthetic `apply`, which leads to the case class on line 2 of Greeting.scala; `object Counter`
+  // (line 19) and `class Counter` (line 8) lead to each other, to the keyword that starts the companion.
+  test("goes to the plugin's targets of synthetic members and companions") {
+    def definition(path: Path, position: Position) = server.getTextDocumentService
+      .definition(new DefinitionParams(document(path), position)).get(1, TimeUnit.MINUTES).getLeft.asScala.toSeq
+      .map(l => (l.getUri, l.getRange.getStart))
+    assertEquals(definition(main, new Position(6, 36)), Seq((greeting.toUri.toString, new Position(2, 17))))
+    assertEquals(definition(counter, new Position(19, 2)), Seq((counter.toUri.toString, new Position(8, 0))))
+    assertEquals(definition(counter, new Position(8, 2)), Seq((counter.toUri.toString, new Position(19, 0))))
+  }
+
+  // `area` of Square (line 7, column 7) implements Shape's (line 3); Square (line 6, column 14) extends Shape (line
+  // 2); Shape's own `area` and the trait itself have no super.
+  test("finds the supers of a member and of a class") {
+    def supers(position: Position) = server.superElements(new TextDocumentPositionParams(document(shape), position))
+      .get(1, TimeUnit.MINUTES).asScala.toSeq.map(l => (l.getUri, l.getRange.getStart))
+    assertEquals(supers(new Position(7, 7)), Seq((shape.toUri.toString, new Position(3, 6))))
+    assertEquals(supers(new Position(6, 14)), Seq((shape.toUri.toString, new Position(2, 6))))
+    assertEquals(supers(new Position(3, 7)), Seq.empty)
+    assertEquals(supers(new Position(2, 8)), Seq.empty)
+  }
+
   // A one-line range of a file, as (URI, range); found and expected ranges compare in file and line order.
   private def span(path: Path, line: Int, startColumn: Int, endColumn: Int) =
     (path.toUri.toString, new Range(new Position(line, startColumn), new Position(line, endColumn)))

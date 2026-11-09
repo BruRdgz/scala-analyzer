@@ -18,7 +18,7 @@ import com.intellij.psi.{
 }
 import com.intellij.psi.search.GlobalSearchScope
 import com.intellij.psi.util.{PsiTreeUtil, PsiTypesUtil}
-import org.jetbrains.plugins.scala.annotator.gutter.ScalaGotoTypeDeclarationProvider
+import org.jetbrains.plugins.scala.annotator.gutter.{ScalaGoToDeclarationHandler, ScalaGotoTypeDeclarationProvider}
 import org.jetbrains.plugins.scala.editor.documentationProvider.{ScalaDocQuickInfoGenerator, ScalaDocumentationProvider}
 import org.jetbrains.plugins.scala.extensions.PsiNamedElementExt
 import org.jetbrains.plugins.scala.highlighter.DefaultHighlighter as H
@@ -39,12 +39,13 @@ import org.jetbrains.plugins.scala.structureView.element.Element
 
 import scalaanalyzer.{Diagnostic, LineColumn, LineRange, ScalaPsiHost}
 import scalaanalyzer.build.{CompileSpec, CompilerDiagnostic, DocumentCompiler, ScalafmtFormatting}
-import scalaanalyzer.platform.{HostLog, LibraryFile, SourceFile}
+import scalaanalyzer.platform.{HostLog, LibraryFile, RequestEditor, SourceFile}
 
 import java.nio.file.{Files, Path}
 import java.util.List as JavaList
 
 import scala.jdk.CollectionConverters.*
+import scala.util.Using
 import scala.util.control.NonFatal
 
 /**
@@ -468,24 +469,62 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
   }
 
   /**
-   * Locates the declaration referenced at a position.
+   * Locates the declarations referenced at a position.
    *
-   * A library declaration is located in its attached source or decompiled text, materialized as a read-only file
-   * under the host's state directory.
+   * A Scala source asks the plugin's Go to Declaration, which also covers synthetic members (a case class's `apply`
+   * leads to the case class), companions, `end` markers, `given` imports and package objects; when it has no target,
+   * and for a Java source, the reference at the position is resolved directly. A library declaration is located in
+   * its attached source or decompiled text, materialized as a read-only file under the host's state directory.
    *
    * @param path registered project-source path
    * @param at reference position
-   * @return the declaration's file and the position of its name; `None` when nothing resolves there or the
-   *         declaration is in neither a project source nor a library file
+   * @return each declaration's file and the position of its name, distinct and ordered by file and position; empty
+   *         when nothing resolves there or the declarations are in neither a project source nor a library file
    */
-  def definition(path: Path, at: LineColumn): Option[(Path, LineColumn)] = host.read {
+  def definition(path: Path, at: LineColumn): Seq[(Path, LineColumn)] = host.read {
     val sourceFile = file(path)
+    val atOffset = offset(document(sourceFile), at)
+    val pluginTargets = sourceFile match {
+      case scalaFile: ScalaFile => declarationTargets(scalaFile, atOffset)
+      case _ => Seq.empty
+    }
+    val targets =
+      if (pluginTargets.nonEmpty) pluginTargets
+      else Option(sourceFile.findReferenceAt(atOffset)).flatMap(reference => Option(reference.resolve())).toSeq
 
-    for {
-      reference <- Option(sourceFile.findReferenceAt(offset(document(sourceFile), at)))
-      target <- Option(reference.resolve())
-      location <- sourceLocation(target)
-    } yield location.path -> location.position
+    locationsOf(targets)
+  }
+
+  /** The targets of the plugin's Go to Declaration at an offset; empty when it has none there. */
+  private def declarationTargets(file: ScalaFile, at: Int): Seq[PsiElement] =
+    Using.resource(new RequestEditor(document(file), host.project, at)) { request =>
+      // The handler is given the editor, but only the file and the offset decide its targets.
+      val handler = new ScalaGoToDeclarationHandler
+      val targets = handler.getGotoDeclarationTargets(file.findElementAt(at), at, request.editor)
+
+      Option(targets).map(_.toSeq).getOrElse(Seq.empty)
+    }
+
+  /** The distinct locations of declarations, ordered by file and position so that the result does not vary. */
+  private def locationsOf(declarations: Seq[PsiElement]): Seq[(Path, LineColumn)] =
+    declarations.flatMap(sourceLocation).distinct
+      .sortBy(location => (location.path.toString, location.position.line, location.position.column))
+      .map(location => location.path -> location.position)
+
+  /**
+   * Locates what the plugin's Go to Super navigates to from a position: the superclasses of the type around it, or
+   * the members that the member around it overrides or implements. Only Scala files have it.
+   *
+   * Library declarations are located as `definition` locates them.
+   *
+   * @param path registered project-source path
+   * @param at caret position
+   * @return the declaration locations, distinct and ordered by file and position; empty when there is no super, and
+   *         for a file that is not Scala
+   */
+  def superElements(path: Path, at: LineColumn): Seq[(Path, LineColumn)] = file(path) match {
+    case sourceFile: ScalaFile => host.read(locationsOf(SuperElements.at(sourceFile, offset(document(sourceFile), at))))
+    case _ => Seq.empty
   }
 
   /**

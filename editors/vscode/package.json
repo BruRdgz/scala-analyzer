@@ -86,6 +86,11 @@
           "command": "scalaAnalyzer.typeInfo",
           "when": "editorLangId == scala",
           "group": "navigation"
+        },
+        {
+          "command": "scalaAnalyzer.goToSuper",
+          "when": "editorLangId == scala",
+          "group": "navigation"
         }
       ],
       "view/title": [
@@ -115,6 +120,10 @@
       "commandPalette": [
         {
           "command": "scalaAnalyzer.typeInfo",
+          "when": "editorLangId == scala"
+        },
+        {
+          "command": "scalaAnalyzer.goToSuper",
           "when": "editorLangId == scala"
         },
         {
@@ -166,6 +175,11 @@
       {
         "command": "scalaAnalyzer.typeInfo",
         "title": "Show Type Info",
+        "category": "scala-analyzer"
+      },
+      {
+        "command": "scalaAnalyzer.goToSuper",
+        "title": "Go to Super",
         "category": "scala-analyzer"
       },
       {

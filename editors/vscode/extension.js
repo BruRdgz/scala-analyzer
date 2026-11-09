@@ -4,7 +4,7 @@
 //
 // The server logs to its output channel (and to a log file), reports opening the project as progress, and its state
 // as `scalaAnalyzer/state` notifications, shown in the status bar; `scalaAnalyzer/status` answers what it is doing.
-// The status bar menu and the commands call the server's requests (compile, reimport, inspect, type info) and show the result;
+// The status bar menu and the commands call the server's requests (compile, reimport, inspect, type info, go to super) and show the result;
 // compiling is also the workspace build task (Ctrl+Shift+B). The Scala Build view lists the build's targets (buildTargets.js);
 // Inspect Code lists the inspections' problems of the whole project (inspect.js).
 const vscode = require('vscode');
@@ -81,6 +81,32 @@ async function showTypeInfo() {
   return text;
 }
 
+// Peeks the declarations that the caret's type or member extends, overrides or implements, as IntelliJ's Go to Super
+// (Ctrl+U) lists them; a single one is opened directly.
+async function goToSuper() {
+  const editor = vscode.window.activeTextEditor;
+  if (!editor) return;
+
+  const position = editor.selection.active;
+  let supers;
+  try {
+    supers = await client.sendRequest('scalaAnalyzer/superElements', {
+      textDocument: client.code2ProtocolConverter.asTextDocumentIdentifier(editor.document),
+      position: client.code2ProtocolConverter.asPosition(position),
+    });
+  } catch (error) {
+    vscode.window.showErrorMessage(`scala-analyzer: go to super failed: ${error.message}`);
+    return;
+  }
+
+  if (supers.length === 0) {
+    vscode.window.setStatusBarMessage('$(info) No super declaration here', statusMessageMs);
+    return;
+  }
+  const targets = supers.map(target => client.protocol2CodeConverter.asLocation(target));
+  await vscode.commands.executeCommand('editor.action.goToLocations', editor.document.uri, position, targets, 'gotoAndPeek');
+}
+
 function registerTypeHint(context) {
   typeHint = vscode.window.createTextEditorDecorationType({
     after: { margin: '0 0 0 2em', color: new vscode.ThemeColor('editorCodeLens.foreground'), fontStyle: 'italic' },
@@ -139,6 +165,7 @@ function registerCommands(context) {
   register('clearInspection', inspection.clear);
   register('restart', () => client.restart());
   register('typeInfo', needsServer(showTypeInfo));
+  register('goToSuper', needsServer(goToSuper));
   register('showStatus', needsServer(async () => {
     const report = await client.sendRequest('scalaAnalyzer/status');
     client.outputChannel.appendLine(`status: ${JSON.stringify(report, null, 2)}`);

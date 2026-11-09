@@ -353,16 +353,29 @@ final class ProjectSession private (
   def typeInfo(path: Path, range: LineRange): Option[String] = language.typeInfo(path, range)
 
   /**
-   * Locates the declaration referenced at a source position.
+   * Locates the declarations referenced at a source position.
    *
    * Library targets are materialized as read-only source or decompiled files under the host's state directory.
    *
    * @param path registered project-source path
    * @param at reference position in zero-based lines and UTF-16 columns
-   * @return the declaration's file and the position of its name; `None` when nothing resolves there or the
-   *         declaration is in neither a project source nor a library file
+   * @return each declaration's file and the position of its name, distinct and ordered by file and position; empty
+   *         when nothing resolves there or the declarations are in neither a project source nor a library file
    */
-  def definition(path: Path, at: LineColumn): Option[(Path, LineColumn)] = language.definition(path, at)
+  def definition(path: Path, at: LineColumn): Seq[(Path, LineColumn)] = language.definition(path, at)
+
+  /**
+   * Locates what the IDE's Go to Super navigates to from a source position.
+   *
+   * Library targets are located as in `definition`.
+   *
+   * @param path registered project-source path
+   * @param at caret position in zero-based lines and UTF-16 columns
+   * @return the superclasses of the type around the position or the members that the member around it overrides or
+   *         implements, distinct and ordered by file and position; empty when there is none, and for a source that is
+   *         not Scala
+   */
+  def superElements(path: Path, at: LineColumn): Seq[(Path, LineColumn)] = language.superElements(path, at)
 
   /**
    * Locates the type declarations associated with a symbol.

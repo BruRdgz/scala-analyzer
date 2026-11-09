@@ -644,6 +644,23 @@ final class ScalaLanguageServer(
     }
 
   /**
+   * Locates what the IDE's Go to Super navigates to from a caret: the superclasses of the type around it, or the
+   * members that the member around it overrides or implements.
+   *
+   * Runs on a read thread.
+   *
+   * @param params the document and the caret position
+   * @return the locations of the supers, each a zero-width range at the reported position; empty when there is none
+   *         or the document is not a project source
+   */
+  override def superElements(params: TextDocumentPositionParams): CompletableFuture[java.util.List[Location]] =
+    onRead("superElements", params.getTextDocument, java.util.List.of[Location]()) { (s, path) =>
+      s.superElements(path, lineColumn(params.getPosition)).map { (target, at) =>
+        new Location(target.toUri.toString, new Range(position(at), position(at)))
+      }.asJava
+    }
+
+  /**
    * Exposes text-document requests and notifications.
    *
    * @return the service backed by the ordered documents executor
@@ -1040,7 +1057,7 @@ final class ScalaLanguageServer(
     override def definition(params: DefinitionParams)
         : CompletableFuture[LspEither[java.util.List[? <: Location], java.util.List[? <: LocationLink]]] =
       onRead("definition", params.getTextDocument, locations(Seq.empty)) { (s, path) =>
-        locations(s.definition(path, lineColumn(params.getPosition)).toSeq)
+        locations(s.definition(path, lineColumn(params.getPosition)))
       }
 
     /**

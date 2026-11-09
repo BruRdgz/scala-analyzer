@@ -11,13 +11,16 @@ for Scala files and also handles Java files in that workspace.
 
 Click the **Scala** status bar item for a menu, or run the commands from the palette (category `scala-analyzer`):
 **Compile Build**, **Reimport Build**, **Inspect Code**, **Clear Inspection Results**, **Restart Server**,
-**Show Type Info**, **Show Status** and **Show Log File**.
+**Show Type Info**, **Go to Super**, **Show Status** and **Show Log File**.
 Compiling is also the workspace build task, so **Ctrl+Shift+B** runs it (or add
 `{ "type": "scala-analyzer", "task": "compile" }` to `tasks.json`). Its outcome shows briefly in the status bar; a
 failed compile opens the Problems panel with the diagnostics.
 **Show Type Info** shows the type of the selection or the expression at the cursor at the end of its line, until the
 next move or edit; it is in the editor context menu for Scala files. It has no default key (IntelliJ's Ctrl+Shift+P opens VS Code's command palette); bind one in
 `keybindings.json`: `{ "key": "<your key>", "command": "scalaAnalyzer.typeInfo", "when": "editorLangId == scala" }`.
+**Go to Super** opens the declaration that the type or member at the cursor extends, overrides or implements, and peeks
+all of them when there are several; it is in the editor context menu for Scala files. It has no default key (IntelliJ's
+Ctrl+U is taken in VS Code); bind one the same way, with the command `scalaAnalyzer.goToSuper`.
 
 **Inspect Code** runs the server's inspections over every Scala source of the build (not the generated ones) and lists
 their problems in the Problems panel, with a cancellable progress notification. The results are a snapshot: the next

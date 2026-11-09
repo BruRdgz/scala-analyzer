@@ -1,8 +1,10 @@
 package scalaanalyzer.lsp;
 
+import org.eclipse.lsp4j.Location;
 import org.eclipse.lsp4j.PublishDiagnosticsParams;
 import org.eclipse.lsp4j.Range;
 import org.eclipse.lsp4j.TextDocumentIdentifier;
+import org.eclipse.lsp4j.TextDocumentPositionParams;
 import org.eclipse.lsp4j.jsonrpc.services.JsonNotification;
 import org.eclipse.lsp4j.jsonrpc.services.JsonRequest;
 import org.eclipse.lsp4j.services.LanguageClient;
@@ -16,7 +18,8 @@ import java.util.concurrent.CompletableFuture;
  * Defines host-specific state notifications and requests alongside LSP.
  *
  * Clients may implement these extensions to display import state and diagnostics about the server itself, and to
- * list the build's targets, compile or import the build, inspect the project's code and ask for a type on request.
+ * list the build's targets, compile or import the build, inspect the project's code and ask for a type or for the
+ * supers of a declaration on request.
  */
 public final class HostProtocol {
   /** Prevents instantiation: this class only groups the protocol types. */
@@ -281,6 +284,17 @@ public final class HostProtocol {
      */
     @JsonRequest("scalaAnalyzer/typeInfo")
     CompletableFuture<String> typeInfo(TypeInfoParams params);
+
+    /**
+     * Locates what the IDE's Go to Super navigates to from a caret: the superclasses of the type around it, or the
+     * members that the member around it overrides or implements.
+     *
+     * @param params the document and the caret position
+     * @return a future containing the locations of the supers, each a zero-width range at the position of the
+     *         declaration's name; empty when there is none or the document is not a project source
+     */
+    @JsonRequest("scalaAnalyzer/superElements")
+    CompletableFuture<List<Location>> superElements(TextDocumentPositionParams params);
   }
 
   /** The server as a client calls it. */

@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Go to Definition asks the plugin's Go to Declaration for Scala sources, so it also covers case-class construction
+  calls (to the case class), companions, `end` markers, `given` imports, `this(...)` calls, for-comprehensions and
+  package objects, and answers several locations when the plugin finds several; other sources keep resolving the
+  reference directly.
+- `scalaAnalyzer/superElements` answers the locations that the IDE's Go to Super navigates to from a caret: the
+  superclasses of the type around it, or the members that the member around it overrides or implements. The VS Code
+  extension adds **Go to Super**, which opens the declaration or peeks several; it has no default key.
+
 ## 0.2.0 — 2026-11-09
 
 - Sources changed on disk while they are not open in the editor (a checkout, a formatter) take their new text, and a

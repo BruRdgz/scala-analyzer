@@ -34,7 +34,7 @@ It exposes editor features through the **Language Server Protocol (LSP)** and im
 | --- | --- |
 | Diagnostics | Scala plugin and compiler diagnostics; current-buffer compilation for Scala 3; selected native inspections, also over the whole project (Inspect Code). |
 | Completion | Automatic imports, insertion handlers, signature help and inlay hints. |
-| Navigation | Definitions, type definitions, references, implementations, call/type hierarchies and workspace symbols; library sources and decompiled classes. |
+| Navigation | Definitions (through the plugin's Go to Declaration), type definitions, references, implementations, go to super, call/type hierarchies and workspace symbols; library sources and decompiled classes. |
 | Documentation | Markdown hover with declaration context, parameters, return values and linked references. |
 | Editing | Rename, organize imports, previewable quick fixes, intentions and surround actions. |
 | Formatting | Whole-file scalafmt or IntelliJ formatting; range formatting through IntelliJ. |
@@ -163,8 +163,7 @@ is partial, indexes are kept in memory, and each process serves one workspace.
   inheritors can be missed. Rename can leave Java overrides unchanged. Call and type hierarchies list project
   callers and subtypes only; outgoing calls include overriding methods, as in the IDE, without call-site ranges.
   Java constructor callers can be missed.
-- Definition navigation can be absent on case-class construction calls; CI exercises ordinary source-member
-  navigation through the packaged server and installed extension.
+- CI exercises ordinary source-member navigation through the packaged server and installed extension.
 - Java binary short-name lookup is incomplete, and JDK symbols come
   from the JDK running the server.
 - Native inspections cover deprecation, selected redundancies, explicit unused imports and unannotated
