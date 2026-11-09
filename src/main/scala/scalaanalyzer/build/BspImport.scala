@@ -211,20 +211,51 @@ final class BuildConnection private[scalaanalyzer] (
    * Callers serialize BSP operations. The server must support `buildTarget/jvmTestEnvironment`, and must answer with
    * an environment for the target; otherwise `IllegalStateException` is thrown. The Java executable belongs to the
    * target's JDK, or to the host's running JVM when BSP omits it. An unknown target URI is rejected with
-   * `IllegalArgumentException`.
+   * `BspImport.UnknownTarget`.
    *
    * @param target BSP target URI of an imported Scala target
    * @return the server's environment item and the `bin/java` executable to run it with
    */
   def testEnvironment(target: String): TestRun.Environment = {
-    if (!Option(capabilities.getJvmTestEnvironmentProvider).exists(_.booleanValue))
-      throw new IllegalStateException("the build server does not support buildTarget/jvmTestEnvironment")
+    val supported = Option(capabilities.getJvmTestEnvironmentProvider).exists(_.booleanValue)
+
+    jvmEnvironment(target, "buildTarget/jvmTestEnvironment", supported) { id =>
+      await(server.jvmTestEnvironment(new JvmTestEnvironmentParams(java.util.List.of(id)))).getItems.asScala
+    }
+  }
+
+  /**
+   * Gets the run process environment and Java executable for one target, as `testEnvironment` does for tests.
+   *
+   * Callers serialize BSP operations. The server must support `buildTarget/jvmRunEnvironment`, and must answer with
+   * an environment for the target; otherwise `IllegalStateException` is thrown. An unknown target URI is rejected
+   * with `BspImport.UnknownTarget`.
+   *
+   * @param target BSP target URI of an imported Scala target
+   * @return the server's environment item and the `bin/java` executable to run it with
+   */
+  def runEnvironment(target: String): TestRun.Environment = {
+    val supported = Option(capabilities.getJvmRunEnvironmentProvider).exists(_.booleanValue)
+
+    jvmEnvironment(target, "buildTarget/jvmRunEnvironment", supported) { id =>
+      await(server.jvmRunEnvironment(new JvmRunEnvironmentParams(java.util.List.of(id)))).getItems.asScala
+    }
+  }
+
+  /**
+   * Requests a target's JVM environment with `request`, after checking that the server supports `method`.
+   *
+   * @param method name of the BSP request, for the failure message
+   * @param supported whether the server's capabilities include `method`
+   * @param request asks the server for the environments of one target
+   */
+  private def jvmEnvironment(target: String, method: String, supported: Boolean)(
+      request: BuildTargetIdentifier => Iterable[JvmEnvironmentItem]): TestRun.Environment = {
+    if (!supported) throw new IllegalStateException(s"the build server does not support $method")
 
     val found = scalaTarget(target)
-    val params = new JvmTestEnvironmentParams(java.util.List.of(found.getId))
-    val items = await(server.jvmTestEnvironment(params)).getItems.asScala
-    val environment = items.find(_.getTarget == found.getId)
-      .getOrElse(throw new IllegalStateException(s"build server sent no test JVM environment for $target"))
+    val environment = request(found.getId).find(_.getTarget == found.getId)
+      .getOrElse(throw new IllegalStateException(s"build server sent no JVM environment for $target"))
     // Same cast as in `modules`: `scalaTarget` only returns targets whose data kind is `scala`.
     val scala = gson.fromJson(found.getData.asInstanceOf[JsonElement], classOf[ScalaBuildTarget])
     // BSP may omit the target JDK. Use the host's running JVM deliberately, never an arbitrary java on PATH.

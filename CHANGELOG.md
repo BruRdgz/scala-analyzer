@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Code lenses run main classes (objects with a `main` method, `App` objects and Scala 3 `@main` methods) through the
+  new `scalaAnalyzer.runMain` command: it compiles the target, launches the class with BSP's run environment and logs
+  its output. A test run and a main run share the one active run; the VS Code extension shows a cancellable
+  notification while either runs.
 - `scalaAnalyzer/buildTargets` lists the build's targets with their identity, Scala version, dependencies, library jars
   and source file count.
 - `scalaAnalyzer/compile` compiles the build on request and answers whether it succeeded, with its error and warning

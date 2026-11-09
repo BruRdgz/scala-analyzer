@@ -7,7 +7,7 @@
 // The status bar menu and the commands call the server's requests (compile, reimport, type info) and show the result;
 // compiling is also the workspace build task (Ctrl+Shift+B). The Scala Build view lists the build's targets (buildTargets.js).
 const vscode = require('vscode');
-const { LanguageClient, State } = require('vscode-languageclient/node');
+const { ExecuteCommandRequest, LanguageClient, State } = require('vscode-languageclient/node');
 const { registerBuildTargets } = require('./buildTargets');
 
 /** @type {LanguageClient} */
@@ -105,6 +105,23 @@ async function compile() {
   await vscode.tasks.executeTask(task);
 }
 
+// The commands of the run lenses: the server ends the run when its request is cancelled.
+const runCommands = new Set(['scalaAnalyzer.runTest', 'scalaAnalyzer.runMain']);
+
+/**
+ * Sends a run command under a progress notification whose cancel button cancels the request, which the language client
+ * does not offer for commands. The other commands go the client's way.
+ * @type {NonNullable<import('vscode-languageclient/node').Middleware['executeCommand']>}
+ */
+function executeCommand(command, args, next) {
+  if (!runCommands.has(command)) return next(command, args);
+  const subject = args[0]?.mainClass ?? args[0]?.suite ?? command;
+  const options = { location: vscode.ProgressLocation.Notification, title: `scala-analyzer: running ${subject}`, cancellable: true };
+  return vscode.window.withProgress(options, (_progress, token) =>
+    client.sendRequest(ExecuteCommandRequest.type, { command, arguments: args }, token)
+      .then(undefined, error => client.handleFailedRequest(ExecuteCommandRequest.type, token, error, undefined)));
+}
+
 function registerCommands(context) {
   const register = (name, handler) => context.subscriptions.push(vscode.commands.registerCommand(`scalaAnalyzer.${name}`, handler));
   register('menu', async () => {
@@ -198,7 +215,10 @@ async function activate(context) {
     'scalaAnalyzer',
     'scala-analyzer',
     { command: serverPath, options: { env } },
-    { documentSelector: [{ scheme: 'file', language: 'scala' }, { scheme: 'file', language: 'java' }] },
+    {
+      documentSelector: [{ scheme: 'file', language: 'scala' }, { scheme: 'file', language: 'java' }],
+      middleware: { executeCommand },
+    },
   );
 
   await vscode.commands.executeCommand('setContext', 'scalaAnalyzer.active', true);

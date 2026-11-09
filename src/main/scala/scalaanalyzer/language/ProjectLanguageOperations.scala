@@ -7,6 +7,7 @@ import com.intellij.lang.folding.CustomFoldingBuilder
 import com.intellij.lang.java.JavaDocumentationProvider
 import com.intellij.openapi.editor.Document
 import com.intellij.openapi.editor.colors.TextAttributesKey
+import com.intellij.openapi.module.Module
 import com.intellij.openapi.progress.ProgressManager
 import com.intellij.openapi.util.TextRange
 import com.intellij.openapi.util.text.StringUtil
@@ -157,20 +158,38 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
    * @return the lenses of a Scala file whose module has a BSP target; empty for any other file, so non-build files
    *         produce no runnable selection
    */
-  def testLenses(path: Path): Seq[TestLens] = host.read {
+  def testLenses(path: Path): Seq[TestLens] = lensesOf(path) { (sourceFile, module, target, lines) =>
+    TestLenses.in(sourceFile, module).map { lens =>
+      TestLens(lines(lens.range), target, lens.framework, lens.suite, lens.testName)
+    }
+  }
+
+  /**
+   * Finds the runnable main classes of a source, each with the BSP target of its owning module.
+   *
+   * @param path registered project-source path
+   * @return the lenses of a Scala file whose module has a BSP target; empty for any other file
+   */
+  def mainLenses(path: Path): Seq[MainLens] = lensesOf(path) { (sourceFile, _, target, lines) =>
+    MainLenses.in(sourceFile).map(lens => MainLens(lines(lens.range), target, lens.mainClass))
+  }
+
+  /**
+   * Runs `find` on a Scala file whose module has a BSP target, in one host read.
+   *
+   * @param find receives the file, its module, the module's target and the conversion of offsets to document lines
+   * @return what `find` returns; empty for any other file
+   */
+  private def lensesOf[A](path: Path)(
+      find: (ScalaFile, Module, String, TextRange => LineRange) => Seq[A]): Seq[A] = host.read {
     file(path) match {
       case sourceFile: ScalaFile =>
         host.modules.ofFile(sourceFile.getVirtualFile).toSeq.flatMap { module =>
           module.spec.identity.toSeq.flatMap { target =>
             val sourceDocument = document(sourceFile)
 
-            TestLenses.in(sourceFile, module.module).map { lens =>
-              val range = LineRange(
-                position(sourceDocument, lens.range.getStartOffset),
-                position(sourceDocument, lens.range.getEndOffset))
-
-              TestLens(range, target, lens.framework, lens.suite, lens.testName)
-            }
+            find(sourceFile, module.module, target, range =>
+              LineRange(position(sourceDocument, range.getStartOffset), position(sourceDocument, range.getEndOffset)))
           }
         }
       case _ => Seq.empty

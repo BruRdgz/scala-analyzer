@@ -33,6 +33,7 @@ class LanguageServerTest extends munit.FunSuite {
   private val greeting = fixture.resolve("core/src/main/scala/core/Greeting.scala")
   private val counter = fixture.resolve("core/src/main/scala/core/Counter.scala")
   private val greet3 = fixture.resolve("core3/src/main/scala/core3/Greet3.scala")
+  private val hello3 = fixture.resolve("core3/src/main/scala/core3/Hello3.scala")
   private val shape = fixture.resolve("core/src/main/scala/core/Shape.scala")
 
   /** Records what the server sends. */
@@ -357,8 +358,34 @@ class LanguageServerTest extends munit.FunSuite {
       name -> actual
     }
     assertEquals(actualByFile, cases.map((name, _, expected) => name -> expected))
-    val ordinary = server.getTextDocumentService.codeLens(new CodeLensParams(document(main))).get(30, TimeUnit.SECONDS)
+    val ordinary = server.getTextDocumentService.codeLens(new CodeLensParams(document(counter))).get(30, TimeUnit.SECONDS)
     assert(ordinary.isEmpty)
+  }
+
+  test("discovers run-main code lenses with the class the JVM launches and BSP target identities") {
+    case class Expected(line: Int, mainClass: String, target: String)
+    val root = fixture.toFile.toURI.toString
+    // Main has a main method of its own; Entry3 inherits it from App; a @main method is launched as the class named
+    // after it, in the package. An object with a main method gets one lens, not one for the object and the method.
+    val cases = Seq(
+      main -> Seq(Expected(4, "app.Main", root + "#app/Compile")),
+      hello3 -> Seq(
+        Expected(2, "core3.hello3", root + "#core3/Compile"),
+        Expected(4, "core3.fail3", root + "#core3/Compile"),
+        Expected(6, "core3.Entry3", root + "#core3/Compile")),
+    )
+    val actual = cases.map { (path, _) =>
+      val lenses = server.getTextDocumentService.codeLens(new CodeLensParams(document(path))).get(2, TimeUnit.MINUTES).asScala.toSeq
+      path -> lenses.map { lens =>
+        val command = lens.getCommand
+        assertEquals(command.getCommand, "scalaAnalyzer.runMain", path.toString)
+        assertEquals(command.getTitle, "Run main", path.toString)
+        assertEquals(command.getArguments.size(), 1, path.toString)
+        val argument = new Gson().toJsonTree(command.getArguments.get(0)).getAsJsonObject
+        Expected(lens.getRange.getStart.getLine, argument.get("mainClass").getAsString, argument.get("target").getAsString)
+      }
+    }
+    assertEquals(actual, cases)
   }
 
   test("runs test selections through BSP and reports readable outcomes") {
@@ -392,6 +419,30 @@ class LanguageServerTest extends munit.FunSuite {
     }
   }
 
+  test("runs main classes through BSP and reports how they exited") {
+    val root = fixture.toFile.toURI.toString
+    val cases = Seq(
+      ("#app/Compile", "app.Main", Some("HELLO, WORLD!"), "Main: finished", MessageType.Info),
+      ("#core3/Compile", "core3.hello3", Some("Hello from hello3"), "hello3: finished", MessageType.Info),
+      ("#core3/Compile", "core3.fail3", None, "fail3: exited with code 3", MessageType.Error),
+    )
+    cases.foreach { (target, mainClass, output, expected, kind) =>
+      Client.shown.clear()
+      val loggedBefore = Client.logged.size()
+      val argument = new JsonObject
+      argument.addProperty("target", root + target)
+      argument.addProperty("mainClass", mainClass)
+      server.getWorkspaceService.executeCommand(new ExecuteCommandParams("scalaAnalyzer.runMain", JavaList.of(argument)))
+        .get(3, TimeUnit.MINUTES)
+      val summary = Client.shown.poll(10, TimeUnit.SECONDS)
+      assert(summary != null, mainClass)
+      assertEquals(summary.getMessage, expected)
+      assertEquals(summary.getType, kind)
+      val logs = Client.logged.asScala.drop(loggedBefore).map(_.getMessage).toSeq
+      output.foreach(line => assert(logs.contains(line), logs.mkString("\n")))
+    }
+  }
+
   test("cancels a running test JVM and rejects overlapping runs without blocking document requests") {
     val argument = new JsonObject
     argument.addProperty("target", fixture.toFile.toURI.toString + "#core/Test")
@@ -403,11 +454,17 @@ class LanguageServerTest extends munit.FunSuite {
       val pid = Client.testProcesses.poll(1, TimeUnit.MINUTES)
       assert(pid != null, "test runner did not start")
       val child = ProcessHandle.of(pid).orElseThrow()
-      val error = intercept[ExecutionException] {
-        server.getWorkspaceService.executeCommand(params).get(10, TimeUnit.SECONDS)
+      val mainArgument = new JsonObject
+      mainArgument.addProperty("target", fixture.toFile.toURI.toString + "#app/Compile")
+      mainArgument.addProperty("mainClass", "app.Main")
+      // A test run and a main run share the one active run, whichever started first.
+      Seq(params, new ExecuteCommandParams("scalaAnalyzer.runMain", JavaList.of(mainArgument))).foreach { overlapping =>
+        val error = intercept[ExecutionException] {
+          server.getWorkspaceService.executeCommand(overlapping).get(10, TimeUnit.SECONDS)
+        }
+        assert(error.getCause.getMessage.contains("a run is already in progress"), overlapping.getCommand)
       }
-      assert(error.getCause.getMessage.contains("already in progress"))
-      val lenses = server.getTextDocumentService.codeLens(new CodeLensParams(document(main))).get(10, TimeUnit.SECONDS)
+      val lenses = server.getTextDocumentService.codeLens(new CodeLensParams(document(counter))).get(10, TimeUnit.SECONDS)
       assert(lenses.isEmpty)
       running.cancel(true)
       child.onExit().get(10, TimeUnit.SECONDS)
@@ -415,16 +472,26 @@ class LanguageServerTest extends munit.FunSuite {
     } finally running.cancel(true)
   }
 
-  test("rejects invalid runTest arguments") {
-    val argument = new JsonObject
-    argument.addProperty("suite", "core.ExampleFunSuite")
-    val error = intercept[ExecutionException] {
-      server.getWorkspaceService.executeCommand(new ExecuteCommandParams("scalaAnalyzer.runTest", JavaList.of(argument)))
-        .get(30, TimeUnit.SECONDS)
+  test("rejects invalid runTest and runMain arguments") {
+    def command(name: String, members: (String, String)*): ExecuteCommandParams = {
+      val argument = new JsonObject
+      members.foreach((member, value) => argument.addProperty(member, value))
+      new ExecuteCommandParams(name, JavaList.of(argument))
     }
-    error.getCause match {
-      case response: ResponseErrorException => assertEquals(response.getResponseError.getCode, ResponseErrorCode.InvalidParams.getValue)
-      case other => fail(s"unexpected command failure: $other")
+
+    val invalid = Seq(
+      "a test without a target" -> command("scalaAnalyzer.runTest", "suite" -> "core.ExampleFunSuite"),
+      "a main without a class" -> command("scalaAnalyzer.runMain", "target" -> "file:///project#app/Compile"),
+      "a main with a blank class" -> command("scalaAnalyzer.runMain", "target" -> "file:///project#app/Compile", "mainClass" -> " "),
+    )
+    invalid.foreach { (name, params) =>
+      val error = intercept[ExecutionException] {
+        server.getWorkspaceService.executeCommand(params).get(30, TimeUnit.SECONDS)
+      }
+      error.getCause match {
+        case response: ResponseErrorException => assertEquals(response.getResponseError.getCode, ResponseErrorCode.InvalidParams.getValue, name)
+        case other => fail(s"$name: unexpected command failure: $other")
+      }
     }
   }
 

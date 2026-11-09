@@ -133,7 +133,7 @@ final class ScalaLanguageServer(
   /** At most one compile waits behind the running one; every compile includes all Scala targets. */
   private val compileQueued = new AtomicBoolean()
 
-  /** Runs the test selections started from code lenses. */
+  /** Runs the test selections and main classes started from code lenses. */
   private val testRuns = new TestRun
 
   /** Delays and runs diagnostic computations. */
@@ -320,7 +320,7 @@ final class ScalaLanguageServer(
     val capabilities = new ServerCapabilities
     capabilities.setTextDocumentSync(TextDocumentSyncKind.Incremental)
     capabilities.setHoverProvider(true)
-    capabilities.setExecuteCommandProvider(new ExecuteCommandOptions(java.util.List.of(CompleteInsertion, RunTest)))
+    capabilities.setExecuteCommandProvider(new ExecuteCommandOptions(java.util.List.of(CompleteInsertion, RunTest, RunMain)))
     capabilities.setDefinitionProvider(true)
     capabilities.setTypeDefinitionProvider(true)
     capabilities.setWorkspaceSymbolProvider(true)
@@ -879,20 +879,21 @@ final class ScalaLanguageServer(
       }
 
     /**
-     * Returns the run lenses of test suites and their tests, resolved eagerly.
+     * Returns the run lenses of test suites, their tests and main classes, resolved eagerly.
      *
      * A client that can refresh lenses gets none until the project is open, then a refresh: an answer that waited
      * for the import would make VS Code, which spaces lens requests by their past durations, slow for the session.
      *
      * @param params the document whose lenses are requested
      * @return one lens per test suite or test, titled "Run suite" or "Run test", whose command carries the run's
-     *         target, framework, suite and optional test name; empty when the document is not a project source, or
-     *         while the project is still opening for a client that refreshes lenses
+     *         target, framework, suite and optional test name; then one per main class, titled "Run main", whose
+     *         command carries the target and the class. Empty when the document is not a project source, or while
+     *         the project is still opening for a client that refreshes lenses
      */
     override def codeLens(params: CodeLensParams): CompletableFuture[JavaList[? <: CodeLens]] =
       if (refreshesCodeLenses && !session.isDone) CompletableFuture.completedFuture(JavaList.of[CodeLens]())
       else onRead("codeLens", params.getTextDocument, JavaList.of[CodeLens]()) { (s, path) =>
-        s.testLenses(path).map { lens =>
+        val tests = s.testLenses(path).map { lens =>
           val arguments = new JsonObject
           arguments.addProperty("target", lens.target)
           arguments.addProperty("framework", lens.framework)
@@ -900,7 +901,15 @@ final class ScalaLanguageServer(
           lens.testName.foreach(arguments.addProperty("testName", _))
           val title = if (lens.testName.isDefined) "Run test" else "Run suite"
           new CodeLens(range(lens.range), new Command(title, RunTest, JavaList.of[Object](arguments)), null)
-        }.asJava
+        }
+        val mains = s.mainLenses(path).map { lens =>
+          val arguments = new JsonObject
+          arguments.addProperty("target", lens.target)
+          arguments.addProperty("mainClass", lens.mainClass)
+          new CodeLens(range(lens.range), new Command("Run main", RunMain, JavaList.of[Object](arguments)), null)
+        }
+
+        (tests ++ mains).asJava
       }
 
     /**
@@ -1492,32 +1501,60 @@ final class ScalaLanguageServer(
     case None => CompletableFuture.failedFuture(requestError(ResponseErrorCode.InvalidParams,
       s"$RunTest: expected one object with target, framework (${TestRun.Frameworks.mkString(", ")}), suite and an optional testName"))
     case Some(selection) =>
-      try testRuns.start(selection, () => session.join().prepareTestRun(selection.target, _.foreach(scheduleDiagnostics)),
-        line => client.logMessage(new MessageParams(MessageType.Info, line)), showTestResult)
-      catch {
-        case e: IllegalStateException => CompletableFuture.failedFuture(requestError(ResponseErrorCode.RequestFailed, e.getMessage))
-      }
+      startRun(testRuns.start(selection, () => session.join().prepareTestRun(selection.target, _.foreach(scheduleDiagnostics)),
+        logRunLine, showRunResult))
   }
 
-  /** Reads the argument the code lens gave; lsp4j hands it over as JSON. */
-  private def testSelection(params: ExecuteCommandParams): Option[TestRun.Selection] =
-    Option(params.getArguments).map(_.asScala.toSeq) match {
-      case Some(Seq(json: JsonObject)) =>
-        /** Reads a non-blank string member, absent when the member is missing, not a JSON string or blank. */
-        def string(name: String): Option[String] = Option(json.get(name)).collect {
-          case value: JsonPrimitive if value.isString && !value.getAsString.isBlank => value.getAsString
-        }
+  /** Starts the run of a lens's main class; the request completes when the program exits. */
+  private def executeMain(params: ExecuteCommandParams): CompletableFuture[AnyRef] = mainSelection(params) match {
+    case None => CompletableFuture.failedFuture(requestError(ResponseErrorCode.InvalidParams,
+      s"$RunMain: expected one object with target and mainClass"))
+    case Some(selection) =>
+      startRun(testRuns.startMain(selection, () => session.join().prepareMainRun(selection.target, _.foreach(scheduleDiagnostics)),
+        logRunLine, showRunResult))
+  }
 
-        for {
-          target <- string("target")
-          framework <- string("framework").filter(TestRun.Frameworks.contains)
-          suite <- string("suite")
-        } yield TestRun.Selection(target, framework, suite, string("testName"))
+  /** Evaluates the start of a run, answering a start while another run is in progress as `RequestFailed`. */
+  private def startRun(start: => CompletableFuture[AnyRef]): CompletableFuture[AnyRef] =
+    try start
+    catch {
+      case e: IllegalStateException => CompletableFuture.failedFuture(requestError(ResponseErrorCode.RequestFailed, e.getMessage))
+    }
+
+  /** Reads the test selection argument the code lens gave; lsp4j hands it over as JSON. */
+  private def testSelection(params: ExecuteCommandParams): Option[TestRun.Selection] =
+    for {
+      json <- objectArgument(params)
+      target <- stringMember(json, "target")
+      framework <- stringMember(json, "framework").filter(TestRun.Frameworks.contains)
+      suite <- stringMember(json, "suite")
+    } yield TestRun.Selection(target, framework, suite, stringMember(json, "testName"))
+
+  /** Reads the main class argument the code lens gave; lsp4j hands it over as JSON. */
+  private def mainSelection(params: ExecuteCommandParams): Option[TestRun.MainSelection] =
+    for {
+      json <- objectArgument(params)
+      target <- stringMember(json, "target")
+      mainClass <- stringMember(json, "mainClass")
+    } yield TestRun.MainSelection(target, mainClass)
+
+  /** The command's only argument when it is a JSON object, absent otherwise. */
+  private def objectArgument(params: ExecuteCommandParams): Option[JsonObject] =
+    Option(params.getArguments).map(_.asScala.toSeq) match {
+      case Some(Seq(json: JsonObject)) => Some(json)
       case _ => None
     }
 
+  /** Reads a non-blank string member, absent when the member is missing, not a JSON string or blank. */
+  private def stringMember(json: JsonObject, name: String): Option[String] = Option(json.get(name)).collect {
+    case value: JsonPrimitive if value.isString && !value.getAsString.isBlank => value.getAsString
+  }
+
+  /** Sends one line of a run's output to the client's log. */
+  private def logRunLine(line: String): Unit = client.logMessage(new MessageParams(MessageType.Info, line))
+
   /** Shows a finished run's summary to the client: as an error if it failed, a warning if ignored, else information. */
-  private def showTestResult(result: TestRun.Result): Unit = {
+  private def showRunResult(result: TestRun.Result): Unit = {
     val kind = if (result.failed) MessageType.Error else if (result.ignored) MessageType.Warning else MessageType.Info
 
     client.showMessage(new MessageParams(kind, result.summary))
@@ -1535,18 +1572,19 @@ final class ScalaLanguageServer(
     override def didChangeConfiguration(params: DidChangeConfigurationParams): Unit = ()
 
     /**
-     * Executes a test selection or completion insert handler; unknown commands are invalid parameters.
+     * Executes a test selection, a main class or completion insert handler; unknown commands are invalid parameters.
      *
-     * A test selection runs on the test-run thread and the request completes when the run ends; starting one while
-     * another is in progress fails with `RequestFailed`. A completion insertion runs on the documents thread and
-     * completes with `null`. A malformed test selection, a completion insertion without six primitive arguments (the
-     * second and the third numbers) and an unknown command fail with `InvalidParams`.
+     * A test selection or main class runs on the run thread and the request completes when the run ends; starting
+     * one while another is in progress fails with `RequestFailed`. A completion insertion runs on the documents
+     * thread and completes with `null`. A malformed test selection or main class, a completion insertion without six
+     * primitive arguments (the second and the third numbers) and an unknown command fail with `InvalidParams`.
      *
      * @param params the command name and its JSON arguments, as `completionItem` or the code lens gave them
      * @return a future completing with `null` once the command has run, or failing with the protocol error
      */
     override def executeCommand(params: ExecuteCommandParams): CompletableFuture[AnyRef] = params.getCommand match {
       case RunTest => executeTest(params)
+      case RunMain => executeMain(params)
       case CompleteInsertion =>
         // lsp4j hands the arguments over as JSON: the ones completionItem gave.
         // The protocol lets a client leave `arguments` out; the line and the column are the two numbers.
@@ -1610,6 +1648,9 @@ final class ScalaLanguageServer(
 
 /** The command that runs the suite or test selection carried by a code lens. */
 private val RunTest = "scalaAnalyzer.runTest"
+
+/** The command that runs the main class carried by a code lens. */
+private val RunMain = "scalaAnalyzer.runMain"
 
 /** The command that replays insertion after the client has inserted a completion item's lookup text. */
 private val CompleteInsertion = "scalaAnalyzer.completeInsertion"

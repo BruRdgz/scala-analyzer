@@ -163,6 +163,19 @@ final case class TestLens(
 )
 
 /**
+ * A runnable main class with its BSP target and source anchor.
+ *
+ * @param range start and exclusive end positions in zero-based lines and UTF-16 columns
+ * @param target BSP target identity of the source's module
+ * @param mainClass JVM name of the class that has the `main` method
+ */
+final case class MainLens(
+  range: LineRange,
+  target: String,
+  mainClass: String,
+)
+
+/**
  * Ranked completion choices for one request.
  *
  * @param items candidates in plugin relevance order

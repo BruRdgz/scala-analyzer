@@ -10,8 +10,8 @@ import scalaanalyzer.build.{
 }
 import scalaanalyzer.language.{
   CodeActionResult, CompletionChoices, CompletionFollowUp, FileChanges, FileProblem, Fold, HierarchyCall,
-  HierarchyItem, HierarchyTarget, InlineHint, Occurrence, OutlineSymbol, ProjectLanguageOperations, SemanticToken,
-  SignatureChoices, SourceSpan, TestLens, TextChange, WorkspaceSymbolMatch,
+  HierarchyItem, HierarchyTarget, InlineHint, MainLens, Occurrence, OutlineSymbol, ProjectLanguageOperations,
+  SemanticToken, SignatureChoices, SourceSpan, TestLens, TextChange, WorkspaceSymbolMatch,
 }
 import scalaanalyzer.platform.{HostLock, HostLog}
 
@@ -198,6 +198,14 @@ final class ProjectSession private (
    * @return the lenses of a Scala source whose module has a BSP target identity; empty for any other source
    */
   def testLenses(path: Path): Seq[TestLens] = language.testLenses(path)
+
+  /**
+   * Finds the runnable main classes of a source, each with the BSP target identity of its module.
+   *
+   * @param path registered project-source path
+   * @return the lenses of a Scala source whose module has a BSP target identity; empty for any other source
+   */
+  def mainLenses(path: Path): Seq[MainLens] = language.mainLenses(path)
 
   /**
    * Looks up signatures for the call surrounding a caret.
@@ -765,15 +773,31 @@ final class ProjectSession private (
    * @return the target's test environment, captured after its successful compilation
    * @throws IllegalStateException when the target does not compile, or the session is closed or unavailable
    */
-  def prepareTestRun(target: String, changed: Set[Path] => Unit): TestRun.Environment = buildLock.synchronized {
+  def prepareTestRun(target: String, changed: Set[Path] => Unit): TestRun.Environment =
+    compiledEnvironment(target, changed)(build.testEnvironment)
+
+  /**
+   * Compiles a target and captures its run environment, as `prepareTestRun` does for tests.
+   *
+   * @param target BSP target to compile and to capture the run environment of
+   * @param changed receives the sources that may need their diagnostics republished
+   * @return the target's run environment, captured after its successful compilation
+   * @throws IllegalStateException when the target does not compile, or the session is closed or unavailable
+   */
+  def prepareMainRun(target: String, changed: Set[Path] => Unit): TestRun.Environment =
+    compiledEnvironment(target, changed)(build.runEnvironment)
+
+  /** Compiles the target and stores its diagnostics under the BSP guard, then captures its `environment`. */
+  private def compiledEnvironment(target: String, changed: Set[Path] => Unit)(
+      environment: String => TestRun.Environment): TestRun.Environment = buildLock.synchronized {
     ensureUsable()
 
-    val compiled = build.compile(target)
+    val compilation = build.compile(target)
 
-    changed(storeBuildProblems(compiled.diagnostics))
-    if (!compiled.succeeded) throw new IllegalStateException(s"compilation failed for $target; see compiler diagnostics")
+    changed(storeBuildProblems(compilation.diagnostics))
+    if (!compilation.succeeded) throw new IllegalStateException(s"compilation failed for $target; see compiler diagnostics")
 
-    build.testEnvironment(target)
+    environment(target)
   }
 
   /**

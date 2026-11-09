@@ -39,6 +39,7 @@ It exposes editor features through the **Language Server Protocol (LSP)** and im
 | Editing | Rename, organize imports, previewable quick fixes, intentions and surround actions. |
 | Formatting | Whole-file scalafmt or IntelliJ formatting; range formatting through IntelliJ. |
 | Tests | Run ScalaTest, specs2 and MUnit suites/tests, and uTest suites, from code lenses; readable output and a result summary. |
+| Run | Run objects with a `main` method, `App` objects and Scala 3 `@main` methods from code lenses; output and an exit summary. |
 | Code structure | Semantic tokens, document highlights, outlines, folding and selection ranges. |
 
 See [known limitations](#known-limitations) for the supported boundaries of these features.
@@ -128,9 +129,19 @@ are used. The executable comes from the target's BSP Java home. When BSP omits i
 deliberately, so the server JDK must also be compatible with that project's tests.
 
 Results and failure details appear in the editor's output channel, with a summary notification when execution ends.
-One run is allowed at a time; cancelling the execute-command request kills its runner. Compilation reads saved files,
-not unsaved editor buffers. MUnit runs through the JUnit 4 it depends on, with scala-analyzer's own small runner: the
+One run, of tests or of a main class, is allowed at a time; cancelling the execute-command request kills its runner
+(in VS Code, the cancel button of the running notification). Compilation reads saved files, not unsaved editor
+buffers. MUnit runs through the JUnit 4 it depends on, with scala-analyzer's own small runner: the
 plugin's needs IntelliJ's JUnit runtime.
+
+### Running main classes
+
+Main lenses sit on top-level objects that have a `main` method of their own or an inherited one (`App`), and on Scala 3
+`@main` methods. They compile the target and launch the class in a separate JVM like test runs do, with the classpath,
+JVM options, environment variables and working directory of BSP's `buildTarget/jvmRunEnvironment`, which the build
+server must support. The output goes to the editor's output channel and a notification tells how the program exited.
+The program gets no arguments and no standard input, and shares the single active run with the tests, so a program
+that keeps running blocks the next run until it is cancelled. Worksheets and scripts have no lenses.
 
 ### Troubleshooting
 

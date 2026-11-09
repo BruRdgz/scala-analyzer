@@ -20,10 +20,10 @@ import scala.util.Using
 import scala.util.control.NonFatal
 
 /**
- * Executes one test selection at a time, away from document requests and host locks.
+ * Executes one test selection or main class at a time, away from document requests and host locks.
  *
- * A single daemon thread prepares and runs the selection. `active` is guarded by this instance's lock; a run's
- * process is guarded by the run's own lock, and its cancellation flag is volatile.
+ * A single daemon thread prepares and runs it. `active` is guarded by this instance's lock; a run's process is
+ * guarded by the run's own lock, and its cancellation flag is volatile.
  */
 final class TestRun extends AutoCloseable {
   import TestRun.*
@@ -51,36 +51,54 @@ final class TestRun extends AutoCloseable {
    * @return a future that completes with `null` after the runner process has exited and the run is no longer active
    */
   def start(selection: Selection, prepare: () => Environment, log: String => Unit,
-            finished: Result => Unit): CompletableFuture[AnyRef] = synchronized {
-    if (active.nonEmpty) throw new IllegalStateException("a test run is already in progress")
+            finished: Result => Unit): CompletableFuture[AnyRef] = submit(testJob(selection), prepare, log, finished)
+
+  /**
+   * Starts a main class on the run thread, with the lifecycle of [[start]]: the same single active run, preparation,
+   * cancellation and failure reporting. The program gets no arguments and no standard input.
+   *
+   * @param main main class to run
+   * @param prepare supplies the program's environment; called on the run thread, before the process starts
+   * @param log receives the program's output lines, standard error included, from the run thread
+   * @param finished receives a summary of the exit status once the program exits, or a failed result if the run could
+   *                 not complete
+   * @return a future that completes with `null` after the program has exited and the run is no longer active
+   */
+  def startMain(main: MainSelection, prepare: () => Environment, log: String => Unit,
+                finished: Result => Unit): CompletableFuture[AnyRef] = submit(mainJob(main), prepare, log, finished)
+
+  /** Makes `job` the active run and executes it on the run thread; fails if another run is active. */
+  private def submit(job: Job, prepare: () => Environment, log: String => Unit,
+                     finished: Result => Unit): CompletableFuture[AnyRef] = synchronized {
+    if (active.nonEmpty) throw new IllegalStateException("a run is already in progress")
 
     val run = new Run
 
     active = Some(run)
     run.answer.whenComplete((_, _) => if (run.answer.isCancelled) run.cancel())
-    executor.execute(() => execute(run, selection, prepare, log, finished))
+    executor.execute(() => execute(run, job, prepare, log, finished))
     run.answer
   }
 
   /** Prepares and launches the run on the executor thread, then always cancels it, clears `active` and completes it. */
-  private def execute(run: Run, selection: Selection, prepare: () => Environment,
+  private def execute(run: Run, job: Job, prepare: () => Environment,
                       log: String => Unit, finished: Result => Unit): Unit = {
     try {
       val environment = prepare()
       if (!run.cancelled) {
-        val report = new Report(log)
-        val process = run.launch(command(selection, environment), environment.item)
+        val interpreter = job.interpreter(log)
+        val process = run.launch(job.command(environment), environment.item)
         process.foreach { child =>
           Using.resource(child.inputReader(UTF_8)) { reader =>
-            reader.lines().iterator().asScala.foreach(report.line)
+            reader.lines().iterator().asScala.foreach(interpreter.line)
           }
           val exit = child.waitFor()
-          if (!run.cancelled) finished(report.result(selection.suite, exit))
+          if (!run.cancelled) finished(interpreter.result(exit))
         }
       }
     } catch {
       case NonFatal(error) =>
-        if (!run.cancelled) reportFailure(selection, error, log, finished)
+        if (!run.cancelled) reportFailure(job, error, log, finished)
     } finally {
       run.cancel()
       run.awaitExit()
@@ -90,8 +108,8 @@ final class TestRun extends AutoCloseable {
   }
 
   /** Logs and reports a failed preparation or launch as a failed result. */
-  private def reportFailure(selection: Selection, error: Throwable, log: String => Unit, finished: Result => Unit): Unit = {
-    val message = s"${selection.suite}: test run failed: ${Option(error.getMessage).getOrElse(error.toString)}"
+  private def reportFailure(job: Job, error: Throwable, log: String => Unit, finished: Result => Unit): Unit = {
+    val message = s"${job.subject} failed: ${Option(error.getMessage).getOrElse(error.toString)}"
     log(message)
     finished(Result(message, failed = true))
   }
@@ -152,7 +170,15 @@ object TestRun {
   final case class Selection(target: String, framework: String, suite: String, testName: Option[String])
 
   /**
-   * BSP test environment plus the target JDK, or deliberately the host JVM when BSP omits it.
+   * A main class to run.
+   *
+   * @param target BSP target URI of the module that holds the class
+   * @param mainClass JVM name of the class that has the `main` method, as `java` takes it
+   */
+  final case class MainSelection(target: String, mainClass: String)
+
+  /**
+   * BSP test or run environment plus the target JDK, or deliberately the host JVM when BSP omits it.
    *
    * @param java path of the `java` executable that launches the runner
    * @param item the environment BSP reported: working directory, environment variables, JVM options and classpath
@@ -183,18 +209,54 @@ object TestRun {
   /** The frameworks whose selections can run, sorted by name. */
   val Frameworks: Seq[String] = Runners.keys.toSeq.sorted
 
+  /** What a run launches and how it reads the output: `subject` names the run in a failure message. */
+  private final case class Job(subject: String, command: Environment => Seq[String],
+                               interpreter: (String => Unit) => Interpreter)
+
+  /** Reads one run's output line by line and turns its exit code into the final summary. */
+  private final case class Interpreter(line: String => Unit, result: Int => Result)
+
+  /** The job of a test selection: the runner's command, and its TeamCity output read as test outcomes. */
+  private def testJob(selection: Selection): Job = Job(
+    s"${selection.suite}: test run",
+    command(selection, _),
+    log => {
+      val report = new Report(log)
+
+      Interpreter(report.line, report.result(selection.suite, _))
+    })
+
+  /** The job of a main class: its output goes to the log unread, and the summary says how it exited. */
+  private def mainJob(main: MainSelection): Job = {
+    val name = main.mainClass.split('.').last
+
+    Job(
+      s"${main.mainClass}: run",
+      jvmCommand(_, Seq.empty, main.mainClass, Seq.empty),
+      log => Interpreter(log, exit =>
+        if (exit == 0) Result(s"$name: finished")
+        else Result(s"$name: exited with code $exit", failed = true)))
+  }
+
   /** Builds the runner's command line: the JVM, its options and classpath, then the runner's arguments. */
   private def command(selection: Selection, environment: Environment): Seq[String] = {
     val runner = Runners(selection.framework)
     // The runner's jar joins the project's test classpath; loading its class does not link the framework it calls.
     val runnerJar = Path.of(runner.getProtectionDomain.getCodeSource.getLocation.toURI).toString
-    val classpath = environment.item.getClasspath.asScala.map(entry => path(entry).toString) :+ runnerJar
     // A ScalaTest scope selects each of its tests by name, one per line.
     val names = selection.testName.toSeq.flatMap(_.split("\n")).flatMap(name => Seq("-testName", name))
+    val arguments = Seq("-s", selection.suite.replace("`", "")) ++ names ++ Seq("-showProgressMessages", "true")
+
+    jvmCommand(environment, Seq(runnerJar), runner.getName, arguments)
+  }
+
+  /** Builds a JVM command line: `java`, the environment's options, its classpath plus `extraClasspath`, the class. */
+  private def jvmCommand(environment: Environment, extraClasspath: Seq[String], mainClass: String,
+                         arguments: Seq[String]): Seq[String] = {
+    val classpath = environment.item.getClasspath.asScala.map(entry => path(entry).toString) ++ extraClasspath
 
     Seq(environment.java.toString) ++ environment.item.getJvmOptions.asScala ++
-      Seq("-cp", classpath.mkString(File.pathSeparator), runner.getName, "-s", selection.suite.replace("`", "")) ++
-      names ++ Seq("-showProgressMessages", "true")
+      Seq("-cp", classpath.mkString(File.pathSeparator), mainClass) ++ arguments
   }
 
   // Possessive runs of unescaped characters: Java's regex recurses on each repetition, and failure details are long.
