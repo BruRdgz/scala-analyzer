@@ -19,6 +19,7 @@ import com.intellij.psi.{
 import com.intellij.psi.search.GlobalSearchScope
 import com.intellij.psi.util.{PsiTreeUtil, PsiTypesUtil}
 import org.jetbrains.plugins.scala.annotator.gutter.ScalaGotoTypeDeclarationProvider
+import org.jetbrains.plugins.scala.annotator.hints.Text
 import org.jetbrains.plugins.scala.editor.documentationProvider.{ScalaDocQuickInfoGenerator, ScalaDocumentationProvider}
 import org.jetbrains.plugins.scala.extensions.PsiNamedElementExt
 import org.jetbrains.plugins.scala.highlighter.DefaultHighlighter as H
@@ -144,12 +145,47 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
       val sourceDocument = document(sourceFile)
       val range = new TextRange(offset(sourceDocument, start), offset(sourceDocument, end))
 
-      host.inlayHints(sourceFile)
-        .filter(hint => range.contains(hint.offset))
-        .map(hint => InlineHint(position(sourceDocument, hint.offset), hint.text))
+      host.inlayHints(sourceFile).zipWithIndex
+        .filter((hint, _) => range.contains(hint.offset))
+        .map { (hint, index) =>
+          val parts = hint.parts.map(part => HintLabelPart(part.string, InlayHints.target(part).isDefined))
+
+          InlineHint(position(sourceDocument, hint.offset), parts, index, hint.annotation)
+        }
     }
     case _ => Seq.empty
   }
+
+  /**
+   * Locates what the label pieces of one hint navigate to, as `definition` locates a declaration.
+   *
+   * Locating a library declaration materializes its source file, and a file's hints are requested after every edit:
+   * `inlayHints` leaves this to the one hint the user points at.
+   *
+   * @param path registered project-source path
+   * @param at the hint's position, as `inlayHints` returned it
+   * @param index the hint's `index`, as `inlayHints` returned it
+   * @return one target per piece of the hint; empty for a file that is not Scala, and when the document has no hint
+   *         at that index and position any more
+   */
+  def inlayHintTargets(path: Path, at: LineColumn, index: Int): Seq[HintPartTarget] = file(path) match {
+    case sourceFile: ScalaFile => host.read {
+      val hintOffset = offset(document(sourceFile), at)
+
+      host.inlayHints(sourceFile).lift(index).filter(_.offset == hintOffset).toSeq.flatMap(_.parts.map(hintPartTarget))
+    }
+    case _ => Seq.empty
+  }
+
+  /** Locates a label piece's declaration and reads its signature; the caller reads. */
+  private def hintPartTarget(part: Text): HintPartTarget = {
+    val location = InlayHints.target(part).flatMap(sourceLocation).map(found => found.path -> found.position)
+
+    HintPartTarget(part.string, location, part.tooltip().map(plainText))
+  }
+
+  /** The text of the plugin's quick-information HTML, without its markup. */
+  private def plainText(html: String): String = StringUtil.unescapeXmlEntities(StringUtil.removeHtmlTags(html, true)).trim
 
   /**
    * Finds the runnable test selections of a source, each with the BSP target of its owning module.
@@ -416,7 +452,7 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
       html <- if (java) Option(JavaDocumentationProvider.getQuickNavigationInfoInner(target, original))
               else ScalaDocQuickInfoGenerator.getQuickNavigateInfo(target, original)
     } yield {
-      val signature = StringUtil.unescapeXmlEntities(StringUtil.removeHtmlTags(html, true)).trim
+      val signature = plainText(html)
       val language = if (java) "java" else "scala"
 
       (s"```$language\n$signature\n```" +: documentation(target, original).toSeq).mkString("\n\n")

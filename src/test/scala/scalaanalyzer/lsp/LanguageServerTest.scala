@@ -61,6 +61,15 @@ class LanguageServerTest extends munit.FunSuite {
       if (params.getMessage.startsWith(prefix)) testProcesses.add(params.getMessage.stripPrefix(prefix).toLong)
     }
     val applied = new LinkedBlockingQueue[ApplyWorkspaceEditParams]()
+    /** What the client answers for the `scalaAnalyzer.inlayHints` section. */
+    @volatile var inlayHintSettings = new JsonObject
+    val hintRefreshes = new LinkedBlockingQueue[java.lang.Boolean]()
+    override def configuration(params: ConfigurationParams): CompletableFuture[JavaList[Object]] =
+      CompletableFuture.completedFuture(JavaList.of[Object](inlayHintSettings))
+    override def refreshInlayHints(): CompletableFuture[Void] = {
+      hintRefreshes.add(java.lang.Boolean.TRUE)
+      CompletableFuture.completedFuture(null)
+    }
     val showed = new LinkedBlockingQueue[ShowDocumentParams]()
     override def applyEdit(params: ApplyWorkspaceEditParams): CompletableFuture[ApplyWorkspaceEditResponse] = {
       applied.add(params)
@@ -92,6 +101,9 @@ class LanguageServerTest extends munit.FunSuite {
     params.setWorkspaceFolders(java.util.List.of(new WorkspaceFolder(root.toUri.toString, root.getFileName.toString)))
     val workspace = new WorkspaceClientCapabilities
     workspace.setApplyEdit(appliesEdits)
+    workspace.setConfiguration(true)
+    workspace.setDidChangeConfiguration(new DidChangeConfigurationCapabilities(true))
+    workspace.setInlayHint(new InlayHintWorkspaceCapabilities(true))
     val window = new WindowClientCapabilities
     window.setShowDocument(new ShowDocumentCapabilities(appliesEdits))
     val capabilities = new ClientCapabilities
@@ -237,7 +249,7 @@ class LanguageServerTest extends munit.FunSuite {
     assertEquals(capabilities.getTextDocumentSync.getLeft, TextDocumentSyncKind.Incremental)
     assert(capabilities.getHoverProvider.getLeft)
     assertEquals(capabilities.getCodeLensProvider.getResolveProvider, java.lang.Boolean.FALSE)
-    assert(capabilities.getInlayHintProvider.getLeft)
+    assert(capabilities.getInlayHintProvider.getRight.getResolveProvider)
     assert(capabilities.getSelectionRangeProvider.getLeft)
     assertEquals(capabilities.getCompletionProvider.getTriggerCharacters.asScala.toSeq, Seq("."))
     assertEquals(capabilities.getCompletionProvider.getResolveProvider, java.lang.Boolean.FALSE)
@@ -269,6 +281,7 @@ class LanguageServerTest extends munit.FunSuite {
       assertEquals(selector.get(0).getAsJsonObject.get("scheme").getAsString, "file")
     }
     scalaSelector(capabilities.getInlayHintProvider.getRight)
+    assert(capabilities.getInlayHintProvider.getRight.getResolveProvider)
     scalaSelector(capabilities.getSelectionRangeProvider.getRight)
     scalaSelector(capabilities.getImplementationProvider.getRight)
     scalaSelector(capabilities.getCallHierarchyProvider.getRight)
@@ -1139,12 +1152,86 @@ class LanguageServerTest extends munit.FunSuite {
       change(text, 38)
       val hints = server.getTextDocumentService.inlayHint(new InlayHintParams(document(main),
         new Range(new Position(0, 0), new Position(16, 0)))).get(1, TimeUnit.MINUTES).asScala.toSeq
-      assert(hints.exists(h => h.getPosition == new Position(2, 11) && h.getLabel.getLeft == ": List[Int]"), hints)
-      assert(hints.exists(h => h.getPosition == new Position(10, 9) && h.getLabel.getLeft == ": B"), hints)
+      assert(hints.exists(h => h.getPosition == new Position(2, 11) && labelText(h) == ": List[Int]"), hints)
+      assert(hints.exists(h => h.getPosition == new Position(10, 9) && labelText(h) == ": B"), hints)
       val selected = server.getTextDocumentService.inlayHint(new InlayHintParams(document(main),
         new Range(new Position(2, 0), new Position(2, 11)))).get(1, TimeUnit.MINUTES)
       assert(selected.isEmpty, selected)
     } finally change(original, 39)
+  }
+
+  /** A hint's label as the editor shows it, whether the label is a string or has parts. */
+  private def labelText(hint: InlayHint): String =
+    if (hint.getLabel.isLeft) hint.getLabel.getLeft else hint.getLabel.getRight.asScala.map(_.getValue).mkString
+
+  test("inlay hint parts locate their declarations once resolved, and a definition's type hint carries its annotation") {
+    val text = """package app
+                 |object Hints {
+                 |  def first = List(core.Greeting("x")).head
+                 |}
+                 |""".stripMargin
+    def change(value: String, version: Int): Unit = server.getTextDocumentService.didChange(new DidChangeTextDocumentParams(
+      new VersionedTextDocumentIdentifier(main.toUri.toString, version), JavaList.of(new TextDocumentContentChangeEvent(value))))
+    val original = Files.readString(main).replace("val text: String", "val text: Int")
+    try {
+      change(text, 380)
+      val hints = server.getTextDocumentService.inlayHint(new InlayHintParams(document(main),
+        new Range(new Position(0, 0), new Position(4, 0)))).get(1, TimeUnit.MINUTES).asScala.toSeq
+      val hint = hints.find(_.getPosition == new Position(2, 11)).getOrElse(fail(s"no hint after `first`: $hints"))
+      val parts = hint.getLabel.getRight.asScala.toSeq
+      assertEquals(parts.map(_.getValue), Seq(": ", "Greeting"))
+      assertEquals(parts.map(_.getLocation), Seq(null, null), "locations wait for the resolve request")
+      assertEquals(hint.getTextEdits.asScala.map(e => (e.getRange, e.getNewText)).toSeq,
+        Seq((new Range(new Position(2, 11), new Position(2, 11)), ": Greeting")))
+
+      val resolved = server.getTextDocumentService.resolveInlayHint(hint).get(1, TimeUnit.MINUTES)
+      val resolvedParts = resolved.getLabel.getRight.asScala.toSeq
+      assertEquals(resolvedParts.head.getLocation, null)
+      val location = resolvedParts(1).getLocation
+      assertEquals(location.getUri, greeting.toUri.toString)
+      assertEquals(location.getRange.getStart, new Position(2, 17))
+      assert(resolvedParts(1).getTooltip.getLeft.contains("Greeting"), resolvedParts(1).getTooltip)
+    } finally change(original, 381)
+  }
+
+  test("inlay hints follow the settings the client answers") {
+    val text = """package app
+                 |object Hints {
+                 |  def names = Option(1).toList
+                 |  def setup(timeout: Int): Int = timeout
+                 |  setup(30)
+                 |}
+                 |""".stripMargin
+    def change(value: String, version: Int): Unit = server.getTextDocumentService.didChange(new DidChangeTextDocumentParams(
+      new VersionedTextDocumentIdentifier(main.toUri.toString, version), JavaList.of(new TextDocumentContentChangeEvent(value))))
+    def labels(): Seq[String] = server.getTextDocumentService.inlayHint(new InlayHintParams(document(main),
+      new Range(new Position(0, 0), new Position(6, 0)))).get(1, TimeUnit.MINUTES).asScala.map(labelText).toSeq
+    /** The client's settings change: the server reads them and asks for the hints again. */
+    def settings(answer: JsonObject): Unit = {
+      Client.hintRefreshes.clear()
+      Client.inlayHintSettings = answer
+      server.getWorkspaceService.didChangeConfiguration(new DidChangeConfigurationParams(answer))
+      assert(Client.hintRefreshes.poll(1, TimeUnit.MINUTES) != null, "the server did not ask for the hints again")
+    }
+    val original = Files.readString(main).replace("val text: String", "val text: Int")
+    try {
+      change(text, 382)
+      assert(labels().contains(": List[Int]"), labels())
+      assert(!labels().contains("timeout = "), labels())
+
+      val changed = new JsonObject
+      changed.addProperty("methodResultTypes", false)
+      changed.addProperty("parameterNames", true)
+      settings(changed)
+      assert(!labels().contains(": List[Int]"), labels())
+      assert(labels().contains("timeout = "), labels())
+
+      settings(new JsonObject)
+      assert(labels().contains(": List[Int]") && !labels().contains("timeout = "), s"an empty answer restores the defaults: ${labels()}")
+    } finally {
+      settings(new JsonObject)
+      change(original, 383)
+    }
   }
 
   test("signature help shows a call's signatures with the current parameter, as the IDE's parameter info") {

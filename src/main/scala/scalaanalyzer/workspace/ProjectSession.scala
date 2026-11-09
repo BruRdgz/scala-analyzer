@@ -10,8 +10,8 @@ import scalaanalyzer.build.{
 }
 import scalaanalyzer.language.{
   CodeActionResult, CompletionChoices, CompletionFollowUp, FileChanges, FileProblem, Fold, HierarchyCall,
-  HierarchyItem, HierarchyTarget, InlineHint, MainLens, Occurrence, OutlineSymbol, ProjectLanguageOperations,
-  SemanticToken, SignatureChoices, SourceSpan, TestLens, TextChange, WorkspaceSymbolMatch,
+  HierarchyItem, HierarchyTarget, HintPartTarget, InlineHint, MainLens, Occurrence, OutlineSymbol,
+  ProjectLanguageOperations, SemanticToken, SignatureChoices, SourceSpan, TestLens, TextChange, WorkspaceSymbolMatch,
 }
 import scalaanalyzer.platform.{HostLock, HostLog}
 
@@ -190,6 +190,20 @@ final class ProjectSession private (
    *         that is not Scala
    */
   def inlayHints(path: Path, start: LineColumn, end: LineColumn): Seq[InlineHint] = language.inlayHints(path, start, end)
+
+  /**
+   * Locates what the label pieces of one hint navigate to.
+   *
+   * Library locations use materialized source or decompiled files, as in `definition`.
+   *
+   * @param path registered project-source path
+   * @param at the hint's position, as `inlayHints` returned it
+   * @param index the hint's index, as `inlayHints` returned it
+   * @return one target per piece of the hint; empty for a source that is not Scala, and when the source has no hint
+   *         at that index and position any more
+   */
+  def inlayHintTargets(path: Path, at: LineColumn, index: Int): Seq[HintPartTarget] =
+    language.inlayHintTargets(path, at, index)
 
   /**
    * Finds the runnable suite and test selections of a source, each with the BSP target identity of its module.

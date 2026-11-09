@@ -40,6 +40,41 @@
           "type": "boolean",
           "default": false,
           "description": "Log every request the server answers, with its time (SCALA_ANALYZER_LOG=debug). Takes effect when the server restarts."
+        },
+        "scalaAnalyzer.inlayHints.methodResultTypes": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show the inferred result type of a def that has none."
+        },
+        "scalaAnalyzer.inlayHints.memberVariableTypes": {
+          "type": "boolean",
+          "default": false,
+          "description": "Show the inferred type of a val or var of a class, object or trait that has none."
+        },
+        "scalaAnalyzer.inlayHints.localVariableTypes": {
+          "type": "boolean",
+          "default": false,
+          "description": "Show the inferred type of a local val or var that has none."
+        },
+        "scalaAnalyzer.inlayHints.obviousTypes": {
+          "type": "boolean",
+          "default": false,
+          "description": "Show inferred types also where the initializer already makes them obvious (val name = \"x\")."
+        },
+        "scalaAnalyzer.inlayHints.parameterNames": {
+          "type": "boolean",
+          "default": false,
+          "description": "Show parameter names before the arguments whose meaning is unclear."
+        },
+        "scalaAnalyzer.inlayHints.methodChains": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show the type after each call of a method chain."
+        },
+        "scalaAnalyzer.inlayHints.implicits": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show implicit arguments, using arguments and implicit conversions. The IntelliJ Scala plugin leaves these off until toggled."
         }
       }
     },

@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- Inlay hints carry what the plugin attaches to their parts: a type name in a hint is a link to its declaration (library
+  declarations open their materialized source) and shows its signature on hover. The server resolves both lazily
+  (`inlayHint/resolve`), because locating a library declaration writes its source file. The hint that shows an inferred
+  `val`, `var` or `def` type has the edit that writes it, which VS Code applies on a double click.
+- The inlay hint kinds follow the client's `scalaAnalyzer.inlayHints.*` settings (method result types, member and local
+  variable types, obvious types, parameter names, method chains, implicits), read with `workspace/configuration` once the
+  client is ready and again after `workspace/didChangeConfiguration`; the server then sends `workspace/inlayHint/refresh`.
+  The defaults are the IDE's, except implicit hints, which stay on.
+
 ## 0.2.0 — 2026-11-09
 
 - Sources changed on disk while they are not open in the editor (a checkout, a formatter) take their new text, and a

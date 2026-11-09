@@ -118,6 +118,15 @@ final class ScalaPsiHost private[scalaanalyzer] (
   def inlayHints(file: ScalaFile): Seq[InlayHints.InlayHint] = InlayHints.in(file)
 
   /**
+   * Selects the kinds of hints [[inlayHints]] produces, for every file of the host.
+   *
+   * Takes the write lock itself: the queries running meanwhile are cancelled.
+   *
+   * @param toggles the kinds of hints to produce
+   */
+  def configureInlayHints(toggles: InlayHints.Toggles): Unit = InlayHints.configure(toggles)
+
+  /**
    * The signatures of the call around `offset`, as the IDE's parameter info shows them.
    *
    * Takes read access itself.
