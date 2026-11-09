@@ -9,6 +9,16 @@
 - `scalaAnalyzer/superElements` answers the locations that the IDE's Go to Super navigates to from a caret: the
   superclasses of the type around it, or the members that the member around it overrides or implements. The VS Code
   extension adds **Go to Super**, which opens the declaration or peeks several; it has no default key.
+- Document highlights use the plugin's usage handlers, as the IDE does: on `def`, `return`, `val`, `case`, `match`,
+  `if`, `try`, `for` and `=>` they mark the exit points or results, on a class-like keyword its companion's, on an
+  `end` marker the definition, on constructor calls and case-class references the class and its constructor, and on an
+  implicit the places that use it. Elsewhere they mark the symbol's occurrences, as before.
+- Code actions offer the platform's **Put arguments/parameters/tuple elements/type arguments on separate lines** and
+  **on one line** (split/join list), and **Flip ','**; the host registers the plugin's six split/join contexts for them.
+- Code actions offer the plugin's **Unwrap** and **Remove** actions (`if`, `else`, `while`, `for`, `try`, `catch`,
+  `finally`, `match`, `case`, braces and others) at the caret, previewed on a copy like the intentions.
+- **Remove unnecessary parentheses** is offered: it needed an inspection profile, which the host has had since 0.2.
+  The host does not run the inspection, so the intention is available whenever the parentheses are redundant.
 
 ## 0.2.0 — 2026-11-09
 

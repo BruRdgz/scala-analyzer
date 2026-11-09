@@ -106,6 +106,8 @@ import com.intellij.openapi.command.CommandProcessor
 import com.intellij.openapi.command.impl.CoreCommandProcessor
 import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.editor.Editor
+import com.intellij.openapi.editor.actions.FlipCommaIntention
+import com.intellij.openapi.editor.actions.lists.{JoinLinesIntention, ListSplitJoinContext, SplitLineIntention}
 import com.intellij.openapi.editor.colors.{EditorColorsManager, EditorColorsScheme, TextAttributesKey}
 import com.intellij.openapi.editor.elf.Elf
 import com.intellij.openapi.editor.ex.EditorSettingsExternalizable
@@ -310,6 +312,13 @@ private[scalaanalyzer] object HostBootstrap {
   /** The platform's Java completion contributor as a descriptor bean, registered under the Java plugin's id. */
   private val JavaCompletionContributors = Seq(ExtensionBean(Map("language" -> "JAVA",
     "implementationClass" -> "com.intellij.codeInsight.completion.JavaCompletionContributor", "id" -> "java")))
+
+  /**
+   * The platform's split/join and flip-comma intentions: the Scala descriptors do not register them, and they act
+   * through the list contexts the host registers from the plugin's descriptors.
+   */
+  private val PlatformListIntentions: Seq[String] =
+    Seq(classOf[SplitLineIntention], classOf[JoinLinesIntention], classOf[FlipCommaIntention]).map(_.getName)
 
   /**
    * Installs the process-wide platform and returns the ready PSI host.
@@ -1187,10 +1196,9 @@ private[scalaanalyzer] object HostBootstrap {
       // Stub schema (model): the plugin's serializer/factory registrations and language stub definitions.
       val scalaPlugin = new DefaultPluginDescriptor(PluginId.getId("org.intellij.scala"))
 
-      /** Associates a language stub definition with the Scala plugin that owns its extension. */
-      def stubDefinition(
-          language: String, definition: LanguageStubDefinition): LanguageExtensionPoint[LanguageStubDefinition] = {
-        val bean = new LanguageExtensionPoint[LanguageStubDefinition](language, definition)
+      /** Associates a language extension with the Scala plugin that owns it. */
+      def languageBean[T <: AnyRef](language: String, extension: T): LanguageExtensionPoint[T] = {
+        val bean = new LanguageExtensionPoint[T](language, extension)
         bean.setPluginDescriptor(scalaPlugin)
         bean
       }
@@ -1203,13 +1211,24 @@ private[scalaanalyzer] object HostBootstrap {
       // Element type <-> PSI class mapping the Java stub registry fills (private constructor, as a container service).
       appServices.register(classOf[JavaStubElementTypePsiElementMappingRegistry])(
         newPrivate(classOf[JavaStubElementTypePsiElementMappingRegistry]))
-      // The element type is erased; the only extensions registered here come from `stubDefinition`.
+      // The element type is erased; the only extensions registered here come from `languageBean`.
       val stubDefinitions = declare("com.intellij.languageStubDefinition")
         .asInstanceOf[ExtensionPointImpl[LanguageExtensionPoint[LanguageStubDefinition]]]
-      stubDefinitions.registerExtension(stubDefinition("Scala", new ScalaLanguageStubDefinition), scalaPlugin, root)
-      stubDefinitions.registerExtension(stubDefinition("Scala 3", new Scala3LanguageStubDefinition), scalaPlugin, root)
+      stubDefinitions.registerExtension(languageBean("Scala", new ScalaLanguageStubDefinition), scalaPlugin, root)
+      stubDefinitions.registerExtension(languageBean("Scala 3", new Scala3LanguageStubDefinition), scalaPlugin, root)
       stubDefinitions.registerExtension(
-        stubDefinition(JavaLanguage.INSTANCE.getID, new JavaStubDefinition), scalaPlugin, root)
+        languageBean(JavaLanguage.INSTANCE.getID, new JavaStubDefinition), scalaPlugin, root)
+      // Split/join list: the platform's intentions ask for the list contexts of the file's language. Flip comma asks for
+      // language flippers, which the Scala plugin declares none of.
+      // The element type is erased; the only extensions registered here are the Scala plugin's list contexts.
+      val splitJoinContexts = declare("com.intellij.listSplitJoinContext")
+        .asInstanceOf[ExtensionPointImpl[LanguageExtensionPoint[ListSplitJoinContext]]]
+      for (bean <- Descriptors.scalaExtensionBeans(config.scalaPluginJars, "com.intellij.listSplitJoinContext")
+           if bean.attributes.get("language").contains("Scala")) {
+        val context = newPrivate(Class.forName(bean.implementation).asSubclass(classOf[ListSplitJoinContext]))
+        splitJoinContexts.registerExtension(languageBean(ScalaLanguage.INSTANCE.getID, context), scalaPlugin, root)
+      }
+      declare("com.intellij.flipCommaIntention.flipper")
       appServices.register(classOf[StubElementRegistryService])(
         new StubElementRegistryServiceImpl(CoroutineScopeKt.CoroutineScope(EmptyCoroutineContext.INSTANCE)))
 
@@ -1838,8 +1857,10 @@ private[scalaanalyzer] object HostBootstrap {
 
       new ScalaPsiHost(config.stateDir, project, symbolIndex, wordIndex, importIndex, libraryFiles, librarySources,
         moduleModel, () => psiChanged(),
-        new CodeActions(Descriptors.scalaExtensions(config.scalaPluginJars, "com.intellij.intentionAction"),
-          Descriptors.scalaExtensions(config.scalaPluginJars, "com.intellij.lang.surroundDescriptor")),
+        new CodeActions(
+          Descriptors.scalaExtensions(config.scalaPluginJars, "com.intellij.intentionAction") ++ PlatformListIntentions,
+          Descriptors.scalaExtensions(config.scalaPluginJars, "com.intellij.lang.surroundDescriptor"),
+          Descriptors.scalaExtensions(config.scalaPluginJars, "com.intellij.lang.unwrapDescriptor")),
         new Inspections(Descriptors.scalaExtensionBeans(config.scalaPluginJars, "com.intellij.localInspection")))
     }
   }
