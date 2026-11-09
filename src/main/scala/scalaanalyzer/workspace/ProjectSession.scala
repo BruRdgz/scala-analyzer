@@ -714,15 +714,15 @@ final class ProjectSession private (
    * This blocks on BSP and does not save editor buffers; document compilation is handled separately by `problems`.
    * Document operations can continue during compilation. Imports and closure wait for its BSP request to finish.
    * The build can report compilation errors without throwing, in which case its diagnostics are still stored. The
-   * build keeps the diagnostics of the targets that were not compiled as their last compile left them, so a target's
-   * compilation also reports those.
+   * build keeps the diagnostics of the targets that were not compiled as their last compile left them; they are
+   * stored, but not counted.
    *
    * @param target stable identity of the target to compile (`TargetSummary.id`, the BSP target URI); `None` compiles
    *               every target
-   * @return whether the build compiled, the number of errors and warnings among all the diagnostics it published (of
-   *         registered sources or not), and the registered sources whose stored diagnostics changed and may need
-   *         republishing
-   * @throws IllegalArgumentException when `target` is not a Scala target of the build
+   * @return whether the build compiled, the number of errors and warnings of the compiled targets and their
+   *         dependencies (in registered sources or not), and the registered sources whose stored diagnostics changed
+   *         and may need republishing
+   * @throws BspImport.UnknownTarget when `target` is not a Scala target of the build
    * @throws IllegalStateException when the session is closed or unavailable
    */
   def compileBuild(target: Option[String] = None): ProjectSession.BuildCompilation = buildLock.synchronized {
@@ -732,7 +732,7 @@ final class ProjectSession private (
       case Some(id) => build.compile(id)
       case None => build.compile()
     }
-    val severities = compiled.diagnostics.values.flatten.map(_.severity).toSeq
+    val severities = compiled.compiledProblems.map(_.severity)
     val changed = storeBuildProblems(compiled.diagnostics)
 
     ProjectSession.BuildCompilation(

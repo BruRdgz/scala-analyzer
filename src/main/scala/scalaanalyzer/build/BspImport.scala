@@ -14,6 +14,7 @@ import java.nio.file.{Files, Path}
 import java.util.concurrent.{CompletableFuture, ConcurrentHashMap, ExecutionException, TimeUnit}
 import java.util.concurrent.atomic.AtomicBoolean
 
+import scala.annotation.tailrec
 import scala.collection.mutable
 import scala.jdk.CollectionConverters.*
 import scala.util.Using
@@ -154,20 +155,24 @@ final class BuildConnection private[scalaanalyzer] (
    * Diagnostics are published during the request and retained across compiles according to BSP reset flags.
    * A compile error response is treated as a failed compile; other connection failures propagate.
    *
-   * @return compile success and the latest published compiler diagnostics by file
+   * @return compile success, the latest published compiler diagnostics by file, and those of the compiled targets
    */
   def compile():scalaanalyzer.build.CompileResult = compileTargets(scalaTargets.map(_.getId))
 
   /**
    * Requests an incremental compile of one Scala target, with the diagnostic and error handling of a build compile.
-   * An unknown target URI is rejected with `IllegalArgumentException`.
+   * An unknown target URI is rejected with `BspImport.UnknownTarget`.
    *
    * @param target BSP target URI of an imported Scala target
-   * @return compile success and the latest published compiler diagnostics by file
+   * @return compile success, the latest published compiler diagnostics by file, and those of the target and its
+   *         dependencies
    */
   def compile(target: String): scalaanalyzer.build.CompileResult = compileTargets(Seq(scalaTarget(target).getId))
 
-  /** Compiles the targets and pairs the outcome with the diagnostics published so far. */
+  /**
+   * Compiles the targets and pairs the outcome with the diagnostics published so far, all of them and those of the
+   * compiled targets.
+   */
   private def compileTargets(ids: Seq[BuildTargetIdentifier]): scalaanalyzer.build.CompileResult = {
     val succeeded =
       try await(server.buildTargetCompile(new CompileParams(ids.asJava))).getStatusCode == StatusCode.OK
@@ -178,12 +183,27 @@ final class BuildConnection private[scalaanalyzer] (
       }
 
     // Qualified (also in the signatures) because bsp4j's wildcard import brings in its own `CompileResult`.
-    scalaanalyzer.build.CompileResult(succeeded, client.snapshot())
+    scalaanalyzer.build.CompileResult(succeeded, client.snapshot(), client.problemsOf(withDependencies(ids)))
+  }
+
+  /** The targets and, transitively, their dependencies: what the build server compiles for a compile of `ids`. */
+  private def withDependencies(ids: Seq[BuildTargetIdentifier]): Set[BuildTargetIdentifier] = {
+    val dependencies = scalaTargets.map(target => target.getId -> target.getDependencies.asScala.toSeq).toMap
+
+    @tailrec
+    def collect(found: Set[BuildTargetIdentifier], next: Seq[BuildTargetIdentifier]): Set[BuildTargetIdentifier] =
+      next match {
+        case Seq() => found
+        case id +: rest if found(id) => collect(found, rest)
+        case id +: rest => collect(found + id, dependencies.getOrElse(id, Seq.empty) ++ rest)
+      }
+
+    collect(Set.empty, ids)
   }
 
   /** Finds a cached Scala target by its URI, rejecting unknown ones. */
   private def scalaTarget(uri: String): BuildTarget = scalaTargets.find(_.getId.getUri == uri)
-    .getOrElse(throw new IllegalArgumentException(s"unknown Scala build target: $uri"))
+    .getOrElse(throw new BspImport.UnknownTarget(uri))
 
   /**
    * Gets the test process environment and Java executable for one target.
@@ -245,6 +265,13 @@ object BspImport {
 
   /** The build server's interfaces the host calls. */
   trait HostBuildServer extends BuildServer with ScalaBuildServer with JvmBuildServer
+
+  /**
+   * A target URI that names no imported Scala target, so callers can answer it as a bad request.
+   *
+   * @param uri the requested target URI
+   */
+  final class UnknownTarget(uri: String) extends IllegalArgumentException(s"unknown Scala build target: $uri")
 
   /**
    * Starts and initializes the BSP client process selected from a workspace's connection files.
@@ -493,6 +520,15 @@ object BspImport {
      */
     def snapshot(): Map[Path, Seq[CompilerDiagnostic]] =
       published.asScala.toSeq.groupMap(_._1._1)(_._2).view.mapValues(_.flatten).filter(_._2.nonEmpty).toMap
+
+    /**
+     * Collects the latest diagnostics that the given targets published.
+     *
+     * @param targets build targets whose diagnostics count
+     * @return their diagnostics, in no specified order
+     */
+    def problemsOf(targets: Set[BuildTargetIdentifier]): Seq[CompilerDiagnostic] =
+      published.asScala.toSeq.collect { case ((_, target), problems) if targets(target) => problems }.flatten
 
     /**
      * Replaces or appends the diagnostics for one source and target, as indicated by BSP's reset flag.

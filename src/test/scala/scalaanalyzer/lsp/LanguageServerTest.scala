@@ -1471,6 +1471,16 @@ class LanguageServerTest extends munit.FunSuite {
     assertEquals(report.errors, 0)
   }
 
+  test("a compile request for an unknown target fails with InvalidParams") {
+    val error = intercept[ExecutionException] {
+      server.compile(new HostProtocol.CompileParams(fixture.toFile.toURI.toString + "#missing/Compile")).get(1, TimeUnit.MINUTES)
+    }
+    error.getCause match {
+      case response: ResponseErrorException => assertEquals(response.getResponseError.getCode, ResponseErrorCode.InvalidParams.getValue)
+      case other => fail(s"unexpected compile failure: $other")
+    }
+  }
+
   test("pending diagnostics for the same version are replaced without starving another source") {
     val service = implementation.getTextDocumentService
     val original = Files.readString(main).replace("val text: String", "val text: Int")
@@ -1610,6 +1620,26 @@ class LanguageServerTest extends munit.FunSuite {
       Files.writeString(greeting, original)
       session.close()
       releaseModules()
+    }
+  }
+
+  test("a target's compile counts the errors of the target and its dependencies, not those kept for other targets") {
+    val session = ProjectSession.open(TestHost.host, fixture)
+    def target(name: String) = Some(fixture.toFile.toURI.toString + s"#$name/Compile")
+    val original = Files.readString(greeting)
+    try {
+      Files.writeString(greeting, original + "\nobject Broken { val x: Int = \"s\" }\n")
+      assert(session.compileBuild(target("core")).errors > 0)
+      // core's errors stay stored, but core3 does not depend on core; app does.
+      assertEquals(session.compileBuild(target("core3")).errors, 0)
+      assert(session.compileBuild(target("app")).errors > 0)
+    } finally {
+      Files.writeString(greeting, original)
+      try session.compileBuild(target("core"))
+      finally {
+        session.close()
+        releaseModules()
+      }
     }
   }
 

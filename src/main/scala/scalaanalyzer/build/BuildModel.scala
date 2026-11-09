@@ -46,6 +46,12 @@ final case class CompilerDiagnostic(severity: HighlightSeverity, start: LineColu
  * The outcome of a build-server compile request.
  *
  * @param succeeded whether BSP reported a successful compile
- * @param diagnostics latest published compiler problems grouped by source path
+ * @param diagnostics latest published compiler problems grouped by source path, of every target
+ * @param compiledProblems the latest problems of the targets this compile covered: the requested ones and, transitively,
+ *                         their dependencies
  */
-final case class CompileResult(succeeded: Boolean, diagnostics: Map[Path, Seq[CompilerDiagnostic]])
+final case class CompileResult(
+  succeeded: Boolean,
+  diagnostics: Map[Path, Seq[CompilerDiagnostic]],
+  compiledProblems: Seq[CompilerDiagnostic],
+)

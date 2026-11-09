@@ -123,10 +123,10 @@ public final class HostProtocol {
     /** Whether the build server reported the compilation as successful. */
     public final boolean succeeded;
 
-    /** The number of error diagnostics the compilation published, in project sources or not. */
+    /** The number of error diagnostics of the compiled targets and their dependencies, in project sources or not. */
     public final int errors;
 
-    /** The number of warning diagnostics the compilation published, in project sources or not. */
+    /** The number of warning diagnostics of the compiled targets and their dependencies, in project sources or not. */
     public final int warnings;
 
     /**

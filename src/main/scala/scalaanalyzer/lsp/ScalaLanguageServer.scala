@@ -9,7 +9,7 @@ import org.eclipse.lsp4j.jsonrpc.messages.{Either as LspEither, Either3 as LspEi
 import org.eclipse.lsp4j.services.*
 
 import scalaanalyzer.{LineColumn, LineRange, ScalaPsiHost}
-import scalaanalyzer.build.{ScalafmtFormatting, TestRun}
+import scalaanalyzer.build.{BspImport, ScalafmtFormatting, TestRun}
 import scalaanalyzer.language.{Completion, CompletionChoice, CompletionFollowUp, FileProblem, Fold, HierarchyItem, HierarchyTarget, OutlineSymbol, ProblemSeverity, Rename, SignatureChoices, SourceSpan, TextChange, WorkspaceSymbolKind}
 import scalaanalyzer.platform.{CallLog, HostLock, HostLog}
 import scalaanalyzer.workspace.ProjectSession
@@ -571,7 +571,8 @@ final class ScalaLanguageServer(
    *
    * @param params the target to compile; `null`, or parameters without a target, compile the whole build
    * @return a future containing the compilation's outcome and its error and warning counts; it fails when the
-   *         project is not open, the target is not one of the build's, or the compile could not run
+   *         project is not open or the compile could not run, and with `InvalidParams` when the target is not one of
+   *         the build's
    */
   override def compile(params: HostProtocol.CompileParams): CompletableFuture[HostProtocol.CompileReport] =
     answered("compile", builds.execute) { s =>
@@ -670,6 +671,7 @@ final class ScalaLanguageServer(
         HostLog.warn(s"$kind: the change is too large to compare", e)
         throw requestError(ResponseErrorCode.RequestFailed, "the change is too large to compare")
       case e: Rename.Refused => throw requestError(ResponseErrorCode.RequestFailed, e.getMessage)
+      case e: BspImport.UnknownTarget => throw requestError(ResponseErrorCode.InvalidParams, e.getMessage)
       case e: ScalafmtFormatting.Failed =>
         client.showMessage(new MessageParams(MessageType.Error, e.getMessage))
         throw requestError(ResponseErrorCode.RequestFailed, e.getMessage)
