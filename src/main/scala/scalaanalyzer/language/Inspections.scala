@@ -1,5 +1,6 @@
 package scalaanalyzer.language
 
+import com.intellij.codeInsight.daemon.HighlightDisplayKey
 import com.intellij.codeInsight.intention.IntentionAction
 import com.intellij.codeInsight.intention.preview.IntentionPreviewInfo
 import com.intellij.codeInspection.*
@@ -26,10 +27,15 @@ import org.jetbrains.plugins.scala.lang.psi.api.toplevel.typedef.ScMember
 import scalaanalyzer.Diagnostic
 import scalaanalyzer.platform.{CallLog, ExtensionBean}
 
+import java.util.{Locale, ResourceBundle}
+
 import scala.jdk.CollectionConverters.*
 
 /** Copy-bound previews for legacy fixes whose native preview contract is incomplete. */
 private[language] object Inspections {
+  /** The id of the unused-import problems, which the unused-declaration tool reports without a registration of its own. */
+  val UnusedImportId = "ScalaUnusedImport"
+
   /**
    * Previews the audited fixes whose native preview does not work on the copy.
    *
@@ -105,6 +111,23 @@ final class Inspections(descriptors: Seq[ExtensionBean]) {
   require(tools.map(_.attributes("shortName")).toSet == supported, "missing supported Scala inspections")
 
   /**
+   * The inspections that can report a problem, as the IDE names and groups them in its inspection results.
+   *
+   * Read from the plugin's registrations. The unused-declaration tool also reports unused imports under their own
+   * id: they share that registration's name and group, as the IDE lists them with its unused declarations.
+   */
+  val descriptions: Seq[InspectionDescription] = tools.flatMap { bean =>
+    val description = describe(bean)
+    val imports = Option.when(bean.implementation == classOf[ScalaUnusedDeclarationInspection].getName)(
+      description.copy(id = Inspections.UnusedImportId))
+
+    description +: imports.toSeq
+  }
+  // The plugin builds the suppression fixes of an inspection from its display key, which the IDE registers with the
+  // inspection profile that the host does not load. Suppressing by comment names the key's id.
+  descriptions.foreach(description => HighlightDisplayKey.findOrRegister(description.id, description.displayName))
+
+  /**
    * Collects warnings and their native quick fixes for the current project PSI.
    *
    * @param file source file, queried under read access
@@ -112,6 +135,30 @@ final class Inspections(descriptors: Seq[ExtensionBean]) {
    */
   def diagnostics(file: ScalaFile): Seq[Diagnostic] =
     if (!file.isPhysical) Seq.empty else collect(file)
+
+  /** The id a registration's problems carry: its `id` attribute, which defaults to its short name. */
+  private def inspectionId(bean: ExtensionBean): String = bean.attributes.getOrElse("id", bean.attributes("shortName"))
+
+  /**
+   * Reads a registration's display name and group path as the platform's `InspectionEP` does.
+   *
+   * The name is the `displayName` attribute or the `key` in the registration's `bundle`. The group path is the
+   * comma-separated `groupPath` followed by the `groupName` attribute or the `groupKey` in the `groupBundle`, which
+   * defaults to `bundle`. Bundles are read in the root locale: the English text the plugin ships.
+   */
+  private def describe(bean: ExtensionBean): InspectionDescription = {
+    val attributes = bean.attributes
+    // The bundles are resources of the plugin jars, which the registration's implementation class is loaded from.
+    val loader = Class.forName(bean.implementation).getClassLoader
+    def message(bundle: String, key: String): String = ResourceBundle.getBundle(bundle, Locale.ROOT, loader).getString(key)
+
+    val displayName = attributes.getOrElse("displayName", message(attributes("bundle"), attributes("key")))
+    val groupName = attributes.get("groupName")
+      .orElse(attributes.get("groupKey").map(message(attributes.getOrElse("groupBundle", attributes("bundle")), _)))
+    val groupPath = attributes.get("groupPath").toSeq.flatMap(_.split(",")).map(_.trim) ++ groupName
+
+    InspectionDescription(inspectionId(bean), displayName, groupPath)
+  }
 
   /** Runs complete visitor lifecycles and preserves the plugin's problem ranges and messages. */
   private def collect(file: ScalaFile): Seq[Diagnostic] = {
@@ -132,7 +179,7 @@ final class Inspections(descriptors: Seq[ExtensionBean]) {
           false
         case _ => true
       }
-      val id = bean.attributes.getOrElse("id", bean.attributes("shortName"))
+      val id = inspectionId(bean)
       val severity = bean.attributes.getOrElse("level", "WARNING") match {
         case "ERROR" => HighlightSeverity.ERROR
         case "WEAK WARNING" => HighlightSeverity.WEAK_WARNING
@@ -172,7 +219,7 @@ final class Inspections(descriptors: Seq[ExtensionBean]) {
               element.accept(importVisitor)
             case _ => ()
           }
-          problems(importsHolder, "ScalaUnusedImport", HighlightSeverity.WARNING, unnecessary = true)
+          problems(importsHolder, Inspections.UnusedImportId, HighlightSeverity.WARNING, unnecessary = true)
         case _ => Seq.empty
       }
       declarations ++ imports
@@ -210,8 +257,13 @@ final class Inspections(descriptors: Seq[ExtensionBean]) {
         }
         range -> action
       }
-      Diagnostic(severity, range, ProblemDescriptorUtil.renderDescriptionMessage(problem, problem.getPsiElement), fixes,
-        Some(id), deprecated = id == "ScalaDeprecation", unnecessary = unnecessary)
+      // The IDE offers these beside the problem's fixes; the host previews them like any other fix.
+      val suppressions = SuppressIntentionActionFromFix
+        .convertBatchToSuppressIntentionActions(suppressor.getSuppressActions(problem.getPsiElement, id))
+        .toSeq
+        .map(range -> _)
+      Diagnostic(severity, range, ProblemDescriptorUtil.renderDescriptionMessage(problem, problem.getPsiElement),
+        fixes ++ suppressions, Some(id), deprecated = id == "ScalaDeprecation", unnecessary = unnecessary)
     }
   }
 }

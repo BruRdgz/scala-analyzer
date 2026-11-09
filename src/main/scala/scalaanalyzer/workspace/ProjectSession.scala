@@ -10,7 +10,7 @@ import scalaanalyzer.build.{
 }
 import scalaanalyzer.language.{
   CodeActionResult, CompletionChoices, CompletionFollowUp, FileChanges, FileProblem, Fold, HierarchyCall,
-  HierarchyItem, HierarchyTarget, HintPartTarget, InlineHint, MainLens, Occurrence, OutlineSymbol,
+  HierarchyItem, HierarchyTarget, HintPartTarget, InlineHint, InspectionDescription, MainLens, Occurrence, OutlineSymbol,
   ProjectLanguageOperations, SemanticToken, SignatureChoices, SourceSpan, TestLens, TextChange, WorkspaceSymbolMatch,
 }
 import scalaanalyzer.platform.{HostLock, HostLog}
@@ -340,6 +340,15 @@ final class ProjectSession private (
     } finally readLock.unlock()
   }
 
+  /**
+   * Describes every inspection that `inspect` may report, as the IDE names and groups it in its inspection results.
+   *
+   * Takes no lock and does not check the session's state: the descriptions come from the plugin's registrations.
+   *
+   * @return one description per inspection id that a problem's `inspectionId` can carry
+   */
+  def inspectionDescriptions: Seq[InspectionDescription] = host.inspectionDescriptions
+
   /** Finds a source's owning module compile settings while the caller holds the import guard. */
   private def moduleSpec(file: PsiFile): Option[CompileSpec] =
     host.modules.ofFile(file.getViewProvider.getVirtualFile).flatMap(m => compileSpecs.get(m.spec.stableId))
@@ -426,10 +435,14 @@ final class ProjectSession private (
    * @param start selection start in zero-based lines and UTF-16 columns
    * @param end selection end in the same coordinates; equal to `start` for a caret request
    * @param only accepted action kinds and their descendants; empty selects contextual fixes and refactorings
-   * @return each accepted action paired with its current-buffer edits; empty for a source that is not Scala
+   * @param withInspections whether the caller shows inspection problems in the range, so that their fixes are
+   *                        computed even before the source's diagnostics are
+   * @return each accepted action paired with its current-buffer edits; the action's result lists the problems it
+   *         fixes or suppresses. Empty for a source that is not Scala
    */
-  def codeActions(path: Path, start: LineColumn, end: LineColumn, only: Seq[String] = Seq.empty)
-      : Seq[(CodeActionResult, Seq[TextChange])] = language.codeActions(path, start, end, only)
+  def codeActions(path: Path, start: LineColumn, end: LineColumn, only: Seq[String] = Seq.empty,
+      withInspections: Boolean = false): Seq[(CodeActionResult, Seq[TextChange])] =
+    language.codeActions(path, start, end, only, withInspections)
 
   /**
    * Validates a rename target and locates its name range.

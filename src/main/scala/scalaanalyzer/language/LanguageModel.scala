@@ -37,6 +37,15 @@ final case class FileProblem(
 )
 
 /**
+ * How the IDE presents one inspection in its inspection results.
+ *
+ * @param id the inspection id that its problems carry as `FileProblem.inspectionId`
+ * @param displayName the inspection's name, such as `Redundant block`
+ * @param groupPath the groups that contain it, outermost first, such as `Scala`, `General`
+ */
+final case class InspectionDescription(id: String, displayName: String, groupPath: Seq[String])
+
+/**
  * A symbol occurrence within one document.
  *
  * @param range start and exclusive end positions in zero-based lines and UTF-16 columns
@@ -90,8 +99,10 @@ final case class FileChanges(path: Path, changes: Seq[TextChange])
  * @param title user-facing action name
  * @param kind hierarchical action category, such as `quickfix` or `refactor.rewrite`
  * @param disabled reason the action cannot be applied, or none when available
+ * @param problems the problems this action fixes or suppresses, as the diagnostics report them; empty for an action
+ *                 that is not about a problem
  */
-final case class CodeActionResult(title: String, kind: String, disabled: Option[String])
+final case class CodeActionResult(title: String, kind: String, disabled: Option[String], problems: Seq[FileProblem] = Seq.empty)
 
 /**
  * A completion candidate detached from plugin lookup objects.

@@ -3,6 +3,7 @@ package scalaanalyzer.language
 import com.intellij.codeInsight.intention.IntentionAction
 import com.intellij.codeInsight.intention.preview.{IntentionPreviewInfo, IntentionPreviewUtils}
 import com.intellij.codeInsight.unwrap.UnwrapDescriptor
+import com.intellij.codeInspection.SuppressIntentionAction
 import com.intellij.lang.surroundWith.SurroundDescriptor
 import com.intellij.modcommand.{ActionContext, ModCommandAction, ModCommandExecutor}
 import com.intellij.openapi.editor.Editor
@@ -30,8 +31,13 @@ object CodeActions {
     "org.jetbrains.plugins.scala.codeInsight.intention.declarations.ChangeAccessModifierIntention",
   )
 
-  /** Lazily created plugin action plus the LSP action kind used for its response. */
-  private final case class Candidate(name: String, create: () => IntentionAction, kind: String)
+  /** Lazily created plugin action, the LSP action kind used for its response and the problems it is a fix for. */
+  private final case class Candidate(
+    name: String,
+    create: () => IntentionAction,
+    kind: String,
+    problems: Seq[Diagnostic] = Seq.empty,
+  )
 
   /**
    * A previewed action and its availability.
@@ -40,8 +46,15 @@ object CodeActions {
    * @param kind hierarchical action category
    * @param edits replacements against the original file
    * @param disabled reason the preview cannot be applied, or none when available
+   * @param problems the problems whose fix or suppression this is; empty for an action that is not about a problem
    */
-  final case class Choice(title: String, kind: String, edits: Seq[ChangeEngine.Edit], disabled: Option[String])
+  final case class Choice(
+    title: String,
+    kind: String,
+    edits: Seq[ChangeEngine.Edit],
+    disabled: Option[String],
+    problems: Seq[Diagnostic] = Seq.empty,
+  )
 }
 
 /**
@@ -87,9 +100,9 @@ final class CodeActions(intentionClasses: Seq[String], descriptorClasses: Seq[St
       val intentions = intentionClasses.filterNot(CodeActions.UnavailableIntentions).map { name =>
         Candidate(name, () => newIntention(name), "refactor.rewrite")
       }
-      val fixes = problems.flatMap(_.fixes).collect {
-        case (fixRange, fix) if fixRange.intersects(range) || fixRange.containsOffset(range.getStartOffset) =>
-          Candidate(fix.getClass.getName, () => fix, "quickfix")
+      val fixes = problems.flatMap(problem => problem.fixes.map(fix => problem -> fix)).collect {
+        case (problem, (fixRange, fix)) if fixRange.intersects(range) || fixRange.containsOffset(range.getStartOffset) =>
+          Candidate(fix.getClass.getName, () => fix, "quickfix", Seq(problem))
       }
 
       editor.getSelectionModel.setSelection(range.getStartOffset, range.getEndOffset)
@@ -112,23 +125,29 @@ final class CodeActions(intentionClasses: Seq[String], descriptorClasses: Seq[St
                 new ScalaImportOptimizer().processFile(copy).run()
                 IntentionPreviewInfo.DIFF
               } else Inspections.previewFix(action, copy).getOrElse {
-                if (commandAction == null) action.generatePreview(project, previewEditor, copy)
-                else {
-                  val command = commandAction.perform(ActionContext.from(editor, file))
-                  ModCommandExecutor.getInstance.executeForFileCopy(command, copy)
-                  IntentionPreviewInfo.DIFF
+                action match {
+                  // The platform gives these no preview of their own: they write a comment through `invoke`.
+                  case suppression: SuppressIntentionAction =>
+                    suppression.invoke(project, previewEditor, copy)
+                    IntentionPreviewInfo.DIFF
+                  case _ if commandAction == null => action.generatePreview(project, previewEditor, copy)
+                  case _ =>
+                    val command = commandAction.perform(ActionContext.from(editor, file))
+                    ModCommandExecutor.getInstance.executeForFileCopy(command, copy)
+                    IntentionPreviewInfo.DIFF
                 }
               }
             }
             val supported = info == IntentionPreviewInfo.DIFF || info == IntentionPreviewInfo.DIFF_NO_TRIM
             Some(Choice(title, candidate.kind, if (supported) result.edits else Seq.empty,
-              Option.when(!supported)("This action does not provide an applicable text preview.")))
+              Option.when(!supported)("This action does not provide an applicable text preview."), candidate.problems))
           }
         } catch {
           case e: ProcessCanceledException => throw e
           case e @ (NonFatal(_) | _: LinkageError) =>
             HostLog.warn(s"code action $title could not be previewed", e)
-            Option.when(available)(Choice(title, candidate.kind, Seq.empty, Some("This action is unavailable in the headless host.")))
+            Option.when(available)(Choice(title, candidate.kind, Seq.empty,
+              Some("This action is unavailable in the headless host."), candidate.problems))
         }
       }
 

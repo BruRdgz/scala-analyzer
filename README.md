@@ -32,7 +32,7 @@ It exposes editor features through the **Language Server Protocol (LSP)** and im
 
 | Area | Capabilities |
 | --- | --- |
-| Diagnostics | Scala plugin and compiler diagnostics; current-buffer compilation for Scala 3; selected native inspections, also over the whole project (Inspect Code). |
+| Diagnostics | Scala plugin and compiler diagnostics; current-buffer compilation for Scala 3; selected native inspections, also over the whole project (Inspect Code, listed by group, inspection and file in VS Code's Inspection Results view). |
 | Completion | Automatic imports, insertion handlers and signature help. |
 | Inlay hints | Inferred types, parameter names, implicit arguments and conversions, method chains. Type names are links to their declarations, an inferred definition type can be written into the source, and `scalaAnalyzer.inlayHints.*` selects the kinds shown. |
 | Navigation | Definitions (through the plugin's Go to Declaration), type definitions, references, implementations, go to super, call/type hierarchies and workspace symbols; library sources and decompiled classes. |

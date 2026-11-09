@@ -27,6 +27,16 @@
   variable types, obvious types, parameter names, method chains, implicits), read with `workspace/configuration` once the
   client is ready and again after `workspace/didChangeConfiguration`; the server then sends `workspace/inlayHint/refresh`.
   The defaults are the IDE's, except implicit hints, which stay on.
+- `scalaAnalyzer/inspect` also answers `inspections`: the display name and group path (such as `Scala`, `General`) of
+  each inspection that reported a problem, read from the plugin's registrations and keyed by the `code` of its
+  diagnostics. Unused imports are described by the unused-declaration registration, whose name and group they share.
+- The VS Code extension lists the results of **Inspect Code** in an **Inspection Results** view in the bottom panel,
+  as the IDE's tool window does: group, inspection, file, then problem, with counts. Selecting a problem opens it;
+  its buttons apply the problem's quick fix or its suppression, and the view's title bar reruns, clears and collapses.
+- Code actions for an inspection problem list, as their `diagnostics`, the client's diagnostics that report it (same
+  range, code and message). They include the plugin's suppression actions (`//noinspection <id>` for the statement,
+  definition, class or file), previewed like any fix; unused imports are suppressed under `ScalaUnusedImport`. A request
+  that carries inspection diagnostics gets their fixes even before the file's diagnostics were computed.
 
 ## 0.2.0 — 2026-11-09
 
