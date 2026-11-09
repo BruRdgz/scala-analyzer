@@ -33,7 +33,8 @@ It exposes editor features through the **Language Server Protocol (LSP)** and im
 | Area | Capabilities |
 | --- | --- |
 | Diagnostics | Scala plugin and compiler diagnostics; current-buffer compilation for Scala 3; selected native inspections, also over the whole project (Inspect Code). |
-| Completion | Automatic imports, insertion handlers, signature help and inlay hints. |
+| Completion | Automatic imports, insertion handlers and signature help. |
+| Inlay hints | Inferred types, parameter names, implicit arguments and conversions, method chains. Type names are links to their declarations, an inferred definition type can be written into the source, and `scalaAnalyzer.inlayHints.*` selects the kinds shown. |
 | Navigation | Definitions (through the plugin's Go to Declaration), type definitions, references, implementations, go to super, call/type hierarchies and workspace symbols; library sources and decompiled classes. |
 | Documentation | Markdown hover with declaration context, parameters, return values and linked references. |
 | Editing | Rename, organize imports, previewable quick fixes, intentions, surround and unwrap actions; split/join lists and flip comma. |
@@ -177,7 +178,11 @@ is partial, indexes are kept in memory, and each process serves one workspace.
   without its highlighting of the affected code. Change access modifier is not offered: it needs the IDE's rename UI.
 - Some completion contributors require IDE services that are unavailable. Live templates have no snippet tab stops;
   completion followed by handler edits takes two undo steps.
-- Inlay hints are text labels without the IDE's interactive presentation or range hints. Project IDE code-style
+- Inlay hints are text labels without the IDE's interactive presentation or range hints (`1 to 5`). Their settings
+  are the host's, read from `workspace/configuration` (`scalaAnalyzer.inlayHints.*`) by a client that answers it; the
+  IDE's X-Ray mode, hint length and per-method parameter-name exclusions are not offered. Label parts get their
+  locations and tooltips from `inlayHint/resolve`, so a client without resolve support shows plain labels, and a
+  type written from a hint is the hint's text: it adds no import. Project IDE code-style
   settings are not imported, and range formatting uses the IntelliJ formatter even when scalafmt is configured.
 - One workspace is served per process. Shared sources assigned to multiple BSP targets are rejected as ambiguous;
   `.sbt` build-definition files are not treated as editable Scala sources.

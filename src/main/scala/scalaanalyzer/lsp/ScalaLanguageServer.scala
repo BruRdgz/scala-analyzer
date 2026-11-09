@@ -1,6 +1,6 @@
 package scalaanalyzer.lsp
 
-import com.google.gson.{JsonObject, JsonPrimitive}
+import com.google.gson.{Gson, JsonObject, JsonPrimitive}
 import com.intellij.diff.comparison.DiffTooBigException
 import com.intellij.openapi.progress.ProcessCanceledException
 import org.eclipse.lsp4j.*
@@ -10,7 +10,7 @@ import org.eclipse.lsp4j.services.*
 
 import scalaanalyzer.{LineColumn, LineRange, ScalaPsiHost}
 import scalaanalyzer.build.{BspImport, ScalafmtFormatting, TestRun}
-import scalaanalyzer.language.{Completion, CompletionChoice, CompletionFollowUp, FileProblem, Fold, HierarchyItem, HierarchyTarget, OutlineSymbol, ProblemSeverity, Rename, SignatureChoices, SourceSpan, TextChange, WorkspaceSymbolKind}
+import scalaanalyzer.language.{Completion, CompletionChoice, CompletionFollowUp, FileProblem, Fold, HierarchyItem, HierarchyTarget, InlayHints, InlineHint, OutlineSymbol, ProblemSeverity, Rename, SignatureChoices, SourceSpan, TextChange, WorkspaceSymbolKind}
 import scalaanalyzer.platform.{CallLog, HostLock, HostLog}
 import scalaanalyzer.workspace.ProjectSession
 
@@ -99,6 +99,15 @@ final class ScalaLanguageServer(
 
   /** Whether the client supports requests to refresh its code lenses. */
   @volatile private var refreshesCodeLenses = false
+
+  /** Whether the client supports requests to refresh its inlay hints. */
+  @volatile private var refreshesInlayHints = false
+
+  /** Whether the client answers `workspace/configuration` requests. */
+  @volatile private var readsConfiguration = false
+
+  /** Whether the client accepts dynamic registration of configuration-change notifications. */
+  @volatile private var watchesConfiguration = false
 
   /** The latest reported server state. */
   @volatile private var state = new HostProtocol.ServerState("starting", "waiting for the client")
@@ -230,6 +239,63 @@ final class ScalaLanguageServer(
       null
     }
 
+  /** Asks the client to request hints again: their settings changed. */
+  private def refreshInlayHints(): Unit =
+    if (refreshesInlayHints) client.refreshInlayHints().exceptionally { error =>
+      HostLog.warn("could not refresh inlay hints", error)
+      null
+    }
+
+  /**
+   * Reads the client's `scalaAnalyzer.inlayHints` settings and applies them to the host, then refreshes the hints.
+   *
+   * Does not wait for the client's answer. The settings are applied on the documents thread, between the requests
+   * the client sent before and after its answer.
+   */
+  private def readInlayHintSettings(): Unit = {
+    val item = new ConfigurationItem
+    item.setSection(InlayHintSettings)
+
+    client.configuration(new ConfigurationParams(JavaList.of(item)))
+      .thenAcceptAsync(answers => {
+        host.configureInlayHints(inlayHintToggles(answers.asScala.headOption.orNull))
+        refreshInlayHints()
+      }, documents)
+      .exceptionally { error =>
+        HostLog.warn("could not read the inlay hint settings", error)
+        null
+      }
+  }
+
+  /**
+   * The hint kinds a `scalaAnalyzer.inlayHints` settings object asks for.
+   *
+   * @param settings the client's answer for the section; anything but an object stands for no settings
+   * @return the section's toggles, each defaulting to the IDE's when the section lacks it or does not hold a boolean
+   */
+  private def inlayHintToggles(settings: AnyRef): InlayHints.Toggles = {
+    val section = new Gson().toJsonTree(settings) match {
+      case json: JsonObject => json
+      case _ => new JsonObject
+    }
+    val defaults = InlayHints.Toggles.Default
+
+    /** The boolean the section gives for `name`, or `default` when it gives none. */
+    def toggle(name: String, default: Boolean): Boolean = Option(section.get(name)).collect {
+      case value: JsonPrimitive if value.isBoolean => value.getAsBoolean
+    }.getOrElse(default)
+
+    InlayHints.Toggles(
+      methodResultTypes = toggle("methodResultTypes", defaults.methodResultTypes),
+      memberVariableTypes = toggle("memberVariableTypes", defaults.memberVariableTypes),
+      localVariableTypes = toggle("localVariableTypes", defaults.localVariableTypes),
+      obviousTypes = toggle("obviousTypes", defaults.obviousTypes),
+      parameterNames = toggle("parameterNames", defaults.parameterNames),
+      methodChains = toggle("methodChains", defaults.methodChains),
+      implicits = toggle("implicits", defaults.implicits),
+    )
+  }
+
   /**
    * Imports the build again (see [[ProjectSession.importBuild]]), as progress and server state.
    *
@@ -309,6 +375,11 @@ final class ScalaLanguageServer(
     reportsProgress = windowCapabilities.flatMap(w => Option(w.getWorkDoneProgress)).exists(_.booleanValue)
     refreshesCodeLenses = workspaceCapabilities.flatMap(w => Option(w.getCodeLens))
       .flatMap(c => Option(c.getRefreshSupport)).exists(_.booleanValue)
+    refreshesInlayHints = workspaceCapabilities.flatMap(w => Option(w.getInlayHint))
+      .flatMap(c => Option(c.getRefreshSupport)).exists(_.booleanValue)
+    readsConfiguration = workspaceCapabilities.flatMap(w => Option(w.getConfiguration)).exists(_.booleanValue)
+    watchesConfiguration = workspaceCapabilities.flatMap(w => Option(w.getDidChangeConfiguration))
+      .flatMap(c => Option(c.getDynamicRegistration)).exists(_.booleanValue)
     appliesEdits = workspaceCapabilities.flatMap(w => Option(w.getApplyEdit)).exists(_.booleanValue)
     showsDocuments = windowCapabilities.flatMap(w => Option(w.getShowDocument))
       .exists(_.isSupport)
@@ -330,6 +401,9 @@ final class ScalaLanguageServer(
     capabilities.setDocumentHighlightProvider(true)
     capabilities.setDocumentSymbolProvider(true)
     capabilities.setFoldingRangeProvider(true)
+    val inlayHints = new InlayHintRegistrationOptions
+    // The locations and tooltips of a hint's label parts are filled in by inlayHint/resolve.
+    inlayHints.setResolveProvider(true)
     val rename = new RenameOptions(/* prepareProvider = */ true)
     val tokens = new SemanticTokensWithRegistrationOptions(SemanticColoring.legend, /* full = */ true)
     val completionTriggers = java.util.List.of(".")
@@ -343,7 +417,7 @@ final class ScalaLanguageServer(
     if (scopesScalaFeatures) {
       val lenses = scalaOnly(new CodeLensRegistrationOptions)
       lenses.setResolveProvider(false)
-      capabilities.setInlayHintProvider(scalaOnly(new InlayHintRegistrationOptions))
+      capabilities.setInlayHintProvider(scalaOnly(inlayHints))
       capabilities.setSelectionRangeProvider(scalaOnly(new SelectionRangeRegistrationOptions))
       capabilities.setImplementationProvider(scalaOnly(new ImplementationRegistrationOptions))
       capabilities.setCallHierarchyProvider(scalaOnly(new CallHierarchyRegistrationOptions))
@@ -363,7 +437,7 @@ final class ScalaLanguageServer(
       ).map { (method, options) => new Registration(s"scala-analyzer-$method", s"textDocument/$method", options) }
     } else {
       capabilities.setCodeLensProvider(new CodeLensOptions(false))
-      capabilities.setInlayHintProvider(true)
+      capabilities.setInlayHintProvider(inlayHints)
       capabilities.setSelectionRangeProvider(true)
       capabilities.setSignatureHelpProvider(new SignatureHelpOptions(signatureTriggers, signatureRetriggers))
       capabilities.setDocumentFormattingProvider(true)
@@ -405,6 +479,18 @@ final class ScalaLanguageServer(
     if (languageRegistrations.nonEmpty) {
       client.registerCapability(new RegistrationParams(languageRegistrations.asJava)).exceptionally { error =>
         HostLog.warn("could not register Scala language features", error)
+        null
+      }
+    }
+
+    if (readsConfiguration) readInlayHintSettings()
+
+    if (readsConfiguration && watchesConfiguration) {
+      // The notification carries no settings the server needs: it reads them again, as after `initialized`.
+      val registration =
+        new Registration("scala-analyzer-configuration", "workspace/didChangeConfiguration", new JsonObject)
+      client.registerCapability(new RegistrationParams(JavaList.of(registration))).exceptionally { error =>
+        HostLog.warn("could not register for configuration changes", error)
         null
       }
     }
@@ -936,16 +1022,64 @@ final class ScalaLanguageServer(
      * Runs on a read thread.
      *
      * @param params the document and range to hint
-     * @return one text-labelled hint per hint the session returns, each at its position; empty when the document is
-     *         not a project source
+     * @return one hint per hint the session returns, each at its position; empty when the document is not a project
+     *         source. A hint with a part that navigates has label parts, whose locations and tooltips
+     *         `resolveInlayHint` gives; the others have a plain label. A hint that shows a definition's inferred type
+     *         has the edit that writes it into the source
      */
     override def inlayHint(params: InlayHintParams): CompletableFuture[JavaList[InlayHint]] =
       onRead("inlayHint", params.getTextDocument, JavaList.of[InlayHint]()) { (s, path) =>
         val range = params.getRange
-        s.inlayHints(path, lineColumn(range.getStart), lineColumn(range.getEnd)).map { hint =>
-          new InlayHint(position(hint.at), LspEither.forLeft[String, JavaList[InlayHintLabelPart]](hint.text))
-        }.asJava
+        s.inlayHints(path, lineColumn(range.getStart), lineColumn(range.getEnd))
+          .map(toInlayHint(params.getTextDocument.getUri, _)).asJava
       }
+
+    /**
+     * Gives the label parts of a hint their locations and tooltips.
+     *
+     * Runs on a read thread. Locating a library declaration materializes its source file, which the hints of a whole
+     * document must not do after every edit, so the client asks for the one hint the user points at.
+     *
+     * @param hint a hint this server returned, with its `data`
+     * @return the same hint with `location` and `tooltip` on its label parts; unchanged when it has no `data` of
+     *         this server's, or when the document no longer has that hint
+     */
+    override def resolveInlayHint(hint: InlayHint): CompletableFuture[InlayHint] = hint.getData match {
+      case data: JsonObject if hint.getLabel.isRight =>
+        onRead("inlayHint/resolve", new TextDocumentIdentifier(data.get("uri").getAsString), hint) { (s, path) =>
+          val targets = s.inlayHintTargets(path, lineColumn(hint.getPosition), data.get("index").getAsInt)
+          val parts = hint.getLabel.getRight.asScala
+
+          // A changed document may have another hint at that index: leave this one as the client has it.
+          if (targets.map(_.text) == parts.map(_.getValue).toSeq) parts.zip(targets).foreach { (part, target) =>
+            target.location.foreach { (file, at) =>
+              part.setLocation(new Location(file.toUri.toString, new Range(position(at), position(at))))
+            }
+            target.tooltip.foreach(text => part.setTooltip(text))
+          }
+
+          hint
+        }
+      case _ => CompletableFuture.completedFuture(hint)
+    }
+
+    /** Converts a session hint to the LSP's: label parts only when one navigates, resolved later by `data`. */
+    private def toInlayHint(uri: String, hint: InlineHint): InlayHint = {
+      val at = position(hint.at)
+      val converted = new InlayHint(at, LspEither.forLeft[String, JavaList[InlayHintLabelPart]](hint.text))
+
+      if (hint.parts.exists(_.navigable)) {
+        val data = new JsonObject
+        data.addProperty("uri", uri)
+        data.addProperty("index", hint.index)
+
+        converted.setLabel(hint.parts.map(part => new InlayHintLabelPart(part.text)).asJava)
+        converted.setData(data)
+      }
+      hint.annotation.foreach(text => converted.setTextEdits(JavaList.of(new TextEdit(new Range(at, at), text))))
+
+      converted
+    }
 
     /**
      * Returns the run lenses of test suites, their tests and main classes, resolved eagerly.
@@ -1635,11 +1769,14 @@ final class ScalaLanguageServer(
   /** Workspace-level commands, symbol queries and build/source watch notifications. */
   private object Workspace extends LspServices.Workspace {
     /**
-     * Configuration changes are not applied; module settings come from the imported build.
+     * Reads the client's inlay hint settings again, for a client that answers `workspace/configuration`.
      *
-     * @param params the changed settings, which are ignored
+     * Module settings come from the imported build, not from the client.
+     *
+     * @param params the changed settings, which are ignored: the client is asked for the section instead
      */
-    override def didChangeConfiguration(params: DidChangeConfigurationParams): Unit = ()
+    override def didChangeConfiguration(params: DidChangeConfigurationParams): Unit =
+      if (readsConfiguration) readInlayHintSettings()
 
     /**
      * Executes a test selection, a main class or completion insert handler; unknown commands are invalid parameters.
@@ -1735,6 +1872,9 @@ private val RunMain = "scalaAnalyzer.runMain"
 
 /** The command that replays insertion after the client has inserted a completion item's lookup text. */
 private val CompleteInsertion = "scalaAnalyzer.completeInsertion"
+
+/** The client's settings section that selects the kinds of inlay hints (see `InlayHints.Toggles`). */
+private val InlayHintSettings = "scalaAnalyzer.inlayHints"
 
 /** Which files define an sbt build: the client watches them, and a change to one reloads the build. */
 private object BuildDefinition {

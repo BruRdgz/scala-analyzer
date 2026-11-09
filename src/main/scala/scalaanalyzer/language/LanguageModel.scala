@@ -138,12 +138,36 @@ final case class CompletionChoice(suggestion: CompletionCandidate, start: LineCo
 final case class CompletionFollowUp(changes: Seq[TextChange], caret: LineColumn)
 
 /**
+ * One piece of an inline hint's label.
+ *
+ * @param text the piece's text
+ * @param navigable whether the plugin gives the piece a declaration to navigate to, which `inlayHintTargets` locates
+ */
+final case class HintLabelPart(text: String, navigable: Boolean)
+
+/**
  * An inline hint at a document position.
  *
  * @param at zero-based line and UTF-16 column at which to show the hint
- * @param text rendered hint label
+ * @param parts the label's pieces, in order
+ * @param index the hint's position in the document's hints, which `inlayHintTargets` takes to find it again
+ * @param annotation the text that writes the hint into the source, for a hint that shows the inferred type of a
+ *                   definition; absent for any other hint
  */
-final case class InlineHint(at: LineColumn, text: String)
+final case class InlineHint(at: LineColumn, parts: Seq[HintLabelPart], index: Int, annotation: Option[String]) {
+  /** The label as one string. */
+  def text: String = parts.map(_.text).mkString
+}
+
+/**
+ * What a hint's label piece navigates to and says.
+ *
+ * @param text the piece's text
+ * @param location the declaration's file and the position of its name, as `definition` reports them; absent for a
+ *                 piece without a declaration in a project or library file
+ * @param tooltip the declaration's signature as plain text; absent when the plugin has none for the piece
+ */
+final case class HintPartTarget(text: String, location: Option[(Path, LineColumn)], tooltip: Option[String])
 
 /**
  * A runnable test selection with its BSP target and source anchor.

@@ -778,8 +778,8 @@ private[scalaanalyzer] object HostBootstrap {
       appServices.register(classOf[CodeInsightSettings])(new CodeInsightSettings)
       appServices.register(classOf[JavaIdeCodeInsightSettings])(new JavaIdeCodeInsightSettings)
       appServices.register(classOf[ScalaCodeInsightSettings])(new ScalaCodeInsightSettings)
-      // The IDE shows implicit arguments and conversions while the user toggles them on; an LSP client can only show
-      // or hide inlay hints as a whole, so they are on.
+      // The IDE shows implicit arguments and conversions while the user toggles them on; an LSP client cannot toggle
+      // them from the editor, so they are on until its `scalaAnalyzer.inlayHints.implicits` setting says otherwise.
       InlayHints.setImplicitHintsEnabled(true)
       appServices.register(classOf[ParameterNameHintsSettings])(new ParameterNameHintsSettings)
       // Quick documentation becomes Markdown, which the editor highlights itself: the HTML carries no colors.
