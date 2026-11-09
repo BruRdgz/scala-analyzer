@@ -111,6 +111,17 @@ final class ProjectSession private (
   }
 
   /**
+   * Checks whether creating or deleting a file can change the build's sources: the file is a registered source, or
+   * it is under a source directory that the build lists.
+   *
+   * Takes the import guard's read lock, as `isSource` does.
+   *
+   * @param path created or deleted file
+   * @return `true` when importing the build again can add or remove that file as a source
+   */
+  def affectsSources(path: Path): Boolean = isSource(path) || imported.exists(_.sourceDirectories.exists(path.startsWith))
+
+  /**
    * Reports whether source requests remain permitted by the import-failure guard.
    *
    * Takes no lock. Only the partial-import failure is consulted: closing the session does not change the result.

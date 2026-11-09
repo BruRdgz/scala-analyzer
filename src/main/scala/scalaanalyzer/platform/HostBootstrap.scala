@@ -26,7 +26,7 @@ import com.intellij.openapi.module.Module
 import com.intellij.openapi.progress.{EmptyProgressIndicator, ProgressManager}
 import com.intellij.openapi.progress.impl.CoreProgressManager
 import com.intellij.openapi.project.{DumbModeTask, DumbService, Project}
-import com.intellij.openapi.util.{Condition, Disposer, Key, UserDataHolderBase}
+import com.intellij.openapi.util.{Condition, Disposer, Key, TextRange, UserDataHolderBase}
 import com.intellij.openapi.util.registry.Registry
 import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.featureStatistics.FeatureUsageTracker
@@ -1756,6 +1756,8 @@ private[scalaanalyzer] object HostBootstrap {
         case ("InjectedLanguageManager.getCachedInjectedDocumentsInRange", _) => java.util.List.of()
         // There are no registered injectors, so enumeration has no injected fragments to visit.
         case ("InjectedLanguageManager.enumerate", _) => null
+        // Without injected files every element is in its host file, so its ranges are already host ranges.
+        case ("InjectedLanguageManager.injectedToHost", Array(_: PsiElement, range: TextRange)) => range
       }))
       // JVM-language-neutral class lookup that JavaPsiFacadeImpl also consults; no other JVM language provides classes.
       CoreApplicationEnvironment.registerExtensionPoint(area, JvmElementProvider.EP_NAME.getName,

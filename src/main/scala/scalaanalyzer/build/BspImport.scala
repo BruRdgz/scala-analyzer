@@ -108,7 +108,8 @@ final class BuildConnection private[scalaanalyzer] (
       val items = sourcesById.get(target.getId).toSeq
 
       ImportedModule(spec, items.flatMap(BspImport.sourceFiles), compile,
-        generatedSources = items.flatMap(BspImport.generatedSourceFiles).toSet)
+        generatedSources = items.flatMap(BspImport.generatedSourceFiles).toSet,
+        sourceDirectories = items.flatMap(BspImport.sourceDirectories))
     }
 
     BspImport.dependenciesFirst(imported)
@@ -542,6 +543,17 @@ object BspImport {
    */
   private[scalaanalyzer] def sourceFiles(item: SourcesItem): Seq[Path] =
     item.getSources.asScala.toSeq.flatMap(filesOf)
+
+  /**
+   * The directory entries of a BSP source item, whether or not they exist yet.
+   *
+   * @param item source entries of one build target
+   * @return the paths of the entries of kind directory, in entry order
+   */
+  private[scalaanalyzer] def sourceDirectories(item: SourcesItem): Seq[Path] =
+    item.getSources.asScala.toSeq
+      .filter(_.getKind == SourceItemKind.DIRECTORY)
+      .map(source => Path.of(URI.create(source.getUri)))
 
   /**
    * Resolves the files of a BSP source item that the build marks as generated.

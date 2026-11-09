@@ -1867,8 +1867,13 @@ final class ScalaLanguageServer(
       val changes = params.getChanges.asScala.toSeq
         .filter(_.getUri.startsWith("file:"))
         .map(change => pathOf(change.getUri) -> change.getType)
-      val buildChanged = changes.exists((path, _) => BuildDefinition.isPart(path))
-      val sourcesAddedOrRemoved = changes.exists((path, kind) => kind != FileChangeType.Changed && !BuildDefinition.isPart(path))
+      val root = workspace.getOrElse(throw new IllegalStateException("watched files before initialize"))
+      val buildChanged = changes.exists((path, _) => BuildDefinition.isPart(root, path))
+      // A file outside the build's sources and definition, such as another checkout under the workspace, changes
+      // nothing the server imports.
+      val sourcesAddedOrRemoved = changes.exists { (path, kind) =>
+        kind != FileChangeType.Changed && !BuildDefinition.isPart(root, path) && s.affectsSources(path)
+      }
 
       if (buildChanged || sourcesAddedOrRemoved) {
         val reason = if (buildChanged) "build definition changed" else "source files created or deleted"
@@ -1906,17 +1911,23 @@ private object BuildDefinition {
   val BuildProperties = "**/project/build.properties"
 
   /**
-   * Whether `path` can change sbt's build definition and therefore requires a BSP workspace reload.
+   * Whether `path` can change the workspace's sbt build definition and therefore requires a BSP workspace reload.
    *
+   * Only the build at the workspace root counts: the build files of other builds under it, such as test fixtures or
+   * other checkouts, are not part of it.
+   *
+   * @param root workspace root
    * @param path changed file; must have a file name, so not a filesystem root
-   * @return `true` for any `.sbt` file, and for a `.scala` file or `build.properties` directly inside a directory
-   *         named `project`; `false` otherwise
+   * @return `true` for a `.sbt` file in the root or its `project` directory, and for a `.scala` file or
+   *         `build.properties` in that `project` directory; `false` otherwise
    */
-  def isPart(path: Path): Boolean = {
+  def isPart(root: Path, path: Path): Boolean = {
     val name = path.getFileName.toString
-    val inProject = Option(path.getParent).exists(_.getFileName.toString == "project")
+    val parent = path.getParent
+    val inProject = parent == root.resolve("project")
 
-    name.endsWith(".sbt") || (inProject && (name.endsWith(".scala") || name == "build.properties"))
+    (name.endsWith(".sbt") && (parent == root || inProject)) ||
+      (inProject && (name.endsWith(".scala") || name == "build.properties"))
   }
 }
 

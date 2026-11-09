@@ -894,6 +894,9 @@ class LanguageServerTest extends munit.FunSuite {
 
     assertEquals(highlightsAt(16, 3), Seq((16, 2, DocumentHighlightKind.Read), (16, 21, DocumentHighlightKind.Read)))
     assertEquals(highlightsAt(8, 2), Seq((8, 0, DocumentHighlightKind.Read), (19, 0, DocumentHighlightKind.Read)))
+    // `new Counter(0)` (line 20): the constructor call and the class it constructs.
+    val construction = highlightsAt(20, 27).map(h => (h._1, h._2))
+    assert(construction.contains((8, 6)) && construction.contains((20, 26)), construction.toString)
   }
 
   test("hover renders Java declarations and Java targets referenced from Scala") {

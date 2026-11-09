@@ -30,12 +30,15 @@ final case class CompileSpec(
  * @param sources Scala and Java source paths owned by the target
  * @param compile settings for compiling current document text
  * @param generatedSources the part of `sources` the build marks as generated; empty when it marks none
+ * @param sourceDirectories the directories the build lists as source entries: a file created in one is a source of
+ *                          the module once the build is imported again
  */
 final case class ImportedModule(
   spec: ModuleSpec,
   sources: Seq[Path],
   compile: CompileSpec,
   generatedSources: Set[Path] = Set.empty,
+  sourceDirectories: Seq[Path] = Seq.empty,
 )
 
 /**
