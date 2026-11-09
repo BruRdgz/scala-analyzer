@@ -146,7 +146,7 @@ object CodeActionsOracle {
     val file = host.openFile(Path.of(s"/actions-oracle/$name.scala"), original, module).asInstanceOf[ScalaFile]
     try {
       val errors = HostLog.count(HostLog.Level.Error)
-      val actions = host.read(new CodeActions(Seq(className), Seq.empty).collect(file, new TextRange(at, at), Seq.empty))
+      val actions = host.read(new CodeActions(Seq(className), Seq.empty, Seq.empty).collect(file, new TextRange(at, at), Seq.empty))
       require(host.read(file.getText) == original, "intention changed the source")
       actions.filter(_.disabled.isEmpty) match {
         case Seq(action) =>

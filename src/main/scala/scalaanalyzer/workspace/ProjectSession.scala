@@ -489,12 +489,13 @@ final class ProjectSession private (
   }
 
   /**
-   * Finds a symbol's occurrences within one source file.
+   * Finds what the IDE highlights at a caret within one source file: the plugin's usage handler's marks (exit points,
+   * companion keywords, implicit usages) and the occurrences of the symbol there.
    *
    * @param path registered project-source path
-   * @param at referenced or declared symbol position in zero-based lines and UTF-16 columns
-   * @return the distinct occurrences with write-access markers, the declaration first when it is in this document;
-   *         empty when no named symbol is at the position
+   * @param at caret position in zero-based lines and UTF-16 columns
+   * @return the distinct occurrences with write-access markers, the symbol's declaration first when it is in this
+   *         document; empty when neither a handler nor a named symbol is at the position
    */
   def highlights(path: Path, at: LineColumn): Seq[Occurrence] = language.highlights(path, at)
 

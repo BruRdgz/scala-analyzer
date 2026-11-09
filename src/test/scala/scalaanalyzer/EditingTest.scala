@@ -578,6 +578,16 @@ class EditingTest extends munit.FunSuite {
       // Its preview moves the caret along the line after inserting the gap.
       ("object Gap { val s = \"ab<caret>cd\" }", "Insert gap with concatenation",
         "object Gap { val s = \"ab\" +  + \"cd\" }"),
+      // The platform's list intentions, through the plugin's split/join contexts (ScalaSplitArgumentsIntentionTest and
+      // ScalaJoinArgumentsIntentionTest, `testMethodCall1`).
+      ("object Action {\n  def foo(i: Int, s: String): Unit = {}\n  foo(<caret>42, \"boo\")\n}",
+        "Put arguments on separate lines",
+        "object Action {\n  def foo(i: Int, s: String): Unit = {}\n  foo(42,\n    \"boo\")\n}"),
+      ("object Action {\n  def foo(i: Int, s: String): Unit = {}\n  foo<caret>(42,\n    \"boo\")\n}",
+        "Put arguments on one line",
+        "object Action {\n  def foo(i: Int, s: String): Unit = {}\n  foo(42, \"boo\")\n}"),
+      ("object Action { def f(a: Int, b: Int) = 0; val x = f(1<caret>, 2) }", "Flip",
+        "object Action { def f(a: Int, b: Int) = 0; val x = f(2, 1) }"),
     )
     TestHost.libraryReport
     for ((marked, title, expected) <- cases) {
@@ -593,6 +603,30 @@ class EditingTest extends munit.FunSuite {
         val chosen = actions.find(_.title.startsWith(title)).getOrElse(fail(actions.toString))
         assertEquals(chosen.disabled, None)
         assertEquals(applyEdits(original, chosen.edits), expected)
+        assertEquals(host.read(file.getText), original)
+      } finally host.closeSource(file)
+    }
+  }
+
+  // Unwrapping leaves the whitespace around the extracted statements to the formatter, so the texts are compared
+  // with their whitespace collapsed.
+  test("unwrap actions apply the plugin's unwrappers on a copy and keep the source") {
+    val cases = Seq(
+      ("object Action { def f(b: Boolean): Unit = { if (b) { <caret>println(1) } } }", "Unwrap 'if...'",
+        "object Action { def f(b: Boolean): Unit = { println(1) } }"),
+      ("object Action { def f(b: Boolean): Unit = if (b) println(1) <caret>else println(2) }", "Remove 'else...'",
+        "object Action { def f(b: Boolean): Unit = if (b) println(1) }"),
+    )
+    TestHost.libraryReport
+    for ((marked, title, expected) <- cases) {
+      val original = marked.replace("<caret>", "")
+      val file = scalaFile("Action", original)
+      try {
+        val at = marked.indexOf("<caret>")
+        val actions = host.codeActions(file, new TextRange(at, at))
+        val chosen = actions.find(_.title.startsWith(title)).getOrElse(fail(actions.toString))
+        assertEquals(chosen.disabled, None)
+        assertEquals(applyEdits(original, chosen.edits).replaceAll("\\s+", " "), expected)
         assertEquals(host.read(file.getText), original)
       } finally host.closeSource(file)
     }

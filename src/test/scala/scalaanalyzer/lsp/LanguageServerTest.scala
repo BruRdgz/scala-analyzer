@@ -848,6 +848,18 @@ class LanguageServerTest extends munit.FunSuite {
     ))
   }
 
+  // The plugin's usage handlers answer on keywords: `def` marks the method's exit points (line 16: `current`, whose
+  // result is `count`) and `class` marks the `object` keyword of its companion (line 19).
+  test("highlights a method's exit points from def and a companion's keyword from class") {
+    def highlightsAt(line: Int, column: Int) = server.getTextDocumentService
+      .documentHighlight(new DocumentHighlightParams(document(counter), new Position(line, column)))
+      .get(1, TimeUnit.MINUTES).asScala.toSeq
+      .map(h => (h.getRange.getStart.getLine, h.getRange.getStart.getCharacter, h.getKind)).sortBy(h => (h._1, h._2))
+
+    assertEquals(highlightsAt(16, 3), Seq((16, 2, DocumentHighlightKind.Read), (16, 21, DocumentHighlightKind.Read)))
+    assertEquals(highlightsAt(8, 2), Seq((8, 0, DocumentHighlightKind.Read), (19, 0, DocumentHighlightKind.Read)))
+  }
+
   test("hover renders Java declarations and Java targets referenced from Scala") {
     val javaFile = fixture.resolve("core/src/main/java/core/Shout.java")
     val original = Files.readString(javaFile)

@@ -2,8 +2,10 @@ package scalaanalyzer.language
 
 import com.intellij.codeInsight.intention.IntentionAction
 import com.intellij.codeInsight.intention.preview.{IntentionPreviewInfo, IntentionPreviewUtils}
+import com.intellij.codeInsight.unwrap.UnwrapDescriptor
 import com.intellij.lang.surroundWith.SurroundDescriptor
-import com.intellij.modcommand.{ActionContext, ModCommandExecutor}
+import com.intellij.modcommand.{ActionContext, ModCommandAction, ModCommandExecutor}
+import com.intellij.openapi.editor.Editor
 import com.intellij.openapi.progress.ProcessCanceledException
 import com.intellij.openapi.util.TextRange
 import org.jetbrains.plugins.scala.ScalaBundle
@@ -17,15 +19,15 @@ import org.jetbrains.plugins.scala.lang.psi.api.base.ScReference
 import scalaanalyzer.Diagnostic
 import scalaanalyzer.platform.{HostLog, RequestEditor}
 
+import scala.jdk.CollectionConverters.*
 import scala.util.Using
 import scala.util.control.NonFatal
 
 /** Preview-backed code actions and import fixes exposed by the host. */
 object CodeActions {
-  /** Intentions that require the desktop rename UI or an inspection profile even to check availability. */
+  /** Intentions that require the desktop rename UI even to check availability. */
   private val UnavailableIntentions = Set(
     "org.jetbrains.plugins.scala.codeInsight.intention.declarations.ChangeAccessModifierIntention",
-    "org.jetbrains.plugins.scala.codeInsight.intention.expression.RemoveUnnecessaryParenthesesIntention",
   )
 
   /** Lazily created plugin action plus the LSP action kind used for its response. */
@@ -43,15 +45,17 @@ object CodeActions {
 }
 
 /**
- * Previews plugin intentions, annotator fixes and surround actions as source edits.
+ * Previews plugin intentions, annotator fixes, surround and unwrap actions as source edits.
  *
  * Callers hold PSI read access. Actions run against copies through the platform's preview contract;
  * unsupported previews are disabled with a reason when the action is known to be available.
  *
- * @param intentionClasses intention implementation names from plugin descriptors
+ * @param intentionClasses intention implementation names: the plugin descriptors' and the platform's that act through
+ *                         the plugin's extensions
  * @param descriptorClasses surround-descriptor implementation names from plugin descriptors
+ * @param unwrapClasses unwrap-descriptor implementation names from plugin descriptors
  */
-final class CodeActions(intentionClasses: Seq[String], descriptorClasses: Seq[String]) {
+final class CodeActions(intentionClasses: Seq[String], descriptorClasses: Seq[String], unwrapClasses: Seq[String]) {
   import CodeActions.{Candidate, Choice}
 
   /**
@@ -81,11 +85,7 @@ final class CodeActions(intentionClasses: Seq[String], descriptorClasses: Seq[St
     Using.resource(new RequestEditor(file.getViewProvider.getDocument, project, range.getStartOffset)) { request =>
       val editor = request.editor
       val intentions = intentionClasses.filterNot(CodeActions.UnavailableIntentions).map { name =>
-        // `intentionClasses` holds the intention implementations registered in the plugin descriptors.
-        Candidate(
-          name,
-          () => Class.forName(name).getConstructor().newInstance().asInstanceOf[IntentionAction],
-          "refactor.rewrite")
+        Candidate(name, () => newIntention(name), "refactor.rewrite")
       }
       val fixes = problems.flatMap(_.fixes).collect {
         case (fixRange, fix) if fixRange.intersects(range) || fixRange.containsOffset(range.getStartOffset) =>
@@ -159,7 +159,49 @@ final class CodeActions(intentionClasses: Seq[String], descriptorClasses: Seq[St
         }
       }
 
-      (typeImports(file, range, problems) ++ choices ++ surrounded).distinct
+      (typeImports(file, range, problems) ++ choices ++ surrounded ++ unwrapped(file, range, editor)).distinct
+    }
+  }
+
+  /** Creates a registered intention; a ModCommand action is wrapped as the intention the platform registers it as. */
+  private def newIntention(name: String): IntentionAction =
+    // `intentionClasses` holds intention implementations: IntentionActions or ModCommandActions.
+    Class.forName(name).getConstructor().newInstance() match {
+      case action: IntentionAction => action
+      case command: ModCommandAction => command.asIntention()
+      case other => throw new IllegalStateException(s"not an intention: ${other.getClass.getName}")
+    }
+
+  /**
+   * Offers each unwrapper the descriptors find at the caret, as the IDE's Unwrap/Remove popup lists them.
+   *
+   * An unwrapper is applied to a copy, found there by its position in the descriptor's list: the copy has the same
+   * text, so the list is the same.
+   */
+  private def unwrapped(file: ScalaFile, range: TextRange, editor: Editor): Seq[Choice] = {
+    val project = file.getProject
+
+    unwrapClasses.flatMap { name =>
+      // `unwrapClasses` holds the unwrap-descriptor implementations registered in the plugin descriptors.
+      val descriptor = Class.forName(name).getConstructor().newInstance().asInstanceOf[UnwrapDescriptor]
+
+      descriptor.collectUnwrappers(project, editor, file).asScala.toSeq.zipWithIndex.map { case (found, index) =>
+        val title = found.getSecond.getDescription(found.getFirst)
+        try {
+          val (result, _) = preview(file) { copy =>
+            val previewEditor = IntentionPreviewUtils.getPreviewEditor
+            previewEditor.getCaretModel.moveToOffset(range.getStartOffset)
+            val copied = descriptor.collectUnwrappers(project, previewEditor, copy).get(index)
+            copied.getSecond.unwrap(previewEditor, copied.getFirst)
+          }
+          Choice(title, "refactor.rewrite", result.edits, None)
+        } catch {
+          case e: ProcessCanceledException => throw e
+          case e @ (NonFatal(_) | _: LinkageError) =>
+            HostLog.warn(s"unwrap action $title could not be previewed", e)
+            Choice(title, "refactor.rewrite", Seq.empty, Some("This action is unavailable in the headless host."))
+        }
+      }
     }
   }
 

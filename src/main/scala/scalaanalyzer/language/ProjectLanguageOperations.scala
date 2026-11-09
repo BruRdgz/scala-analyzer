@@ -23,6 +23,7 @@ import org.jetbrains.plugins.scala.editor.documentationProvider.{ScalaDocQuickIn
 import org.jetbrains.plugins.scala.extensions.PsiNamedElementExt
 import org.jetbrains.plugins.scala.highlighter.DefaultHighlighter as H
 import org.jetbrains.plugins.scala.highlighter.readWriteAccess.ScalaReadWriteAccessDetector
+import org.jetbrains.plugins.scala.highlighter.usages.ScalaHighlightUsagesHandlerFactory
 import org.jetbrains.plugins.scala.lang.folding.ScalaFoldingBuilder
 import org.jetbrains.plugins.scala.lang.lexer.ScalaTokenTypes
 import org.jetbrains.plugins.scala.lang.parser.ScalaElementType
@@ -39,12 +40,13 @@ import org.jetbrains.plugins.scala.structureView.element.Element
 
 import scalaanalyzer.{Diagnostic, LineColumn, LineRange, ScalaPsiHost}
 import scalaanalyzer.build.{CompileSpec, CompilerDiagnostic, DocumentCompiler, ScalafmtFormatting}
-import scalaanalyzer.platform.{HostLog, LibraryFile, SourceFile}
+import scalaanalyzer.platform.{HostLog, LibraryFile, RequestEditor, SourceFile}
 
 import java.nio.file.{Files, Path}
 import java.util.List as JavaList
 
 import scala.jdk.CollectionConverters.*
+import scala.util.Using
 import scala.util.control.NonFatal
 
 /**
@@ -86,6 +88,10 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
     if (position.line >= document.getLineCount) document.getTextLength
     else
       math.min(document.getLineStartOffset(position.line) + position.column, document.getLineEndOffset(position.line))
+
+  /** Converts a PSI range within `document` to workspace coordinates. */
+  private def lineRange(document: Document, range: TextRange): LineRange =
+    LineRange(position(document, range.getStartOffset), position(document, range.getEndOffset))
 
   /** Converts a document offset to its zero-based line and UTF-16 column. */
   private def position(document: Document, offset: Int): LineColumn = {
@@ -860,17 +866,55 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
   }
 
   /**
-   * Finds a symbol's declaration and references within one document, classifying writes with the plugin's detector.
+   * Marks what the IDE highlights at a caret: the plugin's usage handler (exit points of a method, a companion's
+   * keyword, the implicit usages of an implicit, ...) and the references to the symbol there, classifying writes with
+   * the plugin's detector.
    *
    * @param path registered project-source path
-   * @param at referenced or declared symbol position
-   * @return the distinct occurrences, the declaration first when it is in this document; empty when no named symbol
-   *         is at the position
+   * @param at caret position
+   * @return the distinct occurrences, the symbol's declaration first when it is in this document; empty when neither
+   *         a handler nor a named symbol is at the position
    */
   def highlights(path: Path, at: LineColumn): Seq[Occurrence] = host.read {
     val sourceFile = file(path)
     val sourceDocument = document(sourceFile)
     val atOffset = offset(sourceDocument, at)
+    val handled = sourceFile match {
+      case scalaFile: ScalaFile => handlerUsages(scalaFile, atOffset)
+      case _ => None
+    }
+    val symbol = if (handled.forall(_.withReferences)) symbolOccurrences(sourceFile, atOffset) else Seq.empty
+    val handler = handled.toSeq.flatMap { usages =>
+      usages.reads.map(range => Occurrence(lineRange(sourceDocument, range), write = false)) ++
+        usages.writes.map(range => Occurrence(lineRange(sourceDocument, range), write = true))
+    }
+
+    (symbol ++ handler).distinctBy(_.range)
+  }
+
+  /** What a plugin highlight handler marks, and whether the symbol's own references are marked along with it. */
+  private final case class HandlerUsages(reads: Seq[TextRange], writes: Seq[TextRange], withReferences: Boolean)
+
+  /**
+   * Runs the plugin's highlight handler for a caret, as the IDE does before it falls back to the symbol's references.
+   *
+   * The factory also answers every identifier with an implicit-usages handler that has no target unless the
+   * identifier is implicit; a handler without targets is the IDE's cue to use the default highlighting.
+   */
+  private def handlerUsages(file: ScalaFile, caretAt: Int): Option[HandlerUsages] =
+    Using.resource(new RequestEditor(document(file), host.project, caretAt)) { request =>
+      Option(new ScalaHighlightUsagesHandlerFactory().createHighlightUsagesHandler(request.editor, file))
+        .filterNot(_.getTargets.isEmpty)
+        .map { handler =>
+          handler.computeUsages(handler.getTargets)
+          HandlerUsages(handler.getReadUsages.asScala.toSeq, handler.getWriteUsages.asScala.toSeq,
+            handler.highlightReferences())
+        }
+    }
+
+  /** The declaration and references of the named symbol at `atOffset` that lie in `sourceFile`, with write markers. */
+  private def symbolOccurrences(sourceFile: PsiFile, atOffset: Int): Seq[Occurrence] = {
+    val sourceDocument = document(sourceFile)
     val target = Option(sourceFile.findReferenceAt(atOffset)) match {
       case Some(reference) => Option(reference.resolve())
       case None => declarationNamedAt(sourceFile, atOffset)
@@ -882,14 +926,11 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
         case _ => new ScalaReadWriteAccessDetector
       }
 
-      /** Converts a PSI range within this document to workspace coordinates. */
-      def span(range: TextRange): LineRange =
-        LineRange(position(sourceDocument, range.getStartOffset), position(sourceDocument, range.getEndOffset))
-
       val declaration = named.getNavigationElement match {
         case owner: PsiNameIdentifierOwner
             if owner.getContainingFile == sourceFile && owner.getNameIdentifier != null =>
-          Seq(Occurrence(span(owner.getNameIdentifier.getTextRange), write = access.isDeclarationWriteAccess(owner)))
+          Seq(Occurrence(lineRange(sourceDocument, owner.getNameIdentifier.getTextRange),
+            write = access.isDeclarationWriteAccess(owner)))
         case _ => Seq.empty
       }
       // Only references whose text names the symbol can refer to it (the IDE's search also looks for the name's
@@ -905,7 +946,7 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
         val write = access.getReferenceAccess(named, reference) == ReadWriteAccessDetector.Access.Write
         val range = reference.getRangeInElement.shiftRight(reference.getElement.getTextRange.getStartOffset)
 
-        Occurrence(span(range), write)
+        Occurrence(lineRange(sourceDocument, range), write)
       }
     }.distinct
   }

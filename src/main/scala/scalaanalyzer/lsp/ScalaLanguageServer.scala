@@ -1236,7 +1236,8 @@ final class ScalaLanguageServer(
       LspEither.forLeft(found.map(location).asJava)
 
     /**
-     * Returns occurrences of the symbol at the position, marking writes separately from reads.
+     * Returns what the IDE highlights at the position (a symbol's occurrences, a method's exit points, a companion's
+     * keywords, ...), marking writes separately from reads.
      *
      * Runs on a read thread.
      *

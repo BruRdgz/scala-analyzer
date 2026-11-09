@@ -36,11 +36,11 @@ It exposes editor features through the **Language Server Protocol (LSP)** and im
 | Completion | Automatic imports, insertion handlers, signature help and inlay hints. |
 | Navigation | Definitions, type definitions, references, implementations, call/type hierarchies and workspace symbols; library sources and decompiled classes. |
 | Documentation | Markdown hover with declaration context, parameters, return values and linked references. |
-| Editing | Rename, organize imports, previewable quick fixes, intentions and surround actions. |
+| Editing | Rename, organize imports, previewable quick fixes, intentions, surround and unwrap actions; split/join lists and flip comma. |
 | Formatting | Whole-file scalafmt or IntelliJ formatting; range formatting through IntelliJ. |
 | Tests | Run ScalaTest, specs2 and MUnit suites/tests, and uTest suites, from code lenses; readable output and a result summary. |
 | Run | Run objects with a `main` method, `App` objects and Scala 3 `@main` methods from code lenses; output and an exit summary. |
-| Code structure | Semantic tokens, document highlights, outlines, folding and selection ranges. |
+| Code structure | Semantic tokens, document highlights (including a method's exit points, companions and implicit usages), outlines, folding and selection ranges. |
 
 See [known limitations](#known-limitations) for the supported boundaries of these features.
 
@@ -174,6 +174,8 @@ is partial, indexes are kept in memory, and each process serves one workspace.
   shows its result in a separate list and omits files whose live diagnostics are already shown; other clients receive
   every file's problems and must avoid showing them twice. Dialog-dependent actions, file/package moves and optional automatic renames are unavailable;
   code actions are limited to current-file previews.
+- Unwrap actions are offered with every code-action request at the caret, in the order of the IDE's Unwrap popup,
+  without its highlighting of the affected code. Change access modifier is not offered: it needs the IDE's rename UI.
 - Some completion contributors require IDE services that are unavailable. Live templates have no snippet tab stops;
   completion followed by handler edits takes two undo steps.
 - Inlay hints are text labels without the IDE's interactive presentation or range hints. Project IDE code-style
