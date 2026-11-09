@@ -1,7 +1,6 @@
 package scalaanalyzer.platform
 
 import com.intellij.codeInsight.javadoc.{DocumentationDelegateProvider, JavaDocInfoGeneratorFactory}
-import com.intellij.codeInsight.daemon.impl.{AnnotationHolderImpl, AnnotationSessionImpl}
 import com.intellij.codeInsight.hints.settings.ParameterNameHintsSettings
 import com.intellij.codeInsight.hints.{InlayParameterHintsExtension, InlayParameterHintsProvider}
 import com.intellij.codeInsight.editorActions.ExtendWordSelectionHandler
@@ -11,9 +10,7 @@ import com.intellij.ide.highlighter.HtmlFileHighlighter
 import com.intellij.lang.documentation.{ClientDocumentationSettings, DocumentationSettings}
 import com.intellij.lang.html.HTMLLanguage
 import com.intellij.lang.java.JavaLanguage
-import com.intellij.lang.annotation.HighlightSeverity
-import com.intellij.openapi.util.TextRange
-import com.intellij.psi.{PsiErrorElement, PsiFile, SyntaxTraverser}
+import com.intellij.psi.{PsiErrorElement, PsiFile}
 import com.intellij.psi.codeStyle.FileIndentOptionsProvider
 import com.intellij.psi.impl.source.tree.TreeCopyHandler
 import com.intellij.lang.{DefaultASTFactory, DefaultASTFactoryImpl, Language, LanguageASTFactory, LanguageCommenters, LanguageExtensionPoint, LanguageParserDefinitions, ParserDefinition, PsiBuilderFactory}
@@ -35,7 +32,7 @@ import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.featureStatistics.FeatureUsageTracker
 import com.intellij.lang.parameterInfo.{LanguageParameterInfo, ParameterInfoHandler}
 import com.intellij.navigation.ItemPresentationProviders
-import com.intellij.psi.{FileViewProvider, LanguageFileViewProviders, PsiClass, PsiElement, PsiField, PsiManager}
+import com.intellij.psi.{LanguageFileViewProviders, PsiClass, PsiElement, PsiField, PsiManager}
 import com.intellij.psi.presentation.java.{ClassPresentationProvider, FieldPresentationProvider}
 import com.intellij.psi.stubs.{LanguageStubDefinition, StubElementRegistryService, StubRegistryExtension, StubIndex}
 import com.intellij.psi.impl.java.stubs.index.JavaStubIndexKeys
@@ -215,9 +212,7 @@ import org.jetbrains.plugins.scala.codeInsight.ScalaCodeInsightSettings
 import org.jetbrains.plugins.scala.externalLibraries.bm4.BetterMonadicForSupport
 import org.jetbrains.plugins.scala.externalLibraries.kindProjector.KindProjectorUtil
 import org.jetbrains.plugins.scala.highlighter.{ScalaCommenter, ScalaSyntaxHighlighterFactory}
-import org.jetbrains.plugins.scala.lang.psi.api.ScalaFile
-import org.jetbrains.plugins.scala.lang.psi.impl.ScalaPsiElementFactory
-import org.jetbrains.plugins.scala.project.{ProjectContext, ScalaFeatures}
+import org.jetbrains.plugins.scala.project.ProjectContext
 import org.jetbrains.plugins.scalaDoc.ScalaDocLanguage
 import org.jetbrains.plugins.scalaDoc.highlighter.ScalaDocSyntaxHighlighter
 import org.jetbrains.plugins.scalaDirective.ScalaDirectiveLanguage
@@ -668,9 +663,9 @@ private[scalaanalyzer] object HostBootstrap {
         "com.intellij.classInheritorsSearch").registerExtension(new JavaClassInheritorsSearcher, root)
       // The references to a Java method, and its overriders in Java classes and in Scala ones (through the
       // inheritors search). The element types are erased; AnyRef only names them.
-      area.getExtensionPoint[AnyRef]("com.intellij.methodReferencesSearch").asInstanceOf[ExtensionPointImpl[AnyRef]]
+      area.getExtensionPoint[AnyRef]("com.intellij.methodReferencesSearch")
         .registerExtension(new MethodUsagesSearcher, root)
-      area.getExtensionPoint[AnyRef]("com.intellij.overridingMethodsSearch").asInstanceOf[ExtensionPointImpl[AnyRef]]
+      area.getExtensionPoint[AnyRef]("com.intellij.overridingMethodsSearch")
         .registerExtension(new JavaOverridingMethodsSearcher, root)
       // The Java rename processors look for the base methods of a method through the super-methods searches.
       CoreApplicationEnvironment.registerExtensionPoint(area, JavaErrorFilter.EP_NAME.getName,
@@ -1290,8 +1285,6 @@ private[scalaanalyzer] object HostBootstrap {
           case ("dumpSortedPushedProperties", _) => java.util.List.of()
         })
       val libraryFiles = this.libraryFiles
-      // Class root → its attached source root.
-      val librarySources = this.librarySources
       // The platform's file-based indexes: the file-name index, answered from library roots, and the word index of
       // project sources, which the reference search reads to find the files that mention a name.
       appServices.register(classOf[FileBasedIndex])(new Host_FileBasedIndex(dispatch {
