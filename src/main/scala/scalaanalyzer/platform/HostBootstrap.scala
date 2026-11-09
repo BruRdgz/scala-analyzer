@@ -48,7 +48,7 @@ import com.intellij.util.indexing.FileBasedIndex
 import com.intellij.util.messages.impl.MessageBusFactoryImpl
 import com.intellij.codeInsight.{
   AnnotationCacheOwnerNormalizer, AutoPopupController, AutoPopupControllerHelper, CodeInsightSettings,
-  ContextNullabilityInfo, ExternalAnnotationsManager, FileModificationService, ImportFilter,
+  ContextNullabilityInfo, CustomExceptionHandler, ExternalAnnotationsManager, FileModificationService, ImportFilter,
   InferredAnnotationsManager, JavaIdeCodeInsightSettings, JavaProjectCodeInsightSettings, NullableNotNullManager,
   TailTypeFactory, TargetElementUtil, TargetElementUtilBase, TestFrameworks, TestFrameworksImpl
 }
@@ -675,6 +675,9 @@ private[scalaanalyzer] object HostBootstrap {
       // The Java rename processors look for the base methods of a method through the super-methods searches.
       CoreApplicationEnvironment.registerExtensionPoint(area, JavaErrorFilter.EP_NAME.getName,
         classOf[JavaErrorFilter])
+      // Java's unhandled-exception check asks for exceptions that frameworks handle outside the code; there are none.
+      CoreApplicationEnvironment.registerExtensionPoint(area, CustomExceptionHandler.KEY.getName,
+        classOf[CustomExceptionHandler])
       // The element type is erased; AnyRef only names it.
       declare("com.intellij.implicitClassSearch").asInstanceOf[ExtensionPointImpl[AnyRef]]
         .registerExtension(new ImplicitClassesSearcher, root)

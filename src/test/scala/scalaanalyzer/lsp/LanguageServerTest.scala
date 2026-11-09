@@ -986,17 +986,19 @@ class LanguageServerTest extends munit.FunSuite {
     }
   }
 
-  test("Java semantic diagnostics publish current-buffer type and resolution errors") {
+  test("Java semantic diagnostics publish current-buffer type, resolution and unhandled exception errors") {
     val java = fixture.resolve("core/src/main/java/core/Shout.java")
     val service = server.getTextDocumentService
-    val broken = "package core; class Shout { String emoji = \"😀\"; int value = \"wrong\"; void use() { missing(); } }"
+    val broken = "package core; class Shout { String emoji = \"😀\"; int value = \"wrong\"; void use() { missing(); } " +
+      "void pause() { Thread.sleep(1); } }"
     def change(text: String, version: Int): Unit = service.didChange(new DidChangeTextDocumentParams(
       new VersionedTextDocumentIdentifier(java.toUri.toString, version), JavaList.of(new TextDocumentContentChangeEvent(text))))
     try {
       service.didOpen(new DidOpenTextDocumentParams(new TextDocumentItem(java.toUri.toString, "java", 140, broken)))
       val problems = diagnosticsOf(java, 140)
-      assertEquals(problems.size, 2, problems.toString)
+      assertEquals(problems.size, 3, problems.toString)
       assert(problems.forall(_.getSource == "java-plugin"))
+      assert(problems.exists(_.getMessage.contains("Unhandled exception")), problems.toString)
       val mismatch = problems.find(_.getMessage.contains("Incompatible types")).getOrElse(fail(problems.toString))
       assertEquals(mismatch.getRange.getStart, new Position(0, broken.indexOf("\"wrong\"")))
       assert(problems.exists(_.getMessage.contains("missing")), problems.toString)
