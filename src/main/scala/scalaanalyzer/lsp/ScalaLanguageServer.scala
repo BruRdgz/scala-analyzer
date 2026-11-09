@@ -15,7 +15,7 @@ import scalaanalyzer.platform.{CallLog, HostLock, HostLog}
 import scalaanalyzer.workspace.ProjectSession
 
 import java.net.URI
-import java.nio.file.Path
+import java.nio.file.{Files, Path}
 import java.util.{List as JavaList}
 import java.util.concurrent.*
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger, AtomicLong}
@@ -151,6 +151,9 @@ final class ScalaLanguageServer(
 
   /** Each document's latest version, as the client numbers them; diagnostics of older versions are dropped. */
   private val versions = new ConcurrentHashMap[Path, Integer]()
+
+  /** The project sources the client has open; the others follow their file on disk. */
+  private val openDocuments = ConcurrentHashMap.newKeySet[Path]()
 
   /** Edits counted as they arrive, before their turn on the documents thread (see onEditsRequest). */
   private val editsReceived = new AtomicLong()
@@ -410,7 +413,7 @@ final class ScalaLanguageServer(
       val changes = WatchKind.Create | WatchKind.Change | WatchKind.Delete
       val watchers = Seq(
         BuildDefinition.SbtFiles -> changes, BuildDefinition.ProjectFiles -> changes, BuildDefinition.BuildProperties -> changes,
-        "**/*.{scala,java}" -> (WatchKind.Create | WatchKind.Delete),
+        "**/*.{scala,java}" -> changes,
       ).map((glob, kind) => new FileSystemWatcher(LspEither.forLeft[String, RelativePattern](glob), kind))
 
       client.registerCapability(new RegistrationParams(java.util.List.of(new Registration(
@@ -697,6 +700,17 @@ final class ScalaLanguageServer(
     }
   }
 
+  /** Replaces a source's buffer with its file on disk when they differ, then schedules its diagnostics. */
+  private def followDisk(s: ProjectSession, path: Path): Unit =
+    if (Files.isRegularFile(path)) {
+      val onDisk = Files.readString(path)
+
+      if (s.text(path) != onDisk) {
+        s.change(path, None, onDisk)
+        scheduleDiagnostics(path)
+      }
+    }
+
   /** Resolves only a URI currently tracked as a project source; other open documents are outside the session. */
   private def sourcePath(s: ProjectSession, uri: String): Option[Path] =
     Option.when(uri.startsWith("file:"))(pathOf(uri)).filter(s.isSource)
@@ -772,6 +786,7 @@ final class ScalaLanguageServer(
       }
 
       sourcePath(s, uri).foreach { path =>
+        openDocuments.add(path)
         versions.put(path, params.getTextDocument.getVersion)
         // The editor's buffer may differ from the file on disk (unsaved changes).
         if (s.text(path) != params.getTextDocument.getText) s.change(path, None, params.getTextDocument.getText)
@@ -802,11 +817,18 @@ final class ScalaLanguageServer(
     }
 
     /**
-     * Keeps project sources open until a build reimport or session shutdown, even after editor tabs close.
+     * Returns a closed project source to its file on disk, which drops the unsaved changes the editor discarded.
      *
-     * @param params the closed document, which is ignored
+     * Runs on the documents thread. The source stays registered until a build reimport or session shutdown.
+     *
+     * @param params the closed document
      */
-    override def didClose(params: DidCloseTextDocumentParams): Unit = ()
+    override def didClose(params: DidCloseTextDocumentParams): Unit = onDocuments("didClose") { s =>
+      sourcePath(s, params.getTextDocument.getUri).foreach { path =>
+        openDocuments.remove(path)
+        followDisk(s, path)
+      }
+    }
 
     /**
      * Queues a build compile without holding up edits and requests; pending saves share the next compile.
@@ -1629,19 +1651,30 @@ final class ScalaLanguageServer(
       }
 
     /**
-     * Reimports after build or source-file changes, then refreshes diagnostics for tracked files.
+     * Reimports after build changes or created and deleted sources, and brings changed sources that are not open in
+     * the editor to their new text on disk.
      *
      * Runs on the documents thread. The import reloads the BSP workspace only when a changed file is part of the build
-     * definition.
+     * definition, and refreshes diagnostics for tracked files. A source that only changed needs no import; while it is
+     * open, the editor's buffer is its text, and a save reports the text it already has.
      *
      * @param params the created, changed or deleted files; entries whose URI is not a `file:` URI are ignored
      */
-    override def didChangeWatchedFiles(params: DidChangeWatchedFilesParams): Unit = onDocuments("build change") { s =>
-      val paths = params.getChanges.asScala.toSeq.map(_.getUri).filter(_.startsWith("file:")).map(pathOf)
-      val buildChanged = paths.exists(BuildDefinition.isPart)
+    override def didChangeWatchedFiles(params: DidChangeWatchedFilesParams): Unit = onDocuments("watched files") { s =>
+      val changes = params.getChanges.asScala.toSeq
+        .filter(_.getUri.startsWith("file:"))
+        .map(change => pathOf(change.getUri) -> change.getType)
+      val buildChanged = changes.exists((path, _) => BuildDefinition.isPart(path))
+      val sourcesAddedOrRemoved = changes.exists((path, kind) => kind != FileChangeType.Changed && !BuildDefinition.isPart(path))
 
-      HostLog.info(s"${if (buildChanged) "build definition changed" else "source files created or deleted"}: ${paths.mkString(", ")}")
-      importAndScheduleDiagnostics(s, reload = buildChanged)
+      if (buildChanged || sourcesAddedOrRemoved) {
+        val reason = if (buildChanged) "build definition changed" else "source files created or deleted"
+        HostLog.info(s"$reason: ${changes.map(_._1).mkString(", ")}")
+        importAndScheduleDiagnostics(s, reload = buildChanged)
+      }
+      changes
+        .collect { case (path, FileChangeType.Changed) if s.isSource(path) && !openDocuments.contains(path) => path }
+        .foreach(followDisk(s, _))
     }
   }
 }

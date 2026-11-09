@@ -1612,6 +1612,31 @@ class LanguageServerTest extends munit.FunSuite {
     assertEquals(server.getTextDocumentService.hover(new HoverParams(document(added), new Position(3, 23))).get(1, TimeUnit.MINUTES), null)
   }
 
+  test("follows a source changed on disk while it is closed, and returns a closed source to its file") {
+    val service = server.getTextDocumentService
+    val original = Files.readString(hello3)
+    def symbols(): Seq[String] = service.documentSymbol(new DocumentSymbolParams(document(hello3))).get(1, TimeUnit.MINUTES)
+      .asScala.map(_.getRight.getName).toSeq
+    try {
+      Files.writeString(hello3, original + "\nobject OnDisk\n")
+      filesChanged(hello3 -> FileChangeType.Changed)
+      assert(symbols().contains("OnDisk"), symbols())
+
+      service.didOpen(new DidOpenTextDocumentParams(
+        new TextDocumentItem(hello3.toUri.toString, "scala", 1, original + "\nobject Unsaved\n")))
+      // While the file is open, the editor's buffer is its text, whatever is on disk.
+      filesChanged(hello3 -> FileChangeType.Changed)
+      assert(symbols().contains("Unsaved"), symbols())
+
+      service.didClose(new DidCloseTextDocumentParams(document(hello3)))
+      assertEquals(symbols().filter(Set("OnDisk", "Unsaved")), Seq("OnDisk"))
+    } finally {
+      Files.writeString(hello3, original)
+      filesChanged(hello3 -> FileChangeType.Changed)
+    }
+    assert(!symbols().contains("OnDisk"), symbols())
+  }
+
   // Main.scala still has the unsaved change of the diagnostics test (`String` became `Int`). Without `-Xsource:3`,
   // its `import core.*` is no wildcard import: the module's new options must reach the plugin.
   test("imports the build again after a change to its definition, keeping unsaved changes") {
