@@ -435,14 +435,15 @@ final class ProjectSession private (
   def typeInfo(path: Path, range: LineRange): Option[String] = language.typeInfo(path, range)
 
   /**
-   * Locates the declarations referenced at a source position.
+   * Locates the declarations referenced at a source position, or the declaration whose name is there.
    *
    * Library targets are materialized as read-only source or decompiled files under the host's state directory.
    *
    * @param path registered project-source path
-   * @param at reference position in zero-based lines and UTF-16 columns
-   * @return each declaration's file and the position of its name, distinct and ordered by file and position; empty
-   *         when nothing resolves there or the declarations are in neither a project source nor a library file
+   * @param at reference or declaration position in zero-based lines and UTF-16 columns
+   * @return each declaration's file and the position of its name, distinct and ordered by file and position; at a
+   *         declaration's name, its own location; empty when nothing resolves there or the declarations are in
+   *         neither a project source nor a library file
    */
   def definition(path: Path, at: LineColumn): Seq[(Path, LineColumn)] = language.definition(path, at)
 

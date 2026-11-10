@@ -31,6 +31,11 @@ import scala.util.Using
  */
 class EditingTest extends munit.FunSuite {
   private def host = TestHost.host
+
+  // The platform is the host's: a test that only uses the lock or the dispatch thread needs it started, whichever
+  // test of the JVM runs first.
+  override def beforeAll(): Unit = host
+
   private lazy val module = {
     TestHost.libraryReport // the JDK
     host.addModule(ModuleSpec("editing", "2.13.18", Seq.empty, Seq(Path.of(sys.props("scalaanalyzer.fixture.scalaLibrary")))))
@@ -384,6 +389,17 @@ class EditingTest extends munit.FunSuite {
         "class Sample {\n  static int foo() { return 1; }\n  int y = Sample|.foo();\n}\n", Seq("Sample")),
       Case("Java, at the start of a selected member", "Sample.java",
         "class Sample {\n  static int foo() { return 1; }\n  int y = Sample.|foo();\n}\n", Seq("foo")),
+      // Go to Declaration falls through to the declaration's own element; the client then shows the usages.
+      Case("Scala, a declared value", "Sample.scala", "object Sample {\n  val a| = 1\n  val b = a\n}\n", Seq("a")),
+      Case("Scala, in a declared method's name", "Sample.scala",
+        "object Sample {\n  def f|oo(i: Int): Int = i\n}\n", Seq("foo")),
+      Case("Scala, a declared class", "Sample.scala", "class Po|int\nobject Sample {\n  val p = new Point\n}\n",
+        Seq("Point")),
+      Case("Scala, a declared parameter", "Sample.scala", "object Sample {\n  def foo(|i: Int): Int = i\n}\n",
+        Seq("i")),
+      Case("Java, a declared field", "Sample.java", "class Sample {\n  int x| = 1;\n  int y = x;\n}\n", Seq("x")),
+      Case("Java, a declared method", "Sample.java", "class Sample {\n  int f|oo() { return 1; }\n}\n", Seq("foo")),
+      Case("Java, a declared class", "Sample.java", "class Sam|ple {\n}\n", Seq("Sample")),
     )
 
     for (c <- cases) atCaret(c.fileName, c.marked) { (operations, path, text, caret) =>

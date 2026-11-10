@@ -556,14 +556,16 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
    *
    * A Scala source asks the plugin's Go to Declaration, which also covers synthetic members (a case class's `apply`
    * leads to the case class), companions, `end` markers, `given` imports and package objects; when it has no target,
-   * and for a Java source, the references that the IDE's symbol lookup finds at the position are resolved directly. A
-   * library declaration is located in its attached source or decompiled text, materialized as a read-only file under
-   * the host's state directory.
+   * and for a Java source, the references that the IDE's symbol lookup finds at the position are resolved directly.
+   * At the name of a declaration, which the plugin's handler has no target for, the answer is the declaration itself.
+   * A library declaration is located in its attached source or decompiled text, materialized as a read-only file
+   * under the host's state directory.
    *
    * @param path registered project-source path
-   * @param at reference position; a position just after a name stands for that name
-   * @return each declaration's file and the position of its name, distinct and ordered by file and position; empty
-   *         when nothing resolves there or the declarations are in neither a project source nor a library file
+   * @param at reference or declaration position; a position just after a name stands for that name
+   * @return each declaration's file and the position of its name, distinct and ordered by file and position; the
+   *         declaration's own location at its name; empty when nothing resolves there or the declarations are in
+   *         neither a project source nor a library file
    */
   def definition(path: Path, at: LineColumn): Seq[(Path, LineColumn)] = host.read {
     val sourceFile = file(path)
@@ -576,8 +578,10 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
       if (pluginTargets.nonEmpty) pluginTargets
       else CaretTargets.at(sourceFile, atOffset).toSeq.flatMap {
         case CaretTargets.Target.Referenced(elements) => elements
-        // The IDE navigates from a declaration to itself; this method has never answered that.
-        case CaretTargets.Target.Declared(_) => Seq.empty
+        // The IDE's Go to Declaration falls through from a declaration to its own element (its Go to Declaration or
+        // Usages then shows the usages); a client that asked from a declaration expects that location back, and
+        // asks for the usages itself when it receives the position it asked from.
+        case CaretTargets.Target.Declared(element) => Seq(element)
       }
 
     locationsOf(targets)
