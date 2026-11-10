@@ -134,7 +134,7 @@ final class CodeActions(intentionClasses: Seq[String], descriptorClasses: Seq[St
           else {
             available = true
             title = action.getText
-            val (result, info) = preview(file) { copy =>
+            val (result, info) = preview(file, intentionEditor = true) { copy =>
               val previewEditor = IntentionPreviewUtils.getPreviewEditor
               previewEditor.getCaretModel.moveToOffset(range.getStartOffset)
               previewEditor.getSelectionModel.setSelection(range.getStartOffset, range.getEndOffset)
@@ -375,10 +375,17 @@ final class CodeActions(intentionClasses: Seq[String], descriptorClasses: Seq[St
     }
   }
 
-  /** Logged platform failures can leave a partial preview even when the plugin returns normally. */
-  private def preview[A](file: ScalaFile)(modify: ScalaFile => A): (ChangeEngine.Result, A) = {
+  /**
+   * Logged platform failures can leave a partial preview even when the plugin returns normally.
+   *
+   * @param intentionEditor whether the session's editor is the one the IDE previews an intention with (see
+   *                        [[ChangeEngine.runIntention]])
+   */
+  private def preview[A](file: ScalaFile, intentionEditor: Boolean = false)(modify: ScalaFile => A)
+      : (ChangeEngine.Result, A) = {
     val errors = HostLog.count(HostLog.Level.Error)
-    val result = ChangeEngine.run(file)(modify)
+    val result =
+      if (intentionEditor) ChangeEngine.runIntention(file)(modify) else ChangeEngine.run(file)(modify)
     if (HostLog.count(HostLog.Level.Error) != errors)
       throw new UnsupportedOperationException("An error was logged while previewing this action.")
     result

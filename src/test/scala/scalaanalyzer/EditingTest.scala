@@ -820,6 +820,10 @@ class EditingTest extends munit.FunSuite {
         "object Action {\n  def foo(i: Int, s: String): Unit = {}\n  foo(42, \"boo\")\n}"),
       ("object Action { def f(a: Int, b: Int) = 0; val x = f(1<caret>, 2) }", "Flip",
         "object Action { def f(a: Int, b: Int) = 0; val x = f(2, 1) }"),
+      // `List[Int]` has several valid spellings: the intention would start a choose-type template, which it skips
+      // for the platform's IntentionPreviewEditor (AddOnlyStrategy.addTypeAnnotation).
+      ("object Action { def x<caret>s = List(1, 2) }", "Add type annotation to function definition",
+        "object Action { def xs: List[Int] = List(1, 2) }"),
     )
     TestHost.libraryReport
     for ((marked, title, expected) <- cases) {

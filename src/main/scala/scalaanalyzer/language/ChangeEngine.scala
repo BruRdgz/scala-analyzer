@@ -1,5 +1,6 @@
 package scalaanalyzer.language
 
+import com.intellij.codeInsight.intention.impl.preview.IntentionPreviewEditor
 import com.intellij.codeInsight.intention.preview.IntentionPreviewUtils
 import com.intellij.diff.comparison.{ByCharRt, ByWordRt, CancellationChecker, ComparisonPolicy}
 import com.intellij.openapi.editor.Editor
@@ -62,10 +63,29 @@ object ChangeEngine {
    * @return the changed text and edits, paired with the transformation's result
    */
   def run[A](file: ScalaFile)(modify: ScalaFile => A): (Result, A) =
-    run(file: PsiFile) {
-      case scala: ScalaFile => modify(scala)
-      case other => throw new IllegalStateException(s"change copy is not a Scala file: ${other.getClass.getName}")
-    }
+    session(file, intentionEditor = false)(onScala(modify))
+
+  /**
+   * Applies a transformation to a preview copy, as [[run]] does, in a session whose editor is the platform's
+   * `IntentionPreviewEditor`.
+   *
+   * That is the editor the IDE's `IntentionPreviewComputable` previews an intention with. Intentions recognize it to
+   * leave out what a preview cannot do, such as starting a template (`AddOnlyStrategy.addTypeAnnotation`). Its caret
+   * does not follow the document's changes.
+   *
+   * @tparam A transformation result type
+   * @param file original Scala file to copy
+   * @param modify transformation allowed to mutate only the preview copy
+   * @return the changed text and edits, paired with the transformation's result
+   */
+  def runIntention[A](file: ScalaFile)(modify: ScalaFile => A): (Result, A) =
+    session(file, intentionEditor = true)(onScala(modify))
+
+  /** `modify` for the copy of a Scala file, which is one as well. */
+  private def onScala[A](modify: ScalaFile => A): PsiFile => A = {
+    case scala: ScalaFile => modify(scala)
+    case other => throw new IllegalStateException(s"change copy is not a Scala file: ${other.getClass.getName}")
+  }
 
   /**
    * Previews a source transformation using its own language's PSI.
@@ -77,7 +97,15 @@ object ChangeEngine {
    * @param modify transformation allowed to mutate only the preview copy
    * @return changed text and edits, paired with the transformation's result
    */
-  def run[A](file: PsiFile)(modify: PsiFile => A): (Result, A) = HostLock.query {
+  def run[A](file: PsiFile)(modify: PsiFile => A): (Result, A) = session(file, intentionEditor = false)(modify)
+
+  /**
+   * Previews `modify` on a copy in a session over the kind of editor asked for.
+   *
+   * @param intentionEditor whether the session's editor is the platform's intention preview editor rather than the
+   *                        host's request editor
+   */
+  private def session[A](file: PsiFile, intentionEditor: Boolean)(modify: PsiFile => A): (Result, A) = HostLock.query {
     changesInTurn.synchronized {
       ProgressManager.checkCanceled()
       withPreviewCopy(file) { copy =>
@@ -89,8 +117,10 @@ object ChangeEngine {
             resources(listenTo(copy))
             // Insert handlers position the caret explicitly; inserting a closing delimiter must leave it before
             // that delimiter.
-            val editor = resources(new RequestEditor(document, copy.getProject, 0, caretRightBiased = false))
-            inPreviewSession(editor.editor)(change(file.getText, copy, modify))
+            val request = resources(new RequestEditor(document, copy.getProject, 0, caretRightBiased = false))
+            val editor =
+              if (intentionEditor) new IntentionPreviewEditor(copy, request.editor.getSettings) else request.editor
+            inPreviewSession(editor)(change(file.getText, copy, modify))
           } finally copyResources.set(previous)
         }.get
       }
