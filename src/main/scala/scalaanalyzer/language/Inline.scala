@@ -15,6 +15,7 @@ import org.jetbrains.plugins.scala.lang.psi.api.statements.{
   ScFunctionDefinition, ScFunctionDefinitionExt, ScPatternDefinition, ScTypeAliasDefinition
 }
 import org.jetbrains.plugins.scala.lang.psi.api.toplevel.{ScNamedElement, ScTypedDefinition}
+import org.jetbrains.plugins.scala.lang.psi.api.toplevel.typedef.ScMember
 import org.jetbrains.plugins.scala.lang.psi.types.api.FunctionType
 import org.jetbrains.plugins.scala.lang.refactoring.inline.ScalaInlineProcessor
 import org.jetbrains.plugins.scala.lang.refactoring.inline.method.ScalaInlineMethodProcessor
@@ -95,12 +96,29 @@ object Inline {
    * cover the inlining of a simple `var`.
    */
   private def inlinable(declaration: ScNamedElement, usages: Seq[PsiReference]): Boolean =
-    usages.nonEmpty && !ScalaPsiUtil.isImplicit(declaration) && (declaration match {
-      case pattern: ScBindingPattern => !isFunctionTyped(pattern) && !usedAsStablePath(usages) && isSimpleVal(pattern)
-      case method: ScFunctionDefinition => !usedAsStablePath(usages) && isInlinableMethod(method, usages)
-      case alias: ScTypeAliasDefinition => alias.typeParameters.isEmpty && isSimpleTypeAlias(alias)
-      case _ => false
-    })
+    usages.nonEmpty && !ScalaPsiUtil.isImplicit(declaration) && usedInContainingClassOnly(declaration, usages) &&
+      (declaration match {
+        case pattern: ScBindingPattern =>
+          !isFunctionTyped(pattern) && !usedAsStablePath(usages) && isSimpleVal(pattern)
+        case method: ScFunctionDefinition => !usedAsStablePath(usages) && isInlinableMethod(method, usages)
+        case alias: ScTypeAliasDefinition => alias.typeParameters.isEmpty && isSimpleTypeAlias(alias)
+        case _ => false
+      })
+
+  /**
+   * Whether every usage of a class member lies inside its class, as the handler's `usedInSameClassOnly` requires.
+   *
+   * A private member's use scope takes in its companion, and a member of a local class the enclosing block, and the
+   * inlined body would not resolve there. A declaration that is not a class member passes.
+   */
+  private def usedInContainingClassOnly(declaration: ScNamedElement, usages: Seq[PsiReference]): Boolean =
+    declaration.nameContext match {
+      case member: ScMember =>
+        Option(member.containingClass).forall { owner =>
+          usages.forall(usage => PsiTreeUtil.isAncestor(owner, usage.getElement, true))
+        }
+      case _ => true
+    }
 
   /** Whether the value or parameter is a function that takes arguments, whose uses the inliner cannot replace. */
   private def isFunctionTyped(definition: ScTypedDefinition): Boolean =

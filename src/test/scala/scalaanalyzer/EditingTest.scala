@@ -774,6 +774,10 @@ class EditingTest extends munit.FunSuite {
         "object Reference { def f: Int => Int = { def <caret>inc(i: Int) = i + 1; inc } }",
       "a recursive method" ->
         "object Recursive { def f: Int = { def <caret>down(i: Int): Int = if (i == 0) 0 else down(i - 1); down(3) } }",
+      "a private member used in its companion" ->
+        "class Box(n: Int) { private val <caret>doubled = n * 2 }; object Box { def peek(b: Box): Int = b.doubled }",
+      "a member of a local class used outside it" ->
+        "object Local { def f: Int = { class Box(n: Int) { def <caret>doubled = n * 2 }; new Box(1).doubled } }",
     )
     def inlinings(marked: String): (ScalaFile, String, Seq[CodeActions.Choice]) = {
       val original = marked.replace("<caret>", "")
