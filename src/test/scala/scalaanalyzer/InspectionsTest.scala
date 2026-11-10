@@ -139,12 +139,19 @@ class InspectionsTest extends munit.FunSuite {
     }
   }
 
-  test("an inspection problem offers its fix and the plugin's suppressions, each naming the problem") {
+  test("an inspection problem offers its fix and the plugin's suppressions that enclose it, each naming the problem") {
+    val (statement, member, variable, wholeFile) =
+      ("Suppress for statement", "Suppress for class", "Suppress for variable definition", "Suppress for file")
+    // The suppressions offered, in the plugin's order, and the one applied.
     val cases = Seq(
-      ("RemoveRedundantReturn", "object Inspect { def f: Int = { return 1 } }", "Suppress for statement"),
-      ("ScalaUnusedImport", "import scala.util.Try\nobject Inspect", "Suppress for file"),
+      ("RemoveRedundantReturn", "object Inspect { def f: Int = { return 1 } }",
+        Seq(statement, member, "Suppress for function", wholeFile), statement),
+      ("ScalaUnusedImport", "import scala.util.Try\nobject Inspect", Seq(statement, wholeFile), wholeFile),
+      // A definition with a right-hand side is no statement to suppress for.
+      ("SimplifyBoolean", "object Inspect {\n  def b: Boolean = true\n  val c = b == true\n}",
+        Seq(member, variable, wholeFile), variable),
     )
-    for ((id, text, title) <- cases) {
+    for ((id, text, offered, title) <- cases) {
       val file = open("Inspect", text)
       try {
         val problem = host.inspect(file).find(_.inspectionId.contains(id)).getOrElse(fail(id))
@@ -153,6 +160,7 @@ class InspectionsTest extends munit.FunSuite {
           .filter(_.problems.exists(about => about.inspectionId.contains(id) && about.range == problem.range))
         val (suppressions, fixes) = actions.partition(_.title.startsWith("Suppress"))
         assert(fixes.exists(fix => fix.disabled.isEmpty && fix.edits.nonEmpty), actions.toString)
+        assertEquals(suppressions.map(_.title), offered)
         val suppression = suppressions.find(_.title == title).getOrElse(fail(actions.toString))
         assertEquals(suppression.disabled, None)
         val suppressed = TestHost.applyEdits(text, suppression.edits)
