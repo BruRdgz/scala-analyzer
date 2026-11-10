@@ -496,8 +496,11 @@ private[scalaanalyzer] object HostBootstrap {
       case ("tryRunReadAction", Array(r: Runnable)) =>
         HostLock.readLocked(r.run())
         java.lang.Boolean.TRUE
-      // In unit-test mode the plugin runs some startup work on the UI thread: the host's dispatch thread.
-      case ("invokeAndWait", Array(r: Runnable, _*)) if config.unitTestMode =>
+      // On the UI thread the IDE runs the action inline, which waits for nothing: the platform's modal progress does
+      // this for its finish callbacks (Java's rename looks for sibling super methods under one). From another thread
+      // the action would wait for the dispatch thread, possibly under a lock, so only unit-test mode, where the
+      // plugin runs some startup work on the UI thread, allows that.
+      case ("invokeAndWait", Array(r: Runnable, _*)) if HostDispatchThread.isCurrent || config.unitTestMode =>
         HostDispatchThread.invokeAndWait(r)
         null
       // Java generic results (the next two cases): typed `?` statically, always references at runtime.

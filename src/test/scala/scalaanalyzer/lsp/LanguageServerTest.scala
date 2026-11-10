@@ -746,6 +746,32 @@ class LanguageServerTest extends munit.FunSuite {
     assert(invalid.getMessage.contains("'1text' is not a valid name"), invalid.getMessage)
   }
 
+  // A Java method that overrides nothing searches for siblings through its subclasses, under a modal progress.
+  test("prepares to rename Java methods whether or not they override a method") {
+    val javaFile = fixture.resolve("core/src/main/java/core/Shout.java")
+    val service = server.getTextDocumentService
+    val cases = Seq(
+      "overrides nothing" -> "package core; class Shout { void value() {} }",
+      "implements an interface method" ->
+        "package core; interface Base { void value(); } class Shout implements Base { public void value() {} }",
+    )
+    def change(value: String, version: Int): Unit = service.didChange(new DidChangeTextDocumentParams(
+      new VersionedTextDocumentIdentifier(javaFile.toUri.toString, version),
+      JavaList.of(new TextDocumentContentChangeEvent(value))))
+    try {
+      for (((label, text), index) <- cases.zipWithIndex) {
+        val start = text.lastIndexOf("value")
+        change(text, 172 + index)
+        val range = service.prepareRename(new PrepareRenameParams(document(javaFile), new Position(0, start + 1)))
+          .get(1, TimeUnit.MINUTES).getFirst
+        assertEquals(range, new Range(new Position(0, start), new Position(0, start + "value".length)), label)
+      }
+    } finally {
+      change(Files.readString(javaFile), 174)
+      service.documentSymbol(new DocumentSymbolParams(document(javaFile))).get(1, TimeUnit.MINUTES)
+    }
+  }
+
   test("finds the implementations of a trait and of its abstract member") {
     def implementations(position: Position) = spans(server.getTextDocumentService
       .implementation(new ImplementationParams(document(shape), position)).get(1, TimeUnit.MINUTES).getLeft.asScala.toSeq)

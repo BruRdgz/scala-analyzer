@@ -4,6 +4,7 @@ import com.intellij.lang.annotation.HighlightSeverity
 import com.intellij.openapi.editor.impl.DocumentImpl
 import com.intellij.openapi.progress.ProcessCanceledException
 import com.intellij.openapi.util.TextRange
+import com.intellij.psi.PsiMethod
 import com.intellij.psi.search.searches.ReferencesSearch
 import com.intellij.psi.util.PsiTreeUtil
 import org.jetbrains.plugins.scala.lang.psi.api.ScalaFile
@@ -12,7 +13,7 @@ import org.jetbrains.plugins.scala.lang.psi.api.statements.ScFunction
 import scalaanalyzer.TestHost.{applyEdits, choose}
 import scalaanalyzer.build.{DocumentCompiler, ScalafmtFormatting}
 import scalaanalyzer.language.{
-  ChangeEngine, CodeActions, Completion, MemberOverrides, ProjectLanguageOperations, ProjectSearch,
+  ChangeEngine, CodeActions, Completion, MemberOverrides, ProjectLanguageOperations, ProjectSearch, Rename,
 }
 import scalaanalyzer.platform.{CallLog, HostDispatchThread, HostLock, HostLog, RequestEditor}
 
@@ -443,6 +444,43 @@ class EditingTest extends munit.FunSuite {
       assert(hover.exists(_.contains(c.hover)), s"hover, ${c.label}: $hover")
       assertEquals(occurrences, Seq(declaration, usage), s"highlights, ${c.label}")
       assertEquals(renamed, name, s"rename, ${c.label}")
+    }
+  }
+
+  // The IDE asks whether to rename the base method too; the host answers yes (SuperMethodWarningUtil's unit-test
+  // answer), so the target is the deepest declaration the method overrides.
+  test("renaming a Java method targets the base method it overrides") {
+    final case class Case(label: String, marked: String, target: Either[String, String])
+    val cases = Seq(
+      Case("implements an interface method",
+        "interface Base { void run(); }\nclass Impl implements Base { public void ru|n() {} }", Right("Base.run")),
+      Case("overrides a class method",
+        "class Base { void run() {} }\nclass Impl extends Base { @Override void ru|n() {} }", Right("Base.run")),
+      Case("overrides through an intermediate class",
+        "class Base { void run() {} }\nclass Mid extends Base { @Override void run() {} }\n" +
+          "class Impl extends Mid { @Override void ru|n() {} }",
+        Right("Base.run")),
+      Case("is called on the overrider",
+        "interface Base { void run(); }\nclass Impl implements Base { public void run() {} }\n" +
+          "class Use { void f(Impl i) { i.ru|n(); } }",
+        Right("Base.run")),
+      Case("overrides nothing", "class Solo { void ru|n() {} }", Right("Solo.run")),
+      Case("overrides a library method", "class Impl { @Override public String toS|tring() { return \"\"; } }",
+        Left("This element is not located inside the project.")),
+    )
+
+    for ((c, i) <- cases.zipWithIndex) {
+      val offset = c.marked.indexOf('|')
+      val file = host.openFile(Path.of(s"/editing/Rename$i.java"), c.marked.replace("|", ""), module)
+      try {
+        val described = scala.util.Try(host.renameTarget(file, offset)).toEither
+          .left.map { case refused: Rename.Refused => refused.getMessage; case other => fail(c.label, other) }
+          .map { case method: PsiMethod =>
+            host.read(s"${method.getContainingClass.getName}.${method.getName}")
+          }
+
+        assertEquals(described, c.target, c.label)
+      } finally host.closeSource(file)
     }
   }
 
