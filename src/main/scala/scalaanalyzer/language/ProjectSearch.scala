@@ -76,8 +76,15 @@ object ProjectSearch {
       .map(JavaCallHierarchyProvider.getElementForCallHierarchy)
       .collect { case method: PsiMethod => method }
 
-  /** Resolves the editor target without accepting lookup items, since the host has no completion lookup UI. */
-  private def targetAt(file: PsiFile, offset: Int, flags: Int): Option[PsiElement] =
+  /**
+   * Resolves the editor target without accepting lookup items, since the host has no completion lookup UI.
+   *
+   * @param file source file being queried
+   * @param offset caret offset in UTF-16 code units
+   * @param flags the `TargetElementUtil` flags that say what a target may be
+   * @return the target `TargetElementUtil.findTargetElement` finds, or none
+   */
+  private[language] def targetAt(file: PsiFile, offset: Int, flags: Int): Option[PsiElement] =
     Using.resource(new RequestEditor(file.getViewProvider.getDocument, file.getProject, offset)) { editor =>
       Option(TargetElementUtil.getInstance.findTargetElement(editor.editor, flags & ~TargetElementUtil.LOOKUP_ITEM_ACCEPTED, offset))
     }
