@@ -14,7 +14,10 @@ import org.jetbrains.plugins.scala.lang.psi.api.ScalaFile
 import org.jetbrains.plugins.scala.lang.psi.impl.ScalaPsiElementFactory
 import org.jetbrains.plugins.scala.project.{ProjectContext, ScalaFeatures}
 
-import scalaanalyzer.language.{ChangeEngine, CodeActions, Completion, InlayHints, InspectionDescription, Inspections, ParameterInfo, Rename, SelectionRanges}
+import scalaanalyzer.language.{
+  ChangeEngine, CodeActions, Completion, InlayHints, InspectionDescription, Inspections, MemberOverrides, ParameterInfo,
+  Rename, SelectionRanges,
+}
 import scalaanalyzer.platform.{Descriptors, ExtensionBean, HostBootstrap, HostDispatchThread, HostLock, HostPsiDocumentManager, Host_ModuleRootManager, Host_OrderEnumerator, ImportIndex, LibraryFileSystem, SourceFile, SymbolIndex, WordIndex, dispatch, tableProxy}
 
 import java.nio.file.Path
@@ -164,6 +167,32 @@ final class ScalaPsiHost private[scalaanalyzer] (
   def insertCompletion(file: PsiFile, start: Int, prefixText: String, lookup: String, identity: String)
       : Option[Completion.Inserted] =
     Completion.insert(file, start, prefixText, lookup, identity)
+
+  /**
+   * The members Override Members offers for the class at `offset` (see [[MemberOverrides.overridable]]).
+   *
+   * Takes read access itself and leaves `file` unchanged.
+   *
+   * @param file Scala source being queried
+   * @param offset UTF-16 caret offset
+   * @return the members in the chooser's order; empty when the caret is not in a class, object or trait
+   */
+  def overridableMembers(file: ScalaFile, offset: Int): Seq[MemberOverrides.Member] =
+    read(MemberOverrides.overridable(file, offset))
+
+  /**
+   * The edits that override the chosen members in the class at `offset` (see [[MemberOverrides.overrideMembers]]).
+   *
+   * Takes read access itself and leaves `file` unchanged.
+   *
+   * @param file Scala source to edit
+   * @param offset UTF-16 caret offset, where the members are inserted
+   * @param ids identifiers of the members to override, as `overridableMembers` gave them
+   * @return the edits against the current text of `file`
+   * @throws MemberOverrides.UnknownMembers when an identifier is not that of a member the class offers
+   */
+  def overrideMembers(file: ScalaFile, offset: Int, ids: Seq[String]): Seq[ChangeEngine.Edit] =
+    MemberOverrides.overrideMembers(file, offset, ids)
 
   /**
    * The edits that format `range` of `file` (all of it without one); the file itself is left as it is.
@@ -585,18 +614,25 @@ final class ScalaPsiHost private[scalaanalyzer] (
    * diagnostics arrive. A caller that already shows inspection problems in the range asks for their fixes with
    * `withInspections`, since the editor will not ask again.
    *
-   * Runs under read access.
+   * Takes read access itself, except for Implement members: its preview runs on the dispatch thread, which cannot be
+   * awaited under a read, so it is the last action in the list and follows the others after their read ended. The
+   * caller must not be reading or editing.
    *
    * @param file Scala source being queried
    * @param range UTF-16 range the actions apply to
    * @param withInspections whether to run the inspections for their fixes when the file's diagnostics are not cached
    * @return the actions available for the range; those that fix or suppress an inspection problem say which
    */
-  def codeActions(file: ScalaFile, range: TextRange, withInspections: Boolean = false): Seq[CodeActions.Choice] = read {
-    val computed = Option(file.getUserData(diagnosticsCache)).filter(_.hasUpToDateValue).map(_.getValue)
-    def uncached = problemsAround(file, range) ++ (if (withInspections) inspections.diagnostics(file) else Seq.empty)
+  def codeActions(file: ScalaFile, range: TextRange, withInspections: Boolean = false): Seq[CodeActions.Choice] = {
+    val (choices, implementMembers) = read {
+      val computed = Option(file.getUserData(diagnosticsCache)).filter(_.hasUpToDateValue).map(_.getValue)
+      def uncached = problemsAround(file, range) ++ (if (withInspections) inspections.diagnostics(file) else Seq.empty)
+      val problems = computed.getOrElse(uncached)
 
-    actions.collect(file, range, computed.getOrElse(uncached))
+      (actions.collect(file, range, problems), actions.implementMembersOffer(file, range, problems))
+    }
+
+    choices ++ implementMembers.map(actions.implementMembers(file, range, _))
   }
 
   /**
@@ -795,7 +831,9 @@ object ScalaPsiHost {
 
   /** Contributors that need what the host does not have yet, and why. */
   private val UnsupportedCompletionContributors: Set[String] = Set(
-    // The bodies of the members it generates come from the IDE's file templates (FileTemplateManager).
+    // Its insert handler positions the caret on the new member with the editor's visual positions and visible area
+    // (ScalaGenerationInfo.positionCaret), which the request editor does not have. Override Members (MemberOverrides)
+    // inserts the same members without that step.
     "org.jetbrains.plugins.scala.lang.completion.ScalaOverrideContributor",
     // It suggests names the file uses but does not resolve, from the highlights of the IDE's daemon in the editor.
     "org.jetbrains.plugins.scala.lang.completion.ScalaUnresolvedNameContributor",

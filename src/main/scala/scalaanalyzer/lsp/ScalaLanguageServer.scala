@@ -1,6 +1,6 @@
 package scalaanalyzer.lsp
 
-import com.google.gson.{Gson, JsonObject, JsonPrimitive}
+import com.google.gson.{Gson, JsonArray, JsonObject, JsonPrimitive}
 import com.intellij.diff.comparison.DiffTooBigException
 import com.intellij.openapi.progress.ProcessCanceledException
 import org.eclipse.lsp4j.*
@@ -10,7 +10,11 @@ import org.eclipse.lsp4j.services.*
 
 import scalaanalyzer.{LineColumn, LineRange, ScalaPsiHost}
 import scalaanalyzer.build.{BspImport, ScalafmtFormatting, TestRun}
-import scalaanalyzer.language.{Completion, CompletionChoice, CompletionFollowUp, FileProblem, Fold, HierarchyItem, HierarchyTarget, InlayHints, InlineHint, OutlineSymbol, ProblemSeverity, Rename, SignatureChoices, SourceSpan, TextChange, WorkspaceSymbolKind}
+import scalaanalyzer.language.{
+  Completion, CompletionChoice, CompletionFollowUp, FileProblem, Fold, HierarchyItem, HierarchyTarget, InlayHints,
+  InlineHint, MemberOverrides, OutlineSymbol, ProblemSeverity, Rename, SignatureChoices, SourceSpan, TextChange,
+  WorkspaceSymbolKind,
+}
 import scalaanalyzer.platform.{CallLog, HostLock, HostLog}
 import scalaanalyzer.workspace.ProjectSession
 
@@ -394,7 +398,8 @@ final class ScalaLanguageServer(
     val capabilities = new ServerCapabilities
     capabilities.setTextDocumentSync(TextDocumentSyncKind.Incremental)
     capabilities.setHoverProvider(true)
-    capabilities.setExecuteCommandProvider(new ExecuteCommandOptions(java.util.List.of(CompleteInsertion, RunTest, RunMain)))
+    capabilities.setExecuteCommandProvider(
+      new ExecuteCommandOptions(java.util.List.of(CompleteInsertion, RunTest, RunMain, OverrideMembers)))
     capabilities.setDefinitionProvider(true)
     capabilities.setTypeDefinitionProvider(true)
     capabilities.setWorkspaceSymbolProvider(true)
@@ -753,6 +758,24 @@ final class ScalaLanguageServer(
     }
 
   /**
+   * Lists the members the IDE's Override Members action offers for the class at a position.
+   *
+   * Runs on a read thread.
+   *
+   * @param params the document and the caret position
+   * @return the members in the chooser's order; empty when the position is not in a class, object or trait or the
+   *         document is not a project source
+   */
+  override def overridableMembers(params: TextDocumentPositionParams)
+      : CompletableFuture[java.util.List[HostProtocol.OverridableMember]] =
+    onRead("overridableMembers", params.getTextDocument, java.util.List.of[HostProtocol.OverridableMember]()) {
+      (s, path) =>
+        s.overridableMembers(path, lineColumn(params.getPosition)).map { member =>
+          new HostProtocol.OverridableMember(member.id, member.signature, member.owner)
+        }.asJava
+    }
+
+  /**
    * Exposes text-document requests and notifications.
    *
    * @return the service backed by the ordered documents executor
@@ -814,6 +837,7 @@ final class ScalaLanguageServer(
         throw requestError(ResponseErrorCode.RequestFailed, "the change is too large to compare")
       case e: Rename.Refused => throw requestError(ResponseErrorCode.RequestFailed, e.getMessage)
       case e: BspImport.UnknownTarget => throw requestError(ResponseErrorCode.InvalidParams, e.getMessage)
+      case e: MemberOverrides.UnknownMembers => throw requestError(ResponseErrorCode.InvalidParams, e.getMessage)
       case e: ScalafmtFormatting.Failed =>
         client.showMessage(new MessageParams(MessageType.Error, e.getMessage))
         throw requestError(ResponseErrorCode.RequestFailed, e.getMessage)
@@ -1702,13 +1726,20 @@ final class ScalaLanguageServer(
     new SignatureHelp(signatures.asJava, found.active.map(Integer.valueOf).getOrElse(Integer.valueOf(0)), null)
   }
 
+  /** Asks the client to apply text changes to the given version of a document. */
+  private def applyEdit(uri: String, version: Integer, changes: Seq[TextChange], label: String)
+      : CompletableFuture[ApplyWorkspaceEditResponse] = {
+    val edit = new TextDocumentEdit(new VersionedTextDocumentIdentifier(uri, version), textEdits(changes))
+    val workspaceEdit = new WorkspaceEdit(
+      java.util.List.of(LspEither.forLeft[TextDocumentEdit, ResourceOperation](edit)))
+
+    client.applyEdit(new ApplyWorkspaceEditParams(workspaceEdit, label))
+  }
+
   /** Applies a versioned insertion follow-up and moves the caret only after the client accepts its edits. */
   private def applyFollowUp(uri: String, version: Integer, followUp: CompletionFollowUp): Unit =
     if (followUp.changes.nonEmpty) {
-      val edit = new TextDocumentEdit(new VersionedTextDocumentIdentifier(uri, version), textEdits(followUp.changes))
-      val workspaceEdit = new WorkspaceEdit(java.util.List.of(LspEither.forLeft[TextDocumentEdit, ResourceOperation](edit)))
-
-      client.applyEdit(new ApplyWorkspaceEditParams(workspaceEdit, "completion")).thenAccept { response =>
+      applyEdit(uri, version, followUp.changes, "completion").thenAccept { response =>
         if (response.isApplied && showsDocuments) {
           val show = new ShowDocumentParams(uri)
           show.setSelection(range(LineRange(followUp.caret, followUp.caret)))
@@ -1716,6 +1747,40 @@ final class ScalaLanguageServer(
           client.showDocument(show)
         }
       }
+    }
+
+  /**
+   * Overrides the members the client selected, by an edit to the document version they were listed for. The version
+   * must still be the document's: the members are those of its text then.
+   */
+  private def executeOverride(params: ExecuteCommandParams): CompletableFuture[AnyRef] = overrideRequest(params) match {
+    case None => CompletableFuture.failedFuture(requestError(ResponseErrorCode.InvalidParams,
+      s"$OverrideMembers: expected the document, the position, the identifiers of the members and the document " +
+        "version"))
+    case Some(request) =>
+      onSource("override members", new TextDocumentIdentifier(request.uri), null) { (s, path) =>
+        if (versions.get(path) != request.version) throw new ProcessCanceledException
+        applyEdit(request.uri, versions.get(path), s.overrideMembers(path, request.at, request.ids), "override members")
+        null
+      }
+  }
+
+  /** What the override command asks: the members `ids` of the class at `at`, as listed for `version` of `uri`. */
+  private final case class OverrideRequest(uri: String, at: LineColumn, ids: Seq[String], version: Int)
+
+  /** Reads the override command's arguments, which lsp4j hands over as JSON; absent when they are malformed. */
+  private def overrideRequest(params: ExecuteCommandParams): Option[OverrideRequest] =
+    Option(params.getArguments).map(_.asScala.toSeq) match {
+      case Some(Seq(uri: JsonPrimitive, position: JsonObject, ids: JsonArray, version: JsonPrimitive))
+          if uri.isString && version.isNumber =>
+        val selected = ids.asScala.toSeq.collect { case id: JsonPrimitive if id.isString => id.getAsString }
+
+        for {
+          line <- intMember(position, "line")
+          column <- intMember(position, "character")
+          if selected.size == ids.size
+        } yield OverrideRequest(uri.getAsString, LineColumn(line, column), selected, version.getAsInt)
+      case _ => None
     }
 
   /** Starts the run of a lens's selection; the request completes when the run ends. */
@@ -1767,6 +1832,11 @@ final class ScalaLanguageServer(
       case _ => None
     }
 
+  /** Reads a number member as an int, absent when the member is missing or not a JSON number. */
+  private def intMember(json: JsonObject, name: String): Option[Int] = Option(json.get(name)).collect {
+    case value: JsonPrimitive if value.isNumber => value.getAsInt
+  }
+
   /** Reads a non-blank string member, absent when the member is missing, not a JSON string or blank. */
   private def stringMember(json: JsonObject, name: String): Option[String] = Option(json.get(name)).collect {
     case value: JsonPrimitive if value.isString && !value.getAsString.isBlank => value.getAsString
@@ -1797,12 +1867,16 @@ final class ScalaLanguageServer(
       if (readsConfiguration) readInlayHintSettings()
 
     /**
-     * Executes a test selection, a main class or completion insert handler; unknown commands are invalid parameters.
+     * Executes a test selection, a main class, a completion insert handler or an override of members; unknown commands
+     * are invalid parameters.
      *
      * A test selection or main class runs on the run thread and the request completes when the run ends; starting
-     * one while another is in progress fails with `RequestFailed`. A completion insertion runs on the documents
-     * thread and completes with `null`. A malformed test selection or main class, a completion insertion without six
-     * primitive arguments (the second and the third numbers) and an unknown command fail with `InvalidParams`.
+     * one while another is in progress fails with `RequestFailed`. A completion insertion or an override runs on the
+     * documents thread and completes with `null`; the override's edit goes to the client as `workspace/applyEdit`, and
+     * is cancelled when the document is no longer in the version the members were listed for. A malformed test
+     * selection or main class, a completion insertion without six primitive arguments (the second and the third
+     * numbers), an override without the document, the position, the identifiers and the version, an override of a
+     * member the class does not offer and an unknown command fail with `InvalidParams`.
      *
      * @param params the command name and its JSON arguments, as `completionItem` or the code lens gave them
      * @return a future completing with `null` once the command has run, or failing with the protocol error
@@ -1830,6 +1904,7 @@ final class ScalaLanguageServer(
             null
           }
         }
+      case OverrideMembers => executeOverride(params)
       case other => CompletableFuture.failedFuture(requestError(ResponseErrorCode.InvalidParams, s"unknown command: $other"))
     }
 
@@ -1892,6 +1967,12 @@ private val RunTest = "scalaAnalyzer.runTest"
 
 /** The command that runs the main class carried by a code lens. */
 private val RunMain = "scalaAnalyzer.runMain"
+
+/**
+ * The command that overrides chosen members of a class, listed by `scalaAnalyzer/overridableMembers`. Its arguments
+ * are the document's URI, the position of the caret, the identifiers of the members and the document's version.
+ */
+private val OverrideMembers = "scalaAnalyzer.overrideMembers"
 
 /** The command that replays insertion after the client has inserted a completion item's lookup text. */
 private val CompleteInsertion = "scalaAnalyzer.completeInsertion"

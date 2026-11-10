@@ -73,6 +73,7 @@ import com.intellij.find.impl.FindUsagesSettingsImpl
 import com.intellij.formatting.{Formatter, FormatterImpl, FormattingProgressCallbackFactory}
 import com.intellij.formatting.service.{CoreFormattingService, FormattingService}
 import com.intellij.ide.IconProvider
+import com.intellij.ide.fileTemplates.FileTemplateManager
 import com.intellij.ide.highlighter.{JavaClassFileType, JavaFileType}
 import com.intellij.ide.util.PropertiesComponent
 import com.intellij.internal.statistic.eventLog.{StatisticsEventLogProvidersHolder, StatisticsEventLoggerProvider}
@@ -1746,6 +1747,8 @@ private[scalaanalyzer] object HostBootstrap {
       appServices.register(classOf[DefaultProjectFactory])(new Host_DefaultProjectFactory(dispatch {
         case ("DefaultProjectFactory.getDefaultProject", _) => project
       }))
+      // The plugin renders the bodies of the members it implements and overrides from the IDE's code templates.
+      projectServices.register(classOf[FileTemplateManager])(HostFileTemplates.manager)
       projectServices.register(classOf[CodeStyleManager])(new CodeStyleManagerImpl(project))
       // No language injection in the host: every file is its own top-level file.
       projectServices.register(classOf[InjectedLanguageManager])(new Host_InjectedLanguageManager(dispatch {

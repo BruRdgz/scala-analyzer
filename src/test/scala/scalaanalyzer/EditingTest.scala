@@ -9,7 +9,7 @@ import org.jetbrains.plugins.scala.lang.psi.api.ScalaFile
 import org.jetbrains.plugins.scala.lang.psi.api.statements.ScFunction
 
 import scalaanalyzer.TestHost.{applyEdits, choose}
-import scalaanalyzer.language.{ChangeEngine, Completion, ProjectSearch}
+import scalaanalyzer.language.{ChangeEngine, Completion, MemberOverrides, ProjectSearch}
 import scalaanalyzer.platform.{CallLog, HostDispatchThread, HostLock, HostLog, RequestEditor}
 
 import java.nio.file.Path
@@ -630,6 +630,74 @@ class EditingTest extends munit.FunSuite {
         assertEquals(host.read(file.getText), original)
       } finally host.closeSource(file)
     }
+  }
+
+  // The oracle is the plugin's ImplementMembersQuickFixTest (`testProperDefaultValueForVariousMemberTypes`): the quick
+  // fix of a class that must implement members, and the same members as an action for an abstract class, which has no
+  // problem to fix.
+  test("Implement members inserts every abstract member on a copy and keeps the source") {
+    val cases = Seq(
+      ("quick fix", "quickfix",
+        "abstract class MyTrait {\n  var myVariable: Int\n  val myValue: Int\n  def myDef: Int\n  type MyType\n}\n\n" +
+          "class<caret> MyClass1 extends MyTrait\n",
+        "abstract class MyTrait {\n  var myVariable: Int\n  val myValue: Int\n  def myDef: Int\n  type MyType\n}\n\n" +
+          "class MyClass1 extends MyTrait {\n  override var myVariable: Int = ???\n" +
+          "  override val myValue: Int = ???\n\n" +
+          "  override def myDef: Int = ???\n\n  override type MyType = this.type\n}\n"),
+      ("action", "refactor.rewrite",
+        "trait Shape {\n  def area: Double\n  def name: String\n}\nabstract class Square<caret> extends Shape\n",
+        "trait Shape {\n  def area: Double\n  def name: String\n}\nabstract class Square extends Shape {\n" +
+          "  override def area: Double = ???\n\n  override def name: String = ???\n}\n"),
+    )
+    TestHost.libraryReport
+    for ((name, kind, marked, expected) <- cases) {
+      val original = marked.replace("<caret>", "")
+      val file = scalaFile("Implement", original)
+      try {
+        val at = marked.indexOf("<caret>")
+        val actions = host.codeActions(file, new TextRange(at, at))
+        val chosen = actions.find(_.title == "Implement members").getOrElse(fail(s"$name: $actions"))
+        assertEquals(chosen.kind, kind, name)
+        assertEquals(chosen.disabled, None, name)
+        assertEquals(applyEdits(original, chosen.edits), expected, name)
+        assertEquals(host.read(file.getText), original, name)
+      } finally host.closeSource(file)
+    }
+  }
+
+  // The dispatch thread runs the platform's `invokeLater` tasks, some of which write: a thread that reads or edits and
+  // waits for it can wait for a writer that waits for it. That the hop refuses such a caller is what keeps the previews
+  // that need the event thread from deadlocking with those tasks; the race itself cannot be made deterministic.
+  test("a query on the dispatch thread is refused inside a read or an edit") {
+    assertEquals(HostLock.queryOnDispatchThread(HostDispatchThread.isCurrent), true)
+    intercept[IllegalStateException](host.read(HostLock.queryOnDispatchThread(())))
+    intercept[IllegalStateException](HostLock.write(HostLock.queryOnDispatchThread(())))
+  }
+
+  // The oracle is the plugin's ScalaOverrideImplementTest (`testOverrideFunction`).
+  test("Override Members lists what a class can override and overrides the chosen members") {
+    val marked = "package test\n\nclass A {\n  def foo(): A = null\n  def bar: Int = 1\n}\n" +
+      "class FunctionOverride extends A {\n  <caret>\n}\n"
+    val original = marked.replace("<caret>", "")
+    TestHost.libraryReport
+    val file = scalaFile("Override", original)
+    try {
+      val at = marked.indexOf("<caret>")
+      val offered = host.overridableMembers(file, at)
+      val foo = offered.find(_.signature == "foo(): A").getOrElse(fail(offered.toString))
+      assertEquals(foo.owner, "test.A")
+      assert(offered.exists(_.signature == "bar: Int"), offered.toString)
+
+      val expected = "package test\n\nclass A {\n  def foo(): A = null\n  def bar: Int = 1\n}\n" +
+        "class FunctionOverride extends A {\n  override def foo(): A = super.foo()\n}\n"
+      assertEquals(applyEdits(original, host.overrideMembers(file, at, Seq(foo.id))), expected)
+      assertEquals(host.read(file.getText), original)
+
+      val stale = intercept[MemberOverrides.UnknownMembers] {
+        host.overrideMembers(file, at, Seq(foo.id, "test.A#gone(): Unit"))
+      }
+      assertEquals(stale.ids, Seq("test.A#gone(): Unit"))
+    } finally host.closeSource(file)
   }
 
   test("type-import actions keep colliding candidates separate and preserve the source") {

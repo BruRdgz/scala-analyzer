@@ -311,6 +311,36 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
     }
 
   /**
+   * Lists the members Override Members offers for the class at a position. Only Scala files have it.
+   *
+   * @param path registered project-source path
+   * @param at caret position, in the class, object or trait whose members are listed
+   * @return the members in the chooser's order, grouped by owner; empty when the position is not in a class, object
+   *         or trait, nothing is left to override, and for a file that is not Scala
+   */
+  def overridableMembers(path: Path, at: LineColumn): Seq[MemberOverrides.Member] = file(path) match {
+    case sourceFile: ScalaFile => host.overridableMembers(sourceFile, host.read(offset(document(sourceFile), at)))
+    case _ => Seq.empty
+  }
+
+  /**
+   * Computes the changes that override the chosen members in the class at a position. Only Scala files have them.
+   *
+   * @param path registered project-source path
+   * @param at caret position, where the members are inserted
+   * @param ids identifiers of the members to override, as `overridableMembers` gave them
+   * @return the changes against the current buffer; empty for a file that is not Scala
+   * @throws MemberOverrides.UnknownMembers when an identifier is not that of a member the class offers
+   */
+  def overrideMembers(path: Path, at: LineColumn, ids: Seq[String]): Seq[TextChange] = file(path) match {
+    case sourceFile: ScalaFile =>
+      val edits = host.overrideMembers(sourceFile, host.read(offset(document(sourceFile), at)), ids)
+
+      host.read(edits.map(textChange(document(sourceFile), _)))
+    case _ => Seq.empty
+  }
+
+  /**
    * Computes the changes that format a range of the file (all of it without one). Only Scala files are formatted.
    *
    * The buffer is unchanged. A whole-file request uses scalafmt when a configuration is found for the path; every
@@ -699,30 +729,32 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
    *         for a file that is not Scala
    */
   def codeActions(path: Path, start: LineColumn, end: LineColumn, only: Seq[String] = Seq.empty,
-      withInspections: Boolean = false): Seq[(CodeActionResult, Seq[TextChange])] = host.read {
-    file(path) match {
-      case sourceFile: ScalaFile =>
-        val sourceDocument = document(sourceFile)
+      withInspections: Boolean = false): Seq[(CodeActionResult, Seq[TextChange])] = file(path) match {
+    case sourceFile: ScalaFile =>
+      val sourceDocument = document(sourceFile)
 
-        /** Whether `kind` is a requested kind or a descendant of one; every kind when none was requested. */
-        def accepts(kind: String): Boolean = only.isEmpty || only.exists(k => kind == k || kind.startsWith(k + "."))
+      /** Whether `kind` is a requested kind or a descendant of one; every kind when none was requested. */
+      def accepts(kind: String): Boolean = only.isEmpty || only.exists(k => kind == k || kind.startsWith(k + "."))
 
-        val contextual =
-          if (accepts("quickfix") || accepts("refactor.rewrite"))
-            host.codeActions(sourceFile, new TextRange(offset(sourceDocument, start), offset(sourceDocument, end)),
-              withInspections).filter(choice => accepts(choice.kind))
-          else Seq.empty
-        val source =
-          if (only.nonEmpty && accepts("source.organizeImports")) Seq(host.organizeImports(sourceFile))
-          else Seq.empty
-        val choices = contextual ++ source
+      // The host reads for itself: Implement members previews on the dispatch thread, so this must not hold a read.
+      val contextual =
+        if (accepts("quickfix") || accepts("refactor.rewrite")) {
+          val range = host.read(new TextRange(offset(sourceDocument, start), offset(sourceDocument, end)))
 
+          host.codeActions(sourceFile, range, withInspections).filter(choice => accepts(choice.kind))
+        } else Seq.empty
+      val source =
+        if (only.nonEmpty && accepts("source.organizeImports")) Seq(host.organizeImports(sourceFile))
+        else Seq.empty
+      val choices = contextual ++ source
+
+      host.read {
         choices.map { choice =>
           CodeActionResult(choice.title, choice.kind, choice.disabled, pluginProblems(sourceDocument, choice.problems)) ->
             choice.edits.map(textChange(sourceDocument, _))
         }
-      case _ => Seq.empty
-    }
+      }
+    case _ => Seq.empty
   }
 
   /**

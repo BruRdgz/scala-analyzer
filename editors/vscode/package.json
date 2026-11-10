@@ -146,6 +146,11 @@
           "command": "scalaAnalyzer.goToSuper",
           "when": "editorLangId == scala",
           "group": "navigation"
+        },
+        {
+          "command": "scalaAnalyzer.chooseMembersToOverride",
+          "when": "editorLangId == scala",
+          "group": "1_modification"
         }
       ],
       "view/title": [
@@ -207,6 +212,10 @@
         },
         {
           "command": "scalaAnalyzer.goToSuper",
+          "when": "editorLangId == scala"
+        },
+        {
+          "command": "scalaAnalyzer.chooseMembersToOverride",
           "when": "editorLangId == scala"
         },
         {
@@ -276,6 +285,11 @@
       {
         "command": "scalaAnalyzer.goToSuper",
         "title": "Go to Super",
+        "category": "scala-analyzer"
+      },
+      {
+        "command": "scalaAnalyzer.chooseMembersToOverride",
+        "title": "Override Members…",
         "category": "scala-analyzer"
       },
       {

@@ -18,8 +18,8 @@ import java.util.concurrent.CompletableFuture;
  * Defines host-specific state notifications and requests alongside LSP.
  *
  * Clients may implement these extensions to display import state and diagnostics about the server itself, and to
- * list the build's targets, compile or import the build, inspect the project's code and ask for a type or for the
- * supers of a declaration on request.
+ * list the build's targets, compile or import the build, inspect the project's code, ask for a type or for the
+ * supers of a declaration on request and list the members a class can override.
  */
 public final class HostProtocol {
   /** Prevents instantiation: this class only groups the protocol types. */
@@ -204,6 +204,36 @@ public final class HostProtocol {
   }
 
   /**
+   * A member that Override Members offers for a class, as the IDE's chooser shows it.
+   *
+   * Instances are immutable and travel as the elements of the result of the {@code scalaAnalyzer/overridableMembers}
+   * request.
+   */
+  public static final class OverridableMember {
+    /** The member's opaque key, which the {@code scalaAnalyzer.overrideMembers} command takes back. */
+    public final String id;
+
+    /** The member as the chooser shows it, such as {@code foo(x: Int): String}. */
+    public final String signature;
+
+    /** The qualified name of the class or trait that declares the member. */
+    public final String owner;
+
+    /**
+     * Creates a member description.
+     *
+     * @param id the member's opaque key
+     * @param signature the member as the chooser shows it
+     * @param owner the qualified name of the class or trait that declares the member
+     */
+    public OverridableMember(String id, String signature, String owner) {
+      this.id = id;
+      this.signature = signature;
+      this.owner = owner;
+    }
+  }
+
+  /**
    * The outcome of a project-wide inspection.
    *
    * Instances are immutable and travel as the result of the {@code scalaAnalyzer/inspect} request.
@@ -329,6 +359,19 @@ public final class HostProtocol {
      */
     @JsonRequest("scalaAnalyzer/superElements")
     CompletableFuture<List<Location>> superElements(TextDocumentPositionParams params);
+
+    /**
+     * Lists the members that the IDE's Override Members action offers for the class, object or trait at a position.
+     *
+     * The members come in the chooser's order, grouped by owner. The {@code scalaAnalyzer.overrideMembers} command
+     * overrides the ones the client selects.
+     *
+     * @param params the document and the caret position in the class
+     * @return a future containing the members; empty when the position is not in a class, object or trait or the
+     *         document is not a project source
+     */
+    @JsonRequest("scalaAnalyzer/overridableMembers")
+    CompletableFuture<List<OverridableMember>> overridableMembers(TextDocumentPositionParams params);
   }
 
   /** The server as a client calls it. */
