@@ -15,11 +15,13 @@ import scala.jdk.CollectionConverters.*
  * moves the caret. Here such a command updates the copy's text, as `executeForFileCopy` does for completion and code
  * actions, and the caret goes where the command navigates to. The command was computed from the copy's PSI, so the
  * document first takes the PSI changes the caller made before asking for it. Outside a preview session the file is
- * one of the user's, which the host never writes, so the command is rejected.
+ * one of the user's, which the host never writes, so the command is rejected; so is one for a file that is not the
+ * session's copy.
  */
 private[scalaanalyzer] final class HostModCommandExecutor extends ModCommandBatchExecutorImpl {
   override def executeInteractively(context: ActionContext, command: ModCommand, editor: Editor): Unit = {
-    if (!IntentionPreviewUtils.isIntentionPreviewActive) CallLog.unsupported("ModCommandExecutor.executeInteractively")
+    if (!IntentionPreviewUtils.isPreviewElement(context.file))
+      CallLog.unsupported("ModCommandExecutor.executeInteractively")
     val document = context.file.getViewProvider.getDocument
     PsiDocumentManager.getInstance(context.project).doPostponedOperationsAndUnblockDocument(document)
     executeForFileCopy(command, context.file)
