@@ -18,6 +18,7 @@ import com.intellij.psi.{
 }
 import com.intellij.psi.search.GlobalSearchScope
 import com.intellij.psi.util.{PsiTreeUtil, PsiTypesUtil}
+import com.intellij.testIntegration.TestFinderHelper
 import org.jetbrains.plugins.scala.annotator.gutter.{ScalaGoToDeclarationHandler, ScalaGotoTypeDeclarationProvider}
 import org.jetbrains.plugins.scala.annotator.hints.Text
 import org.jetbrains.plugins.scala.editor.documentationProvider.{ScalaDocQuickInfoGenerator, ScalaDocumentationProvider}
@@ -548,9 +549,11 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
 
   /** The distinct locations of declarations, ordered by file and position so that the result does not vary. */
   private def locationsOf(declarations: Seq[PsiElement]): Seq[(Path, LineColumn)] =
-    declarations.flatMap(sourceLocation).distinct
-      .sortBy(location => (location.path.toString, location.position.line, location.position.column))
-      .map(location => location.path -> location.position)
+    locationsInOrder(declarations).sortBy((path, position) => (path.toString, position.line, position.column))
+
+  /** The distinct locations of declarations, in the order the declarations come. */
+  private def locationsInOrder(declarations: Seq[PsiElement]): Seq[(Path, LineColumn)] =
+    declarations.flatMap(sourceLocation).distinct.map(location => location.path -> location.position)
 
   /**
    * Locates what the plugin's Go to Super navigates to from a position: the superclasses of the type around it, or
@@ -566,6 +569,30 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
   def superElements(path: Path, at: LineColumn): Seq[(Path, LineColumn)] = file(path) match {
     case sourceFile: ScalaFile => host.read(locationsOf(SuperElements.at(sourceFile, offset(document(sourceFile), at))))
     case _ => Seq.empty
+  }
+
+  /**
+   * Locates what the IDE's Go to Test navigates to from a position: the classes that the test class around it tests,
+   * or the tests of the class around it.
+   *
+   * Library declarations are located as `definition` locates them.
+   *
+   * @param path registered project-source path
+   * @param at caret position
+   * @return the declaration locations, distinct and in the order the IDE ranks them (the closest name first); empty
+   *         when the position is in no class or the class has no test or tested class
+   */
+  def testTargets(path: Path, at: LineColumn): Seq[(Path, LineColumn)] = host.read {
+    val sourceFile = file(path)
+    val source = Option(sourceFile.findElementAt(offset(document(sourceFile), at)))
+      .flatMap(element => Option(TestFinderHelper.findSourceElement(element)))
+    val targets = source match {
+      case Some(element) if TestFinderHelper.isTest(element) => TestFinderHelper.findClassesForTest(element).asScala.toSeq
+      case Some(element) => TestFinderHelper.findTestsForClass(element).asScala.toSeq
+      case None => Seq.empty
+    }
+
+    locationsInOrder(targets)
   }
 
   /**

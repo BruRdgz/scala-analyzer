@@ -5,6 +5,7 @@ import com.intellij.openapi.module.Module
 import com.intellij.openapi.util.TextRange
 import com.intellij.psi.{PsiElement, PsiNameIdentifierOwner}
 import com.intellij.psi.util.PsiTreeUtil
+import com.intellij.testIntegration.TestFramework
 import org.jetbrains.plugins.scala.lang.psi.ScalaPsiUtil
 import org.jetbrains.plugins.scala.lang.psi.api.ScalaFile
 import org.jetbrains.plugins.scala.lang.psi.api.expr.ScInfixExpr
@@ -45,6 +46,17 @@ object TestLenses {
     case UTest extends Framework("utest", new UTestTestFramework)
     case MUnit extends Framework("munit", new MUnitTestFramework)
   }
+
+  /**
+   * The detectors to install as the platform's `TestFramework` extensions, which `TestFrameworks` asks whether a
+   * class is a test (Go to Test, the icons of test classes).
+   *
+   * uTest is left out: for a class suite its detector reads the library version from IDE services the host lacks,
+   * and it would run on every class that is asked about.
+   *
+   * @return the same detector instances that `in` uses, one per framework
+   */
+  def platformFrameworks: Seq[TestFramework] = Framework.values.toSeq.filter(_ != Framework.UTest).map(_.detector)
 
   /**
    * Finds the runnable suites of a file and their tests.

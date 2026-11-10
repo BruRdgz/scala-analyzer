@@ -36,6 +36,7 @@ class LanguageServerTest extends munit.FunSuite {
   private val greet3 = fixture.resolve("core3/src/main/scala/core3/Greet3.scala")
   private val hello3 = fixture.resolve("core3/src/main/scala/core3/Hello3.scala")
   private val shape = fixture.resolve("core/src/main/scala/core/Shape.scala")
+  private val greetingSuite = fixture.resolve("core/src/test/scala/core/GreetingSuite.scala")
 
   /** Records what the server sends. */
   private final class RecordingClient extends ClientBase {
@@ -673,6 +674,19 @@ class LanguageServerTest extends munit.FunSuite {
     assertEquals(supers(new Position(6, 14)), Seq((shape.toUri.toString, new Position(2, 6))))
     assertEquals(supers(new Position(3, 7)), Seq.empty)
     assertEquals(supers(new Position(2, 8)), Seq.empty)
+  }
+
+  // `Greeting` (line 2, column 17 of Greeting.scala) and `GreetingSuite` (line 2, column 6 of GreetingSuite.scala) lead
+  // to each other, by name, from the test's body too (line 3); `Counter` (line 8, column 6) has no test. The suite uses
+  // nothing of Greeting, so that the reference and call-hierarchy tests of `text` find no use in it.
+  test("goes from a class to its tests and from a test to the classes it tests") {
+    def testTargets(path: Path, position: Position) =
+      server.testTargets(new TextDocumentPositionParams(document(path), position))
+        .get(1, TimeUnit.MINUTES).asScala.toSeq.map(l => (l.getUri, l.getRange.getStart))
+    assertEquals(testTargets(greeting, new Position(2, 20)), Seq((greetingSuite.toUri.toString, new Position(2, 6))))
+    assertEquals(testTargets(greetingSuite, new Position(2, 8)), Seq((greeting.toUri.toString, new Position(2, 17))))
+    assertEquals(testTargets(greetingSuite, new Position(3, 10)), Seq((greeting.toUri.toString, new Position(2, 17))))
+    assertEquals(testTargets(counter, new Position(8, 6)), Seq.empty)
   }
 
   // A one-line range of a file, as (URI, range); found and expected ranges compare in file and line order.

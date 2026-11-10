@@ -81,31 +81,38 @@ async function showTypeInfo() {
   return text;
 }
 
-// Peeks the declarations that the caret's type or member extends, overrides or implements, as IntelliJ's Go to Super
-// (Ctrl+U) lists them; a single one is opened directly.
-async function goToSuper() {
+// Peeks the locations that the server answers `request` with for the caret, as IntelliJ lists the targets of a
+// navigation action; a single one is opened directly. `action` names the command in an error, `none` is shown when
+// the server has no location.
+async function peekFromCaret(request, action, none) {
   const editor = vscode.window.activeTextEditor;
   if (!editor) return;
 
   const position = editor.selection.active;
-  let supers;
+  let locations;
   try {
-    supers = await client.sendRequest('scalaAnalyzer/superElements', {
+    locations = await client.sendRequest(request, {
       textDocument: client.code2ProtocolConverter.asTextDocumentIdentifier(editor.document),
       position: client.code2ProtocolConverter.asPosition(position),
     });
   } catch (error) {
-    vscode.window.showErrorMessage(`scala-analyzer: go to super failed: ${error.message}`);
+    vscode.window.showErrorMessage(`scala-analyzer: ${action} failed: ${error.message}`);
     return;
   }
 
-  if (supers.length === 0) {
-    vscode.window.setStatusBarMessage('$(info) No super declaration here', statusMessageMs);
+  if (locations.length === 0) {
+    vscode.window.setStatusBarMessage(`$(info) ${none}`, statusMessageMs);
     return;
   }
-  const targets = supers.map(target => client.protocol2CodeConverter.asLocation(target));
+  const targets = locations.map(target => client.protocol2CodeConverter.asLocation(target));
   await vscode.commands.executeCommand('editor.action.goToLocations', editor.document.uri, position, targets, 'gotoAndPeek');
 }
+
+// IntelliJ's Go to Super (Ctrl+U): the declarations that the caret's type or member extends, overrides or implements.
+const goToSuper = () => peekFromCaret('scalaAnalyzer/superElements', 'go to super', 'No super declaration here');
+
+// IntelliJ's Go to Test (Ctrl+Shift+T): the tests of the caret's class, or the classes that its test class tests.
+const goToTest = () => peekFromCaret('scalaAnalyzer/testTargets', 'go to test', 'No test or tested class here');
 
 function registerTypeHint(context) {
   typeHint = vscode.window.createTextEditorDecorationType({
@@ -166,6 +173,7 @@ function registerCommands(context) {
   register('restart', () => client.restart());
   register('typeInfo', needsServer(showTypeInfo));
   register('goToSuper', needsServer(goToSuper));
+  register('goToTest', needsServer(goToTest));
   register('showStatus', needsServer(async () => {
     const report = await client.sendRequest('scalaAnalyzer/status');
     client.outputChannel.appendLine(`status: ${JSON.stringify(report, null, 2)}`);

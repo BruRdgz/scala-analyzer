@@ -180,6 +180,7 @@ final class ModuleModel(project: Project) {
 
     // Scopes of the modules that depend on it reach it.
     scopes.clear()
+    sourceScopes.clear()
     useScopes.clear()
     libraryScopes.clear()
   }
@@ -268,7 +269,27 @@ final class ModuleModel(project: Project) {
   }
 
   // One scope per module here too.
+  private val sourceScopes = new ConcurrentHashMap[HostModule, GlobalSearchScope]()
   private val useScopes = new ConcurrentHashMap[HostModule, GlobalSearchScope]()
+
+  /**
+   * Gives the sources of a module and of its transitive dependencies, as the IDE's module-with-dependencies scope:
+   * no library and no JDK, unlike `resolveScope`.
+   *
+   * @param hostModule registered module
+   * @return the same scope object on every call for this module
+   */
+  def dependenciesScope(hostModule: HostModule): GlobalSearchScope =
+    sourceScopes.computeIfAbsent(hostModule, newSourceScope)
+
+  /**
+   * Gives the sources that can use declarations of a module: its own and those of the modules that depend on it,
+   * transitively, as the IDE's module-with-dependents scope.
+   *
+   * @param hostModule registered module
+   * @return the same scope object on every call for this module
+   */
+  def dependentsScope(hostModule: HostModule): GlobalSearchScope = useScopes.computeIfAbsent(hostModule, newUseScope)
 
   /**
    * Where a source's declarations are used: its module and the modules that depend on it, transitively, as the IDE's
@@ -279,7 +300,17 @@ final class ModuleModel(project: Project) {
    */
   def useScope(file: VirtualFile): Option[GlobalSearchScope] = file match {
     case _: LibraryFile => resolveScope(file)
-    case source => ofFile(source).map(module => useScopes.computeIfAbsent(module, newUseScope))
+    case source => ofFile(source).map(dependentsScope)
+  }
+
+  /** Creates the scope of the sources of `owner` and of its dependencies. */
+  private def newSourceScope(owner: HostModule): GlobalSearchScope = new GlobalSearchScope(project) {
+    private val reachable = withDependencies(owner)
+
+    override def contains(file: VirtualFile): Boolean = reachable.exists(_.sources.contains(file))
+    override def isSearchInModuleContent(module: Module): Boolean = reachable.exists(_.module eq module)
+    override def isSearchInLibraries: Boolean = false
+    override def toString: String = s"ModuleSources(${owner.spec.name})"
   }
 
   /** Creates the scope of sources that can use declarations from `used`. */

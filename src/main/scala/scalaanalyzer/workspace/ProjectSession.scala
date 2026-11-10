@@ -412,6 +412,18 @@ final class ProjectSession private (
   def superElements(path: Path, at: LineColumn): Seq[(Path, LineColumn)] = language.superElements(path, at)
 
   /**
+   * Locates what the IDE's Go to Test navigates to from a source position.
+   *
+   * Library targets are located as in `definition`.
+   *
+   * @param path registered project-source path
+   * @param at caret position in zero-based lines and UTF-16 columns
+   * @return the classes that the test class around the position tests, or the tests of the class around it, distinct
+   *         and in the order the IDE ranks them (the closest name first); empty when there is none
+   */
+  def testTargets(path: Path, at: LineColumn): Seq[(Path, LineColumn)] = language.testTargets(path, at)
+
+  /**
    * Locates the type declarations associated with a symbol.
    *
    * Library locations use materialized source or decompiled files, as in `definition`.

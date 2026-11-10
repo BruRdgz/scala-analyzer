@@ -753,6 +753,23 @@ final class ScalaLanguageServer(
     }
 
   /**
+   * Locates what the IDE's Go to Test navigates to from a caret: the tests of the class around it, or the classes that
+   * the test class around it tests.
+   *
+   * Runs on a read thread.
+   *
+   * @param params the document and the caret position
+   * @return the locations of the targets in the order the IDE ranks them, each a zero-width range at the reported
+   *         position; empty when there is none or the document is not a project source
+   */
+  override def testTargets(params: TextDocumentPositionParams): CompletableFuture[java.util.List[Location]] =
+    onRead("testTargets", params.getTextDocument, java.util.List.of[Location]()) { (s, path) =>
+      s.testTargets(path, lineColumn(params.getPosition)).map { (target, at) =>
+        new Location(target.toUri.toString, new Range(position(at), position(at)))
+      }.asJava
+    }
+
+  /**
    * Exposes text-document requests and notifications.
    *
    * @return the service backed by the ordered documents executor

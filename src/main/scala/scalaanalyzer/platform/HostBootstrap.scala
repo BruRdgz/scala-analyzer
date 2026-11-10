@@ -202,7 +202,7 @@ import com.intellij.psi.stubs.{
 }
 import com.intellij.psi.util.{CachedValuesManager, JavaClassSupers, PsiVersioningService}
 import com.intellij.task.ProjectTaskManager
-import com.intellij.testIntegration.TestFramework
+import com.intellij.testIntegration.{JavaTestFinder, TestFinder, TestFramework}
 import com.intellij.util.{
   CachedValuesManagerImpl, CollectionQuery, EmptyQuery, Queries, QueriesImpl, Query, QueryExecutor
 }
@@ -270,7 +270,7 @@ import org.jetbrains.plugins.scalaDoc.lang.parser.ScalaDocParserDefinition
 import kotlin.coroutines.EmptyCoroutineContext
 import kotlinx.coroutines.CoroutineScopeKt
 import scalaanalyzer.{HostConfig, ModuleModel, ScalaPsiHost}
-import scalaanalyzer.language.{ChangeEngine, CodeActions, Completion, InlayHints, Inspections, Rename}
+import scalaanalyzer.language.{ChangeEngine, CodeActions, Completion, InlayHints, Inspections, Rename, TestLenses}
 import scalaanalyzer.platform.{Descriptors, ExtensionBean, dispatch, tableProxy}
 import scalaanalyzer.ScalaPsiHost.{CompletionWeighers, SemanticExtensionPoints, scalaCompletionContributors}
 
@@ -804,14 +804,23 @@ private[scalaanalyzer] object HostBootstrap {
         override def isToBeShown(featureId: String, project: Project): Boolean = false
         override def isToBeAdvertisedInLookup(featureId: String, project: Project): Boolean = false
       })
-      // Lookup presentation checks test-class icons; no test-framework integrations are installed in the host.
+      // Lookup presentation checks test-class icons and Go to Test asks what a test class is: the Scala frameworks
+      // that the host can detect (see TestLenses), and no others.
       CoreApplicationEnvironment.registerExtensionPoint(area, TestFramework.EXTENSION_NAME,
         classOf[TestFramework])
+      TestLenses.platformFrameworks.foreach(
+        area.getExtensionPoint[TestFramework](TestFramework.EXTENSION_NAME.getName).registerExtension(_, root))
       CoreApplicationEnvironment.registerExtensionPoint(area, "com.intellij.javaMainMethodProvider",
         classOf[JavaMainMethodProvider])
       CoreApplicationEnvironment.registerExtensionPoint(area, "com.intellij.packageDirectoryProvider",
         classOf[PackageDirectoryProvider])
       appServices.register(classOf[TestFrameworks])(newPrivate(classOf[TestFrameworksImpl]))
+      // Go to Test: the Java plugin's finder for classes, then the Scala plugin's, which adds objects. The element
+      // type is erased; the only extensions registered here are TestFinders.
+      val testFinders = declare("com.intellij.testFinder").asInstanceOf[ExtensionPointImpl[TestFinder]]
+      testFinders.registerExtension(new JavaTestFinder, root)
+      for (name <- Descriptors.scalaExtensions(config.scalaPluginJars, "com.intellij.testFinder"))
+        testFinders.registerExtension(newPrivate(Class.forName(name).asSubclass(classOf[TestFinder])), root)
       appServices.registerNull(classOf[NewRdCompletionSupport])
       appServices.register(classOf[GroupedCompletion])(
         tableProxy(classOf[GroupedCompletion], "GroupedCompletion") {

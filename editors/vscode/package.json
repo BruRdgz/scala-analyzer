@@ -146,6 +146,11 @@
           "command": "scalaAnalyzer.goToSuper",
           "when": "editorLangId == scala",
           "group": "navigation"
+        },
+        {
+          "command": "scalaAnalyzer.goToTest",
+          "when": "editorLangId == scala",
+          "group": "navigation"
         }
       ],
       "view/title": [
@@ -207,6 +212,10 @@
         },
         {
           "command": "scalaAnalyzer.goToSuper",
+          "when": "editorLangId == scala"
+        },
+        {
+          "command": "scalaAnalyzer.goToTest",
           "when": "editorLangId == scala"
         },
         {
@@ -276,6 +285,11 @@
       {
         "command": "scalaAnalyzer.goToSuper",
         "title": "Go to Super",
+        "category": "scala-analyzer"
+      },
+      {
+        "command": "scalaAnalyzer.goToTest",
+        "title": "Go to Test",
         "category": "scala-analyzer"
       },
       {

@@ -9,6 +9,11 @@
 - `scalaAnalyzer/superElements` answers the locations that the IDE's Go to Super navigates to from a caret: the
   superclasses of the type around it, or the members that the member around it overrides or implements. The VS Code
   extension adds **Go to Super**, which opens the declaration or peeks several; it has no default key.
+- `scalaAnalyzer/testTargets` answers the locations that the IDE's Go to Test navigates to from a caret: the tests of
+  the class around it, or the classes that the test class around it tests, ranked by name proximity as the IDE ranks
+  them. The host installs the plugin's ScalaTest, specs2 and MUnit detectors as the platform's test frameworks (uTest
+  suites are not recognized: their detection needs library versions the host lacks) and the Java and Scala test
+  finders. The VS Code extension adds **Go to Test**, which opens the location or peeks several; it has no default key.
 - Document highlights use the plugin's usage handlers, as the IDE does: on `def`, `return`, `val`, `case`, `match`,
   `if`, `try`, `for` and `=>` they mark the exit points or results, on a class-like keyword its companion's, on an
   `end` marker the definition, on constructor calls and case-class references the class and its constructor, and on an

@@ -329,6 +329,18 @@ public final class HostProtocol {
      */
     @JsonRequest("scalaAnalyzer/superElements")
     CompletableFuture<List<Location>> superElements(TextDocumentPositionParams params);
+
+    /**
+     * Locates what the IDE's Go to Test navigates to from a caret: the tests of the class around it, or the classes
+     * that the test class around it tests.
+     *
+     * @param params the document and the caret position
+     * @return a future containing the locations of the targets in the order the IDE ranks them, each a zero-width
+     *         range at the position of the declaration's name; empty when there is none or the document is not a
+     *         project source
+     */
+    @JsonRequest("scalaAnalyzer/testTargets")
+    CompletableFuture<List<Location>> testTargets(TextDocumentPositionParams params);
   }
 
   /** The server as a client calls it. */
