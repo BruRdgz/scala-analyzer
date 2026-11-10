@@ -32,6 +32,8 @@ final case class CompileSpec(
  * @param generatedSources the part of `sources` the build marks as generated; empty when it marks none
  * @param sourceDirectories the directories the build lists as source entries: a file created in one is a source of
  *                          the module once the build is imported again
+ * @param baseDirectory the directory the build gives as the target's base, whose `.sbt` files sbt loads; `None` when
+ *                      the build gives none
  */
 final case class ImportedModule(
   spec: ModuleSpec,
@@ -39,6 +41,7 @@ final case class ImportedModule(
   compile: CompileSpec,
   generatedSources: Set[Path] = Set.empty,
   sourceDirectories: Seq[Path] = Seq.empty,
+  baseDirectory: Option[Path] = None,
 )
 
 /**

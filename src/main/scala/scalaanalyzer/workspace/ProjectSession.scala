@@ -123,6 +123,16 @@ final class ProjectSession private (
   def affectsSources(path: Path): Boolean = isSource(path) || imported.exists(_.sourceDirectories.exists(path.startsWith))
 
   /**
+   * Checks whether a directory is the base directory of an imported module.
+   *
+   * Takes no lock: it reads the modules as last imported.
+   *
+   * @param directory directory to check; `null`, as the parent of a filesystem root, is no module's base
+   * @return `true` when the build gave `directory` as the base directory of one of its targets
+   */
+  def isModuleBase(directory: Path): Boolean = imported.exists(_.baseDirectory.contains(directory))
+
+  /**
    * Reports whether source requests remain permitted by the import-failure guard.
    *
    * Takes no lock. Only the partial-import failure is consulted: closing the session does not change the result.

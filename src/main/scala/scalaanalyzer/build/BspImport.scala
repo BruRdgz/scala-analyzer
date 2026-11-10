@@ -109,7 +109,8 @@ final class BuildConnection private[scalaanalyzer] (
 
       ImportedModule(spec, items.flatMap(BspImport.sourceFiles), compile,
         generatedSources = items.flatMap(BspImport.generatedSourceFiles).toSet,
-        sourceDirectories = items.flatMap(BspImport.sourceDirectories))
+        sourceDirectories = items.flatMap(BspImport.sourceDirectories),
+        baseDirectory = Option(target.getBaseDirectory).map(uri => Path.of(URI.create(uri))))
     }
 
     BspImport.dependenciesFirst(imported)

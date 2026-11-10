@@ -1821,8 +1821,10 @@ class LanguageServerTest extends munit.FunSuite {
   }
 
   // Main.scala still has the unsaved change of the diagnostics test (`String` became `Int`). Without `-Xsource:3`,
-  // its `import core.*` is no wildcard import: the module's new options must reach the plugin.
-  test("imports the build again after a change to its definition, keeping unsaved changes") {
+  // its `import core.*` is no wildcard import: the module's new options must reach the plugin. sbt loads the `.sbt`
+  // files in a project's base directory after the project's settings in build.sbt (Load.resolveProject), so a file
+  // created in `app` changes its options as well.
+  test("imports the build again after a change to its definition or a subproject's, keeping unsaved changes") {
     val buildFile = fixture.resolve("build.sbt")
     val original = Files.readString(buildFile)
     val typeMismatch = Seq("Type mismatch. Required: Int, found: String")
@@ -1834,17 +1836,30 @@ class LanguageServerTest extends munit.FunSuite {
         new VersionedTextDocumentIdentifier(main.toUri.toString, version), java.util.List.of(unchanged)))
       errors(diagnosticsOf(main, version))
     }
-    try {
-      Files.writeString(buildFile, original.replace("""scalacOptions += "-Xsource:3"""", """scalacOptions += "-deprecation""""))
-      filesChanged(buildFile -> FileChangeType.Changed)
-      val withoutSource3 = problemsAfterImport(3)
-      assert(withoutSource3.nonEmpty && withoutSource3 != typeMismatch, withoutSource3)
-    } finally {
-      Files.writeString(buildFile, original)
-      filesChanged(buildFile -> FileChangeType.Changed)
-    }
+    val changedBuild = original.replace("""scalacOptions += "-Xsource:3"""", """scalacOptions += "-deprecation"""")
+    val withoutSource3 =
+      try {
+        Files.writeString(buildFile, changedBuild)
+        filesChanged(buildFile -> FileChangeType.Changed)
+        problemsAfterImport(3)
+      } finally {
+        Files.writeString(buildFile, original)
+        filesChanged(buildFile -> FileChangeType.Changed)
+      }
+    assert(withoutSource3.nonEmpty && withoutSource3 != typeMismatch, withoutSource3)
     // Back to the original options; the editor's text was kept through both imports.
     assertEquals(problemsAfterImport(4), typeMismatch)
+
+    val subprojectFile = fixture.resolve("app/options.sbt")
+    try {
+      Files.writeString(subprojectFile, "scalacOptions -= \"-Xsource:3\"\n")
+      filesChanged(subprojectFile -> FileChangeType.Created)
+      assertEquals(problemsAfterImport(5), withoutSource3)
+    } finally {
+      Files.delete(subprojectFile)
+      filesChanged(subprojectFile -> FileChangeType.Deleted)
+    }
+    assertEquals(problemsAfterImport(6), typeMismatch)
   }
 
   test("imports the build again on request, reporting its state") {
