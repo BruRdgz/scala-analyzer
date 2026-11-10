@@ -833,13 +833,14 @@ class EditingTest extends munit.FunSuite {
     }
   }
 
-  // The dispatch thread runs the platform's `invokeLater` tasks, some of which write: a thread that reads or edits and
-  // waits for it can wait for a writer that waits for it. That the hop refuses such a caller is what keeps the previews
+  // The dispatch thread runs the platform's `invokeLater` tasks, some of which write: a thread that reads, edits or holds
+  // write intent and waits for it can wait for a writer that waits for it. That the hop refuses such a caller is what keeps the previews
   // that need the event thread from deadlocking with those tasks; the race itself cannot be made deterministic.
-  test("a query on the dispatch thread is refused inside a read or an edit") {
+  test("a query on the dispatch thread is refused inside a read, an edit or write intent") {
     assertEquals(HostLock.queryOnDispatchThread(HostDispatchThread.isCurrent), true)
     intercept[IllegalStateException](host.read(HostLock.queryOnDispatchThread(())))
     intercept[IllegalStateException](HostLock.write(HostLock.queryOnDispatchThread(())))
+    intercept[IllegalStateException](HostLock.writeIntent(HostLock.queryOnDispatchThread(())))
   }
 
   // The oracle is the plugin's ScalaOverrideImplementTest (`testOverrideFunction`).

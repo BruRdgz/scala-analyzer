@@ -323,14 +323,16 @@ final class ScalaPsiHost private[scalaanalyzer] (
    * runs on the project's files, so the files change while it does; their texts are restored before this returns, as
    * the editor applies the edits and reports them back. Queries running meanwhile are cancelled.
    *
-   * Takes the write-intent and write locks itself, then lets the work for the dispatch thread run before returning.
+   * Finds the target on the dispatch thread before it takes the write-intent and write locks itself, so the caller must
+   * hold no lock; then lets the work for the dispatch thread run before returning.
    *
    * @param file source file that contains the symbol
    * @param offset UTF-16 offset of the symbol in `file`
    * @param newName the symbol's new name
    * @return the edits of each changed file, against its text before the rename and in the order of the plan's files;
    *         files whose text does not change are left out
-   * @throws Rename.Refused when the position has no renameable symbol, the name is invalid or the rename conflicts
+   * @throws Rename.Refused when the position has no renameable symbol, the name is invalid, the rename conflicts or
+   *                        an edit changed the files that decide the target while it was being found
    */
   def rename(file: PsiFile, offset: Int, newName: String): Seq[(PsiFile, Seq[ChangeEngine.Edit])] = {
     /** Puts each file's text back and commits it; non-cancelable so that a cancelled query cannot leave a renamed file. */
@@ -355,10 +357,23 @@ final class ScalaPsiHost private[scalaanalyzer] (
       } finally restore(originals)
     }
 
+    /** The modification stamps of the files that decide the target: the one with the symbol and the target's own. */
+    def stamps(target: PsiElement): Seq[Long] = Seq(file, target.getContainingFile).map(_.getModificationStamp)
+
+    // The target is found on the dispatch thread (see renameTarget), which cannot be awaited inside write intent.
+    val (target, found) = HostLock.queryOnDispatchThread {
+      val target = Rename.target(file, offset)
+      (target, stamps(target))
+    }
+
     val (originals, changed) = try HostLock.writeIntent {
-      // Keep the read plan valid until its write: another editor change must not enter between the two.
-      val target = renameTarget(file, offset)
-      val plan = read(Rename.plan(target, newName))
+      // Keep the read plan valid until its write: another editor change must not enter between the two, nor between
+      // finding the target and taking write intent.
+      val plan = read {
+        if (!target.isValid || stamps(target) != found)
+          throw new Rename.Refused(Seq("The files changed while the rename looked for its symbol."))
+        Rename.plan(target, newName)
+      }
 
       HostLock.write(performAndRestore(plan))
     } finally HostDispatchThread.drain()
@@ -372,14 +387,16 @@ final class ScalaPsiHost private[scalaanalyzer] (
    * The element the IDE renames for the symbol at `offset` (see [[Rename.target]]). The Java processors ask for the
    * event thread when they look for a method's base methods, which they do for a symbol of a Java source.
    *
-   * Takes read access itself and runs on the host's dispatch thread.
+   * Takes read access itself and runs on the host's dispatch thread, so the caller must hold no lock (see
+   * [[HostLock.queryOnDispatchThread]]).
    *
    * @param file source file that contains the symbol
    * @param offset UTF-16 offset of the symbol in `file`
    * @return the element the IDE's rename processors substitute for the symbol
    * @throws Rename.Refused when the position does not identify a renameable project symbol
+   * @throws IllegalStateException when the thread holds the read lock, the write lock or write intent
    */
-  def renameTarget(file: PsiFile, offset: Int): PsiElement = HostDispatchThread.call(read(Rename.target(file, offset)))
+  def renameTarget(file: PsiFile, offset: Int): PsiElement = HostLock.queryOnDispatchThread(Rename.target(file, offset))
 
   /**
    * Removes a source file opened with [[openSource]] or [[openFile]] from the project.

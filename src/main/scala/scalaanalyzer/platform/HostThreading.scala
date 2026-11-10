@@ -121,17 +121,17 @@ private[scalaanalyzer] object HostLock {
    * The dispatch thread takes its own read through [[query]], so work queued there before (the platform's `invokeLater`
    * tasks, some of which write) runs first, and a write cancels the query as it cancels any other.
    *
-   * The caller waits for the dispatch thread and must hold neither the read lock nor the write lock: a dispatch-thread
-   * task that writes waits for the caller's read to end, and the dispatch thread's own read would wait for the caller's
-   * write, while the caller waits for the dispatch thread.
+   * The caller waits for the dispatch thread and must hold neither the read lock, the write lock nor write intent: a
+   * dispatch-thread task that writes waits for the caller's read or write intent to end, and the dispatch thread's own
+   * read would wait for the caller's write, while the caller waits for the dispatch thread.
    *
    * @param body action that reads PSI
    * @return the result of `body`
-   * @throws IllegalStateException when the thread holds the read lock or the write lock
+   * @throws IllegalStateException when the thread holds the read lock, the write lock or write intent
    */
   def queryOnDispatchThread[T](body: => T): T = {
-    if (isReading || isWriting)
-      throw new IllegalStateException("the dispatch thread cannot be awaited inside a read or an edit")
+    if (isReading || isWriting || hasWriteIntent)
+      throw new IllegalStateException("the dispatch thread cannot be awaited inside a read, an edit or write intent")
     HostDispatchThread.call(query(body))
   }
 
