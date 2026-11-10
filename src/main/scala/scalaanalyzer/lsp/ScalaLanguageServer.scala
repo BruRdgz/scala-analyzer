@@ -411,7 +411,7 @@ final class ScalaLanguageServer(
     val signatureTriggers = java.util.List.of("(", "[", ",")
     val signatureRetriggers = java.util.List.of(",")
     val actionKinds = java.util.List.of(CodeActionKind.QuickFix, CodeActionKind.RefactorRewrite,
-      CodeActionKind.SourceOrganizeImports)
+      CodeActionKind.RefactorInline, CodeActionKind.SourceOrganizeImports)
     capabilities.setCompletionProvider(new CompletionOptions(/* resolveProvider = */ false, completionTriggers))
 
     if (scopesScalaFeatures) {

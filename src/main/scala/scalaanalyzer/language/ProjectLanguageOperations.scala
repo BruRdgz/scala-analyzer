@@ -735,7 +735,7 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
         def accepts(kind: String): Boolean = only.isEmpty || only.exists(k => kind == k || kind.startsWith(k + "."))
 
         val contextual =
-          if (accepts("quickfix") || accepts("refactor.rewrite"))
+          if (accepts("quickfix") || accepts("refactor.rewrite") || accepts("refactor.inline"))
             host.codeActions(sourceFile, new TextRange(offset(sourceDocument, start), offset(sourceDocument, end)),
               withInspections).filter(choice => accepts(choice.kind))
           else Seq.empty
