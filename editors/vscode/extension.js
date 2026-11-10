@@ -201,6 +201,18 @@ function executeCommand(command, args, next) {
       .then(undefined, error => client.handleFailedRequest(ExecuteCommandRequest.type, token, error, undefined)));
 }
 
+// Flips `scalaAnalyzer.inlayHints.xRay`, where the user set it: in the workspace settings when they hold a value, else
+// in the user settings. The server reads the setting again when it changes and asks for the hints.
+async function toggleXRay() {
+  const config = vscode.workspace.getConfiguration('scalaAnalyzer');
+  const target = config.inspect('inlayHints.xRay')?.workspaceValue === undefined
+    ? vscode.ConfigurationTarget.Global
+    : vscode.ConfigurationTarget.Workspace;
+  const enabled = !config.get('inlayHints.xRay');
+  await config.update('inlayHints.xRay', enabled, target);
+  vscode.window.setStatusBarMessage(`scala-analyzer: X-Ray ${enabled ? 'on' : 'off'}`, statusMessageMs);
+}
+
 function registerCommands(context) {
   const inspection = registerInspection(context, client);
   const register = (name, handler) => context.subscriptions.push(vscode.commands.registerCommand(`scalaAnalyzer.${name}`, handler));
@@ -218,6 +230,7 @@ function registerCommands(context) {
   register('goToSuper', needsServer(goToSuper));
   register('goToTest', needsServer(goToTest));
   register('chooseMembersToOverride', needsServer(chooseMembersToOverride));
+  register('toggleXRay', toggleXRay);
   register('showStatus', needsServer(async () => {
     const report = await client.sendRequest('scalaAnalyzer/status');
     client.outputChannel.appendLine(`status: ${JSON.stringify(report, null, 2)}`);

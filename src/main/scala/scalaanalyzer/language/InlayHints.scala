@@ -12,6 +12,7 @@ import org.jetbrains.plugins.scala.lang.psi.api.ScalaFile
 import org.jetbrains.plugins.scala.lang.psi.api.base.ScPatternList
 import org.jetbrains.plugins.scala.lang.psi.api.statements.params.ScParameters
 import org.jetbrains.plugins.scala.lang.psi.api.statements.{ScFunctionDefinition, ScPatternDefinition, ScVariableDefinition}
+import org.jetbrains.plugins.scala.settings.ScalaApplicationSettings
 
 import scalaanalyzer.platform.{HostImplicitHintsPass, HostLock, RequestEditor}
 
@@ -23,7 +24,7 @@ import scala.util.Using
  * Collects inline hints from the Scala plugin's own editor pass.
  *
  * Includes inferred types, parameter names, implicit/using arguments, conversions, method chains and type arguments.
- * Range hints requiring desktop editor presentations are excluded.
+ * Range hints requiring desktop editor presentations are excluded, also in X-Ray mode.
  */
 object InlayHints {
 
@@ -50,6 +51,11 @@ object InlayHints {
    * @param parameterNames parameter names before the arguments whose meaning is unclear
    * @param methodChains the type after each call of a chain of calls
    * @param implicits implicit arguments and conversions
+   * @param xRay the plugin's X-Ray mode, which the IDE shows while the user holds Ctrl. It adds the hints of the
+   *             `XRAY_SHOW_*` application settings, at their IDE defaults: all definition types (obvious ones too),
+   *             types of lambda parameters, placeholders and pattern variables, parameter names, by-name arguments,
+   *             `.apply` calls, method chains and implicits. A Scala 3 file whose errors come from the compiler
+   *             shows type and method chain hints only with it
    */
   final case class Toggles(
     methodResultTypes: Boolean,
@@ -59,10 +65,11 @@ object InlayHints {
     parameterNames: Boolean,
     methodChains: Boolean,
     implicits: Boolean,
+    xRay: Boolean,
   )
 
   object Toggles {
-    /** The IDE's defaults, except for implicit hints, which the host shows (see `HostBootstrap`). */
+    /** The IDE's defaults, except for implicit hints, which the host shows (see `HostBootstrap`). X-Ray is off. */
     val Default: Toggles = Toggles(
       methodResultTypes = ScalaCodeInsightSettings.SHOW_METHOD_RESULT_TYPE_DEFAULT,
       memberVariableTypes = ScalaCodeInsightSettings.SHOW_MEMBER_VARIABLE_TYPE_DEFAULT,
@@ -71,6 +78,7 @@ object InlayHints {
       parameterNames = ScalaCodeInsightSettings.SHOW_PARAMETER_NAMES_DEFAULT,
       methodChains = ScalaCodeInsightSettings.SHOW_METHOD_CHAIN_INLAY_HINTS_DEFAULT,
       implicits = true,
+      xRay = false,
     )
   }
 
@@ -127,7 +135,11 @@ object InlayHints {
     settings.showObviousType = toggles.obviousTypes
     settings.showParameterNames = toggles.parameterNames
     settings.showMethodChainInlayHints = toggles.methodChains
-    setImplicitHintsEnabled(toggles.implicits)
+    // As ScalaEditorFactoryListener.setXRayModeEnabled does for the IDE's gesture and XRayModeAction for its pinned
+    // toggle, minus the editor features (indent guides, method separators) that are not hints.
+    ScalaHintsSettings.xRayMode = toggles.xRay
+    setImplicitHintsEnabled(
+      toggles.implicits || toggles.xRay && ScalaApplicationSettings.getInstance.XRAY_SHOW_IMPLICIT_HINTS)
   }
 
   /**

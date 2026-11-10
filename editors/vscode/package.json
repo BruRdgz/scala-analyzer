@@ -75,6 +75,11 @@
           "type": "boolean",
           "default": true,
           "description": "Show implicit arguments, using arguments and implicit conversions. The IntelliJ Scala plugin leaves these off until toggled."
+        },
+        "scalaAnalyzer.inlayHints.xRay": {
+          "type": "boolean",
+          "default": false,
+          "description": "X-Ray mode of the IntelliJ Scala plugin, which the IDE shows while Ctrl is held: also show the types of all definitions, of lambda parameters, placeholders and pattern variables, parameter names, by-name arguments, apply calls and method chains. Scala 3 files, whose errors come from the compiler, show type and method chain hints only in this mode. The command scala-analyzer: Toggle X-Ray flips it."
         }
       }
     },
@@ -233,6 +238,14 @@
         }
       ]
     },
+    "keybindings": [
+      {
+        "command": "scalaAnalyzer.toggleXRay",
+        "key": "ctrl+alt+x",
+        "mac": "cmd+alt+x",
+        "when": "editorTextFocus && editorLangId == scala"
+      }
+    ],
     "commands": [
       {
         "command": "scalaAnalyzer.menu",
@@ -304,6 +317,11 @@
       {
         "command": "scalaAnalyzer.chooseMembersToOverride",
         "title": "Override Members…",
+        "category": "scala-analyzer"
+      },
+      {
+        "command": "scalaAnalyzer.toggleXRay",
+        "title": "Toggle X-Ray",
         "category": "scala-analyzer"
       },
       {
