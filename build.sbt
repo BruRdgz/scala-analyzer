@@ -171,7 +171,10 @@ lazy val root = (project in file("."))
         "com/intellij/openapi/ui/DialogWrapper.class", // The plugin's find-usages handlers: their dialogs extend AbstractFindUsagesDialog; the host opens none.
       )
       val includedFamilies = Seq("com/intellij/openapi/editor/ex/EditorSettingsExternalizable",
-        "com/intellij/openapi/editor/actions/CaretStop", "com/intellij/openapi/roots/ui/util/CompositeAppearance")
+        "com/intellij/openapi/editor/actions/CaretStop", "com/intellij/openapi/roots/ui/util/CompositeAppearance",
+        // FileTemplateManager, FileTemplate and their scheme: the plugin reads the bodies of implemented and
+        // overridden members from them.
+        "com/intellij/ide/fileTemplates/FileTemplate")
       val directory = target.value / "inlay-platform"
       val out = directory / s"scala-inlay-platform-$platformVersion.jar"
       val slice = FileFunction.cached(streams.value.cacheDirectory / "inlay-platform", FilesInfo.hash, FilesInfo.exists) { _ =>

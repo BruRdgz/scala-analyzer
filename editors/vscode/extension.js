@@ -114,6 +114,49 @@ const goToSuper = () => peekFromCaret('scalaAnalyzer/superElements', 'go to supe
 // IntelliJ's Go to Test (Ctrl+Shift+T): the tests of the caret's class, or the classes that its test class tests.
 const goToTest = () => peekFromCaret('scalaAnalyzer/testTargets', 'go to test', 'No test or tested class here');
 
+// Lists the members the class at the caret can override as IntelliJ's Override Members (Ctrl+O) does, and overrides the
+// ones picked. The server edits the document version the list was made for, so an edit made meanwhile cancels the
+// override. The server's own command, `scalaAnalyzer.overrideMembers`, is registered by the language client; this one
+// asks first.
+async function chooseMembersToOverride() {
+  const editor = vscode.window.activeTextEditor;
+  if (!editor) return;
+
+  const converter = client.code2ProtocolConverter;
+  const uri = converter.asUri(editor.document.uri);
+  const position = converter.asPosition(editor.selection.active);
+  const version = editor.document.version;
+  let members;
+  try {
+    members = await client.sendRequest('scalaAnalyzer/overridableMembers', {
+      textDocument: converter.asTextDocumentIdentifier(editor.document),
+      position,
+    });
+  } catch (error) {
+    vscode.window.showErrorMessage(`scala-analyzer: listing the members to override failed: ${error.message}`);
+    return;
+  }
+
+  if (members.length === 0) {
+    vscode.window.setStatusBarMessage('$(info) No members to override here', statusMessageMs);
+    return;
+  }
+  const items = members.map(({ id, signature, owner }) => ({ label: signature, description: owner, id }));
+  const picked = await vscode.window.showQuickPick(items, {
+    canPickMany: true,
+    matchOnDescription: true,
+    placeHolder: 'Members to override',
+  });
+  if (!picked || picked.length === 0) return;
+
+  try {
+    const ids = picked.map(item => item.id);
+    await vscode.commands.executeCommand('scalaAnalyzer.overrideMembers', uri, position, ids, version);
+  } catch (error) {
+    vscode.window.showErrorMessage(`scala-analyzer: override members failed: ${error.message}`);
+  }
+}
+
 function registerTypeHint(context) {
   typeHint = vscode.window.createTextEditorDecorationType({
     after: { margin: '0 0 0 2em', color: new vscode.ThemeColor('editorCodeLens.foreground'), fontStyle: 'italic' },
@@ -174,6 +217,7 @@ function registerCommands(context) {
   register('typeInfo', needsServer(showTypeInfo));
   register('goToSuper', needsServer(goToSuper));
   register('goToTest', needsServer(goToTest));
+  register('chooseMembersToOverride', needsServer(chooseMembersToOverride));
   register('showStatus', needsServer(async () => {
     const report = await client.sendRequest('scalaAnalyzer/status');
     client.outputChannel.appendLine(`status: ${JSON.stringify(report, null, 2)}`);

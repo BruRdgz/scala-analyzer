@@ -9,6 +9,7 @@ import com.intellij.openapi.editor.Editor
 import com.intellij.openapi.progress.ProcessCanceledException
 import com.intellij.openapi.util.TextRange
 import org.jetbrains.plugins.scala.ScalaBundle
+import org.jetbrains.plugins.scala.annotator.quickfix.ImplementMembersQuickFix
 import org.jetbrains.plugins.scala.autoImport.quickFix.{MemberToImport, PrefixPackageToImport, ScalaImportTypeFix}
 import org.jetbrains.plugins.scala.codeInspection.declarationRedundancy.ScalaOptimizeImportsFix
 import org.jetbrains.plugins.scala.editor.importOptimizer.ScalaImportOptimizer
@@ -54,6 +55,17 @@ object CodeActions {
     disabled: Option[String],
     problems: Seq[Diagnostic] = Seq.empty,
   )
+
+  /**
+   * An Implement members action that is offered but not previewed yet: its preview runs on the dispatch thread, which
+   * the code that collects the actions must not wait for while it reads.
+   *
+   * @param title user-facing action name
+   * @param kind `quickfix` when the annotator's fix is offered, `refactor.rewrite` for the action of a class without a
+   *             problem
+   * @param problems the problems that the fix fixes; empty for the action
+   */
+  final case class ImplementMembers(title: String, kind: String, problems: Seq[Diagnostic])
 }
 
 /**
@@ -68,7 +80,7 @@ object CodeActions {
  * @param unwrapClasses unwrap-descriptor implementation names from plugin descriptors
  */
 final class CodeActions(intentionClasses: Seq[String], descriptorClasses: Seq[String], unwrapClasses: Seq[String]) {
-  import CodeActions.{Candidate, Choice}
+  import CodeActions.{Candidate, Choice, ImplementMembers}
 
   /**
    * Previews the plugin's import optimizer on a file copy.
@@ -87,6 +99,9 @@ final class CodeActions(intentionClasses: Seq[String], descriptorClasses: Seq[St
    * Unusable previews are returned disabled when availability was established. Cancellation propagates;
    * failures inside an action's availability or preview check are logged before continuing with other choices.
    *
+   * Implement members is not among them: its insertion needs the dispatch thread, which a caller holding the read lock
+   * must not wait for. See [[implementMembersOffer]] and [[implementMembers]].
+   *
    * @param file Scala file being queried
    * @param range selected UTF-16 range, empty for a caret request
    * @param problems current diagnostics carrying annotator fixes
@@ -99,10 +114,7 @@ final class CodeActions(intentionClasses: Seq[String], descriptorClasses: Seq[St
       val intentions = intentionClasses.filterNot(CodeActions.UnavailableIntentions).map { name =>
         Candidate(name, () => newIntention(name), "refactor.rewrite")
       }
-      val fixes = problems.flatMap(problem => problem.fixes.map(fix => problem -> fix)).collect {
-        case (problem, (fixRange, fix)) if fixRange.intersects(range) || fixRange.containsOffset(range.getStartOffset) =>
-          Candidate(fix.getClass.getName, () => fix, "quickfix", Seq(problem))
-      }
+      val fixes = fixCandidates(range, problems).filterNot(isImplementMembersFix)
 
       editor.getSelectionModel.setSelection(range.getStartOffset, range.getEndOffset)
       val choices = (fixes ++ intentions).flatMap { candidate =>
@@ -177,6 +189,16 @@ final class CodeActions(intentionClasses: Seq[String], descriptorClasses: Seq[St
     }
   }
 
+  /** The annotator fixes of the problems that the range touches. */
+  private def fixCandidates(range: TextRange, problems: Seq[Diagnostic]): Seq[Candidate] =
+    problems.flatMap(problem => problem.fixes.map(fix => problem -> fix)).collect {
+      case (problem, (fixRange, fix)) if fixRange.intersects(range) || fixRange.containsOffset(range.getStartOffset) =>
+        Candidate(fix.getClass.getName, () => fix, "quickfix", Seq(problem))
+    }
+
+  private def isImplementMembersFix(candidate: Candidate): Boolean =
+    candidate.name == classOf[ImplementMembersQuickFix].getName
+
   /** Creates a registered intention; a ModCommand action is wrapped as the intention the platform registers it as. */
   private def newIntention(name: String): IntentionAction =
     // `intentionClasses` holds intention implementations: IntentionActions or ModCommandActions.
@@ -246,6 +268,57 @@ final class CodeActions(intentionClasses: Seq[String], descriptorClasses: Seq[St
       }
     }
   }
+
+  /**
+   * Whether Implement members is offered at the range's start: as the annotator's fix when it is available, and
+   * otherwise as an action of a class that has abstract members left to implement (an abstract class has no problem to
+   * fix).
+   *
+   * Callers hold PSI read access. Nothing is previewed (see [[implementMembers]]).
+   *
+   * @param file Scala file being queried
+   * @param range selected UTF-16 range, empty for a caret request
+   * @param problems current diagnostics carrying annotator fixes
+   * @return the action to preview, or none when the range does not offer it
+   */
+  def implementMembersOffer(file: ScalaFile, range: TextRange, problems: Seq[Diagnostic]): Option[ImplementMembers] =
+    Using.resource(new RequestEditor(file.getViewProvider.getDocument, file.getProject, range.getStartOffset)) {
+      request =>
+      val title = ScalaBundle.message("implement.members.fix")
+
+      request.editor.getSelectionModel.setSelection(range.getStartOffset, range.getEndOffset)
+
+      val fixes = fixCandidates(range, problems).filter(isImplementMembersFix)
+        .filter(_.create().isAvailable(file.getProject, request.editor, file))
+
+      if (fixes.nonEmpty) Some(ImplementMembers(title, "quickfix", fixes.flatMap(_.problems)))
+      else if (MemberOverrides.hasMembersToImplement(file, range.getStartOffset))
+        Some(ImplementMembers(title, "refactor.rewrite", Seq.empty))
+      else None
+    }
+
+  /**
+   * Previews Implement members, which inserts every member the class at the range's start has to implement, the default
+   * of the dialog that the IDE shows.
+   *
+   * The insertion runs on the dispatch thread as a query of its own, so the caller must not hold the read lock (see
+   * [[MemberOverrides.implementAll]]). Cancellation propagates; a failure is logged and the action is disabled.
+   *
+   * @param file Scala file the action was collected for
+   * @param range the range it was collected for
+   * @param offered the action [[implementMembersOffer]] found
+   * @return the action with its edits against the current text of `file`
+   */
+  def implementMembers(file: ScalaFile, range: TextRange, offered: ImplementMembers): Choice =
+    try Choice(offered.title, offered.kind, MemberOverrides.implementAll(file, range.getStartOffset).edits, None,
+      offered.problems)
+    catch {
+      case e: ProcessCanceledException => throw e
+      case e @ (NonFatal(_) | _: LinkageError) =>
+        HostLog.warn(s"code action ${offered.title} could not be previewed", e)
+        Choice(offered.title, offered.kind, Seq.empty, Some("This action is unavailable in the headless host."),
+          offered.problems)
+    }
 
   /** Offer each type-import candidate separately; the LSP client replaces the IDE's import chooser. */
   private def typeImports(file: ScalaFile, range: TextRange, problems: Seq[Diagnostic]): Seq[Choice] = {

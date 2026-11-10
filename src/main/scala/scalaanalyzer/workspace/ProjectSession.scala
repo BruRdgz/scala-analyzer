@@ -10,7 +10,8 @@ import scalaanalyzer.build.{
 }
 import scalaanalyzer.language.{
   CodeActionResult, CompletionChoices, CompletionFollowUp, FileChanges, FileProblem, Fold, HierarchyCall,
-  HierarchyItem, HierarchyTarget, HintPartTarget, InlineHint, InspectionDescription, MainLens, Occurrence, OutlineSymbol,
+  HierarchyItem, HierarchyTarget, HintPartTarget, InlineHint, InspectionDescription, MainLens, MemberOverrides,
+  Occurrence, OutlineSymbol,
   ProjectLanguageOperations, SemanticToken, SignatureChoices, SourceSpan, TestLens, TextChange, WorkspaceSymbolMatch,
 }
 import scalaanalyzer.platform.{HostLock, HostLog}
@@ -270,6 +271,31 @@ final class ProjectSession private (
    */
   def insertCompletion(path: Path, start: LineColumn, prefixText: String, lookup: String, identity: String)
       : Option[CompletionFollowUp] = language.insertCompletion(path, start, prefixText, lookup, identity)
+
+  /**
+   * Lists the members Override Members offers for the class at a position.
+   *
+   * @param path registered project-source path
+   * @param at caret position, in zero-based lines and UTF-16 columns
+   * @return the members in the chooser's order; empty when the position is not in a class, object or trait, and for a
+   *         source that is not Scala
+   */
+  def overridableMembers(path: Path, at: LineColumn): Seq[MemberOverrides.Member] =
+    language.overridableMembers(path, at)
+
+  /**
+   * Computes the changes that override the chosen members in the class at a position.
+   *
+   * The buffer is unchanged; the caller applies the changes and reports the resulting buffer through `change`.
+   *
+   * @param path registered project-source path
+   * @param at caret position, where the members are inserted
+   * @param ids identifiers of the members to override, as `overridableMembers` gave them
+   * @return the changes against the current buffer; empty for a source that is not Scala
+   * @throws MemberOverrides.UnknownMembers when an identifier is not that of a member the class offers
+   */
+  def overrideMembers(path: Path, at: LineColumn, ids: Seq[String]): Seq[TextChange] =
+    language.overrideMembers(path, at, ids)
 
   /**
    * Computes formatting edits for a Scala source.

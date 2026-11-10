@@ -1,6 +1,6 @@
 package scalaanalyzer.lsp
 
-import com.google.gson.{Gson, JsonObject, JsonPrimitive}
+import com.google.gson.{Gson, JsonArray, JsonObject, JsonPrimitive}
 import com.intellij.psi.PsiManager
 import org.eclipse.lsp4j.*
 import org.eclipse.lsp4j.jsonrpc.ResponseErrorException
@@ -1946,6 +1946,59 @@ class LanguageServerTest extends munit.FunSuite {
     }
     assert(server.compile(null).get(5, TimeUnit.MINUTES).succeeded)
     assertEquals(HostLog.count(HostLog.Level.Error), loggedErrors)
+  }
+
+  test("lists the members to override and overrides the chosen ones by a versioned edit") {
+    val text = "package app\nclass Base { def greet(name: String): String = name }\n" +
+      "class Polite extends Base {\n  \n}\n"
+    val at = new Position(3, 2)
+    val service = server.getTextDocumentService
+    def change(value: String, version: Int): Unit = service.didChange(new DidChangeTextDocumentParams(
+      new VersionedTextDocumentIdentifier(main.toUri.toString, version),
+      JavaList.of(new TextDocumentContentChangeEvent(value))))
+    def command(ids: Seq[String], version: Int): ExecuteCommandParams = {
+      val position = new JsonObject
+      position.addProperty("line", Integer.valueOf(at.getLine))
+      position.addProperty("character", Integer.valueOf(at.getCharacter))
+      val selected = new JsonArray
+      ids.foreach(id => selected.add(id))
+      new ExecuteCommandParams("scalaAnalyzer.overrideMembers", JavaList.of[Object](
+        new JsonPrimitive(main.toUri.toString), position, selected, new JsonPrimitive(Integer.valueOf(version))))
+    }
+    def offsetOf(position: Position): Int =
+      text.split("\n", -1).take(position.getLine).map(_.length + 1).sum + position.getCharacter
+    def failureCode(params: ExecuteCommandParams): Int = intercept[ExecutionException] {
+      server.getWorkspaceService.executeCommand(params).get(1, TimeUnit.MINUTES)
+    }.getCause match {
+      case response: ResponseErrorException => response.getResponseError.getCode
+      case other => fail(s"unexpected command failure: $other")
+    }
+
+    try {
+      change(text, 2000)
+      Client.applied.clear()
+      val members = server.overridableMembers(new TextDocumentPositionParams(document(main), at))
+        .get(1, TimeUnit.MINUTES).asScala
+      val greet = members.find(_.signature == "greet(name: String): String").getOrElse(fail(members.toString))
+      assertEquals(greet.owner, "app.Base")
+
+      assertEquals(failureCode(command(Seq(greet.id, "app.Base#gone(): Unit"), 2000)),
+        ResponseErrorCode.InvalidParams.getValue)
+      assertEquals(Client.applied.size, 0)
+
+      server.getWorkspaceService.executeCommand(command(Seq(greet.id), 2000)).get(1, TimeUnit.MINUTES)
+      val edit = Option(Client.applied.poll(1, TimeUnit.MINUTES)).getOrElse(fail("no edit applied")).getEdit
+        .getDocumentChanges.get(0).getLeft
+      assertEquals(edit.getTextDocument.getVersion, Integer.valueOf(2000))
+      assertEquals(edit.getTextDocument.getUri, main.toUri.toString)
+      val changes = edit.getEdits.asScala.toSeq.map { change =>
+        val range = change.getRange
+        val span = new com.intellij.openapi.util.TextRange(offsetOf(range.getStart), offsetOf(range.getEnd))
+        ChangeEngine.Edit(span, change.getNewText)
+      }
+      assertEquals(TestHost.applyEdits(text, changes),
+        text.replace("  \n}", "  override def greet(name: String): String = super.greet(name)\n}"))
+    } finally change(Files.readString(main), 2001)
   }
 
   test("a client that does not apply the server's edits gets suggestions without commands") {

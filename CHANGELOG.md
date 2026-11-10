@@ -53,6 +53,15 @@
   with their example. Choosing one replaces `expr.key` with the template's expansion and puts the caret where the IDE
   does; where several expressions qualify, the innermost is taken, and a name the IDE asks for is its suggestion.
   Clients that do not apply the server's edits do not get them.
+- Code actions offer the plugin's **Implement members**: on a class or trait with abstract members it implements them
+  all, previewed on a copy with the plugin's ordering, placement, type annotations and `???` bodies. It is a quick fix
+  when the problem's fix is Implement members, a `refactor.rewrite` action otherwise. The host now answers the plugin's
+  file template manager for the two member body templates.
+- `scalaAnalyzer/overridableMembers` lists the members the IDE's Override Members offers for the class at a position
+  (`id`, `signature`, `owner`), and the `scalaAnalyzer.overrideMembers` command overrides the selected ones, taking the
+  document's URI, the position, the identifiers and the document version. It applies a versioned edit, is cancelled when
+  the document has changed, and fails with `InvalidParams` for an identifier the class does not offer. The VS Code
+  extension adds **Override Members…**, a multi-select list followed by the command; it has no default key.
 
 ## 0.2.0 — 2026-11-09
 
