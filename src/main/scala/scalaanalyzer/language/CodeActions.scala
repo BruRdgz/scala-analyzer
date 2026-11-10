@@ -18,7 +18,7 @@ import org.jetbrains.plugins.scala.lang.psi.api.ScalaFile
 import org.jetbrains.plugins.scala.lang.psi.api.base.ScReference
 
 import scalaanalyzer.Diagnostic
-import scalaanalyzer.platform.{HostLog, RequestEditor}
+import scalaanalyzer.platform.{HostLock, HostLog, RequestEditor}
 
 import scala.jdk.CollectionConverters.*
 import scala.util.Using
@@ -66,6 +66,14 @@ object CodeActions {
    * @param problems the problems that the fix fixes; empty for the action
    */
   final case class ImplementMembers(title: String, kind: String, problems: Seq[Diagnostic])
+
+  /**
+   * The actions of a range: the previewed ones, and Implement members apart, since it is previewed on its own.
+   *
+   * @param choices the previewed actions
+   * @param implementMembers Implement members when the range offers it, not previewed yet
+   */
+  final case class Offered(choices: Seq[Choice], implementMembers: Option[ImplementMembers])
 }
 
 /**
@@ -302,18 +310,24 @@ final class CodeActions(intentionClasses: Seq[String], descriptorClasses: Seq[St
    * of the dialog that the IDE shows.
    *
    * The insertion runs on the dispatch thread as a query of its own, so the caller must not hold the read lock (see
-   * [[MemberOverrides.implementAll]]). Cancellation propagates; a failure is logged and the action is disabled.
+   * [[MemberOverrides.implementAll]]). The cancellation of the caller's request propagates. A write that cancels only
+   * the preview, such as an edit of another file, disables the action rather than failing the caller's other actions;
+   * another failure is logged and disables it too.
    *
    * @param file Scala file the action was collected for
    * @param range the range it was collected for
    * @param offered the action [[implementMembersOffer]] found
    * @return the action with its edits against the current text of `file`
+   * @throws ProcessCanceledException when the caller's request is cancelled
    */
   def implementMembers(file: ScalaFile, range: TextRange, offered: ImplementMembers): Choice =
     try Choice(offered.title, offered.kind, MemberOverrides.implementAll(file, range.getStartOffset).edits, None,
       offered.problems)
     catch {
-      case e: ProcessCanceledException => throw e
+      case e: ProcessCanceledException if HostLock.isRequestCancelled => throw e
+      case _: ProcessCanceledException =>
+        Choice(offered.title, offered.kind, Seq.empty, Some("An edit interrupted the preview of this action."),
+          offered.problems)
       case e @ (NonFatal(_) | _: LinkageError) =>
         HostLog.warn(s"code action ${offered.title} could not be previewed", e)
         Choice(offered.title, offered.kind, Seq.empty, Some("This action is unavailable in the headless host."),

@@ -57,7 +57,7 @@ object CodeActionsOracle {
           settings.getCustomSettings(classOf[ScalaCodeStyleSettings]).USE_SCALA3_INDENTATION_BASED_SYNTAX = scala3
           manager.computeWithLocalSettings(settings, _ => {
             val title = new ScalaExpressionSurroundDescriptor().getSurrounders.apply(index).getTemplateDescription
-            val actions = host.codeActions(file, new TextRange(start, end))
+            val actions = host.codeActions(file, new TextRange(start, end)).choices
             require(host.read(file.getText) == original, "code actions changed the source")
             actions.find(_.title == title) match {
               case None => "disagree: surrounder was not offered"

@@ -55,8 +55,13 @@
   Clients that do not apply the server's edits do not get them.
 - Code actions offer the plugin's **Implement members**: on a class or trait with abstract members it implements them
   all, previewed on a copy with the plugin's ordering, placement, type annotations and `???` bodies. It is a quick fix
-  when the problem's fix is Implement members, a `refactor.rewrite` action otherwise. The host now answers the plugin's
-  file template manager for the two member body templates.
+  when the problem's fix is Implement members, a `refactor.rewrite` action otherwise. The preview runs on the host's
+  dispatch thread, so a client that resolves code actions (`codeAction/resolve` with `edit`, as VS Code does) gets the
+  action without its edit, and the server computes it when the action is chosen, for the document version it was
+  offered for; other clients get it previewed, unless the request's `only` excludes its kind. The host now answers the
+  plugin's file template manager for the two member body templates.
+- A query on the host's dispatch thread observes the cancellation of the request that waits for it, so a client can
+  cancel the previews and rename lookups that run there.
 - `scalaAnalyzer/overridableMembers` lists the members the IDE's Override Members offers for the class at a position
   (`id`, `signature`, `owner`), and the `scalaAnalyzer.overrideMembers` command overrides the selected ones, taking the
   document's URI, the position, the identifiers and the document version. It applies a versioned edit, is cancelled when

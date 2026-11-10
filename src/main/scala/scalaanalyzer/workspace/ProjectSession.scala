@@ -298,6 +298,18 @@ final class ProjectSession private (
     language.overrideMembers(path, at, ids)
 
   /**
+   * Computes the changes of Implement members for the class at a position, as `codeActions` offered it.
+   *
+   * The buffer is unchanged; the caller applies the changes and reports the resulting buffer through `change`.
+   *
+   * @param path registered project-source path
+   * @param at caret position, in the class, object or trait whose members are implemented
+   * @return the changes against the current buffer; empty when the position is not in a class, object or trait, and
+   *         for a source that is not Scala
+   */
+  def implementMembers(path: Path, at: LineColumn): Seq[TextChange] = language.implementMembers(path, at)
+
+  /**
    * Computes formatting edits for a Scala source.
    *
    * The buffer is unchanged. Whole-file requests use scalafmt when a configuration is found; range requests
@@ -486,12 +498,16 @@ final class ProjectSession private (
    * @param only accepted action kinds and their descendants; empty selects contextual fixes and refactorings
    * @param withInspections whether the caller shows inspection problems in the range, so that their fixes are
    *                        computed even before the source's diagnostics are
-   * @return each accepted action paired with its current-buffer edits; the action's result lists the problems it
-   *         fixes or suppresses. Empty for a source that is not Scala
+   * @param resolvesEdits whether the caller asks for an action's edits once the user chooses it; Implement members is
+   *                      then offered without its edits, which `implementMembers` computes
+   * @return each accepted action paired with its current-buffer edits, absent for Implement members when
+   *         `resolvesEdits`; the action's result lists the problems it fixes or suppresses. Empty for a source that is
+   *         not Scala
    */
   def codeActions(path: Path, start: LineColumn, end: LineColumn, only: Seq[String] = Seq.empty,
-      withInspections: Boolean = false): Seq[(CodeActionResult, Seq[TextChange])] =
-    language.codeActions(path, start, end, only, withInspections)
+      withInspections: Boolean = false, resolvesEdits: Boolean = false)
+      : Seq[(CodeActionResult, Option[Seq[TextChange]])] =
+    language.codeActions(path, start, end, only, withInspections, resolvesEdits)
 
   /**
    * Validates a rename target and locates its name range.

@@ -156,7 +156,7 @@ class InspectionsTest extends munit.FunSuite {
       try {
         val problem = host.inspect(file).find(_.inspectionId.contains(id)).getOrElse(fail(id))
         // The file's diagnostics are not cached, as when a client shows a problem that it asks the fixes of at once.
-        val actions = host.codeActions(file, problem.range, withInspections = true)
+        val actions = host.codeActions(file, problem.range, withInspections = true).choices
           .filter(_.problems.exists(about => about.inspectionId.contains(id) && about.range == problem.range))
         val (suppressions, fixes) = actions.partition(_.title.startsWith("Suppress"))
         assert(fixes.exists(fix => fix.disabled.isEmpty && fix.edits.nonEmpty), actions.toString)

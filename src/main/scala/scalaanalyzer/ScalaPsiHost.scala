@@ -633,26 +633,54 @@ final class ScalaPsiHost private[scalaanalyzer] (
    * diagnostics arrive. A caller that already shows inspection problems in the range asks for their fixes with
    * `withInspections`, since the editor will not ask again.
    *
-   * Takes read access itself, except for Implement members: its preview runs on the dispatch thread, which cannot be
-   * awaited under a read, so it is the last action in the list and follows the others after their read ended. The
-   * caller must not be reading or editing.
+   * Implement members is offered but not previewed: its preview occupies the host's single dispatch thread, so it runs
+   * only when the caller asks for it ([[previewImplementMembers]] or [[implementMembers]]).
+   *
+   * Takes read access itself.
    *
    * @param file Scala source being queried
    * @param range UTF-16 range the actions apply to
    * @param withInspections whether to run the inspections for their fixes when the file's diagnostics are not cached
    * @return the actions available for the range; those that fix or suppress an inspection problem say which
    */
-  def codeActions(file: ScalaFile, range: TextRange, withInspections: Boolean = false): Seq[CodeActions.Choice] = {
-    val (choices, implementMembers) = read {
-      val computed = Option(file.getUserData(diagnosticsCache)).filter(_.hasUpToDateValue).map(_.getValue)
-      def uncached = problemsAround(file, range) ++ (if (withInspections) inspections.diagnostics(file) else Seq.empty)
-      val problems = computed.getOrElse(uncached)
+  def codeActions(file: ScalaFile, range: TextRange, withInspections: Boolean = false): CodeActions.Offered = read {
+    val computed = Option(file.getUserData(diagnosticsCache)).filter(_.hasUpToDateValue).map(_.getValue)
+    def uncached = problemsAround(file, range) ++ (if (withInspections) inspections.diagnostics(file) else Seq.empty)
+    val problems = computed.getOrElse(uncached)
 
-      (actions.collect(file, range, problems), actions.implementMembersOffer(file, range, problems))
-    }
-
-    choices ++ implementMembers.map(actions.implementMembers(file, range, _))
+    CodeActions.Offered(actions.collect(file, range, problems), actions.implementMembersOffer(file, range, problems))
   }
+
+  /**
+   * Previews the Implement members that [[codeActions]] offered for `range` as an action whose failure disables it
+   * (see [[CodeActions.implementMembers]]).
+   *
+   * Runs on the host's dispatch thread with read access of its own, so the caller must not be reading or editing;
+   * `file` is unchanged.
+   *
+   * @param file Scala source the action was offered for
+   * @param range UTF-16 range it was offered for
+   * @param offered the offered action
+   * @return the action with its edits against the current text of `file`
+   * @throws com.intellij.openapi.progress.ProcessCanceledException when the caller's request is cancelled
+   */
+  def previewImplementMembers(file: ScalaFile, range: TextRange, offered: CodeActions.ImplementMembers)
+      : CodeActions.Choice =
+    actions.implementMembers(file, range, offered)
+
+  /**
+   * The edits that implement every member the class at `offset` has to implement (see
+   * [[MemberOverrides.implementAll]]); failures propagate.
+   *
+   * Runs on the host's dispatch thread with read access of its own, so the caller must not be reading or editing;
+   * `file` is unchanged.
+   *
+   * @param file Scala source to edit
+   * @param offset UTF-16 caret offset, where the class is looked for
+   * @return the edits against the current text of `file`; empty when the offset is not in a class, object or trait
+   */
+  def implementMembers(file: ScalaFile, offset: Int): Seq[ChangeEngine.Edit] =
+    MemberOverrides.implementAll(file, offset).edits
 
   /**
    * Collects parser errors accepted by the platform's highlighting filters.

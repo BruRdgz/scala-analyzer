@@ -2,6 +2,7 @@ package scalaanalyzer
 
 import com.intellij.lang.annotation.HighlightSeverity
 import com.intellij.openapi.editor.impl.DocumentImpl
+import com.intellij.openapi.progress.ProcessCanceledException
 import com.intellij.openapi.util.TextRange
 import com.intellij.psi.search.searches.ReferencesSearch
 import com.intellij.psi.util.PsiTreeUtil
@@ -652,7 +653,7 @@ class EditingTest extends munit.FunSuite {
         val at = marked.indexOf("<caret>")
         val tracker = com.intellij.psi.util.PsiModificationTracker.getInstance(host.project)
         val modifications = tracker.getModificationCount
-        val actions = host.codeActions(file, new TextRange(at, at))
+        val actions = host.codeActions(file, new TextRange(at, at)).choices
         // Previews change only copies: the source's cached diagnostics stay valid for the next request.
         assertEquals(tracker.getModificationCount, modifications)
         val chosen = actions.find(_.title.startsWith(title)).getOrElse(fail(actions.toString))
@@ -678,7 +679,7 @@ class EditingTest extends munit.FunSuite {
       val file = scalaFile("Action", original)
       try {
         val at = marked.indexOf("<caret>")
-        val actions = host.codeActions(file, new TextRange(at, at))
+        val actions = host.codeActions(file, new TextRange(at, at)).choices
         val chosen = actions.find(_.title.startsWith(title)).getOrElse(fail(actions.toString))
         assertEquals(chosen.disabled, None)
         assertEquals(applyEdits(original, chosen.edits).replaceAll("\\s+", " "), expected)
@@ -784,7 +785,7 @@ class EditingTest extends munit.FunSuite {
       val file = scalaFile("Inlined", original)
       val at = marked.indexOf("<caret>")
 
-      (file, original, host.codeActions(file, new TextRange(at, at)).filter(_.kind == "refactor.inline"))
+      (file, original, host.codeActions(file, new TextRange(at, at)).choices.filter(_.kind == "refactor.inline"))
     }
 
     for (testCase <- cases) {
@@ -827,11 +828,16 @@ class EditingTest extends munit.FunSuite {
       val file = scalaFile("Implement", original)
       try {
         val at = marked.indexOf("<caret>")
-        val actions = host.codeActions(file, new TextRange(at, at))
-        val chosen = actions.find(_.title == "Implement members").getOrElse(fail(s"$name: $actions"))
-        assertEquals(chosen.kind, kind, name)
-        assertEquals(chosen.disabled, None, name)
+        val range = new TextRange(at, at)
+        val actions = host.codeActions(file, range)
+        // Offered without a preview: the preview occupies the dispatch thread.
+        assert(!actions.choices.exists(_.title == "Implement members"), s"$name: ${actions.choices}")
+        val offered = actions.implementMembers.getOrElse(fail(s"$name: not offered"))
+        assertEquals(offered.kind, kind, name)
+        val chosen = host.previewImplementMembers(file, range, offered)
+        assertEquals((chosen.title, chosen.kind, chosen.disabled), ("Implement members", kind, None), name)
         assertEquals(applyEdits(original, chosen.edits), expected, name)
+        assertEquals(host.implementMembers(file, at), chosen.edits, name)
         assertEquals(host.read(file.getText), original, name)
       } finally host.closeSource(file)
     }
@@ -845,6 +851,18 @@ class EditingTest extends munit.FunSuite {
     intercept[IllegalStateException](host.read(HostLock.queryOnDispatchThread(())))
     intercept[IllegalStateException](HostLock.write(HostLock.queryOnDispatchThread(())))
     intercept[IllegalStateException](HostLock.writeIntent(HostLock.queryOnDispatchThread(())))
+  }
+
+  // The request's cancellation is a thread-local of the thread that waits: the dispatch thread must observe it, or a
+  // client could not cancel a preview there.
+  test("a query on the dispatch thread is cancelled by the waiting request's cancellation") {
+    val cancellation = new HostLock.RequestCancellation
+    cancellation.cancel()
+    var ran = false
+    intercept[ProcessCanceledException] {
+      HostLock.cancelledBy(cancellation)(HostLock.queryOnDispatchThread { ran = true })
+    }
+    assert(!ran)
   }
 
   // The oracle is the plugin's ScalaOverrideImplementTest (`testOverrideFunction`).
@@ -881,7 +899,7 @@ class EditingTest extends munit.FunSuite {
     val file = scalaFile("ImportClient", original)
     try {
       val at = original.indexOf("ImportChoice")
-      val actions = host.codeActions(file, new TextRange(at, at)).filter(_.title.startsWith("Import '"))
+      val actions = host.codeActions(file, new TextRange(at, at)).choices.filter(_.title.startsWith("Import '"))
       for (pack <- Seq("first", "second")) {
         val title = s"Import '$pack.ImportChoice'"
         val action = actions.find(_.title == title).getOrElse(fail(actions.toString))

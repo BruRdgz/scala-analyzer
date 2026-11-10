@@ -121,6 +121,9 @@ class LanguageServerTest extends munit.FunSuite {
       val lenses = new CodeLensCapabilities
       Seq[DynamicRegistrationCapabilities](completion, signatures, formatting, rangeFormatting, references, actions, lenses)
         .foreach(_.setDynamicRegistration(true))
+      // As VS Code does: an action's edit can come from `codeAction/resolve`, which gets the action's data back.
+      actions.setDataSupport(true)
+      actions.setResolveSupport(new CodeActionResolveSupportCapabilities(JavaList.of("edit")))
       text.setCompletion(completion)
       text.setSignatureHelp(signatures)
       text.setFormatting(formatting)
@@ -268,6 +271,7 @@ class LanguageServerTest extends munit.FunSuite {
     assert(capabilities.getDocumentSymbolProvider.getLeft)
     assert(capabilities.getFoldingRangeProvider.getLeft)
     assert(capabilities.getSemanticTokensProvider.getFull.getLeft)
+    assert(capabilities.getCodeActionProvider.getRight.getResolveProvider)
     implementation.shutdown().get(30, TimeUnit.SECONDS)
     implementation.exit()
   }
@@ -319,6 +323,7 @@ class LanguageServerTest extends munit.FunSuite {
     assertEquals(methods("textDocument/codeAction").getAsJsonArray("codeActionKinds").asScala.map(_.getAsString).toSeq,
       Seq(CodeActionKind.QuickFix, CodeActionKind.RefactorRewrite, CodeActionKind.RefactorInline,
         CodeActionKind.SourceOrganizeImports))
+    assertEquals(methods("textDocument/codeAction").get("resolveProvider").getAsBoolean, true)
   }
 
   test("discovers suite and test code lenses with plugin runner selections and BSP target identities") {
@@ -1999,6 +2004,53 @@ class LanguageServerTest extends munit.FunSuite {
       assertEquals(TestHost.applyEdits(text, changes),
         text.replace("  \n}", "  override def greet(name: String): String = super.greet(name)\n}"))
     } finally change(Files.readString(main), 2001)
+  }
+
+  test("Implement members is offered without an edit and resolved for the version it was offered for") {
+    val text = "package app\ntrait Sized { def area: Double }\nabstract class Square extends Sized\n"
+    val at = new Position(2, "abstract class Square".length)
+    val service = server.getTextDocumentService
+    def change(value: String, version: Int): Unit = service.didChange(new DidChangeTextDocumentParams(
+      new VersionedTextDocumentIdentifier(main.toUri.toString, version),
+      JavaList.of(new TextDocumentContentChangeEvent(value))))
+    def actions(only: JavaList[String]): Seq[CodeAction] = {
+      val context = new CodeActionContext(JavaList.of())
+      context.setOnly(only)
+      service.codeAction(new CodeActionParams(document(main), new Range(at, at), context))
+        .get(1, TimeUnit.MINUTES).asScala.map(_.getRight).toSeq
+    }
+    def offsetOf(position: Position): Int =
+      text.split("\n", -1).take(position.getLine).map(_.length + 1).sum + position.getCharacter
+
+    try {
+      change(text, 2100)
+      val offered = actions(null)
+      val implement = offered.find(_.getTitle == "Implement members").getOrElse(fail(offered.toString))
+      assertEquals(implement.getKind, CodeActionKind.RefactorRewrite)
+      assertEquals(implement.getEdit, null)
+      assert(implement.getData != null)
+      // A request for quick fixes only does not offer the refactoring, let alone preview it.
+      assert(!actions(JavaList.of(CodeActionKind.QuickFix)).exists(_.getTitle == "Implement members"))
+
+      val edit = service.resolveCodeAction(implement).get(1, TimeUnit.MINUTES).getEdit.getDocumentChanges.get(0).getLeft
+      assertEquals(edit.getTextDocument.getVersion, Integer.valueOf(2100))
+      assertEquals(edit.getTextDocument.getUri, main.toUri.toString)
+      val changes = edit.getEdits.asScala.toSeq.map { change =>
+        val range = change.getRange
+        val span = new com.intellij.openapi.util.TextRange(offsetOf(range.getStart), offsetOf(range.getEnd))
+        ChangeEngine.Edit(span, change.getNewText)
+      }
+      assertEquals(TestHost.applyEdits(text, changes),
+        text.replace("extends Sized\n", "extends Sized {\n  override def area: Double = ???\n}\n"))
+
+      change(text + "\n", 2101)
+      val stale = intercept[ExecutionException](service.resolveCodeAction(implement).get(1, TimeUnit.MINUTES))
+      stale.getCause match {
+        case response: ResponseErrorException =>
+          assertEquals(response.getResponseError.getCode, ResponseErrorCode.RequestCancelled.getValue)
+        case other => fail(s"unexpected resolve failure: $other")
+      }
+    } finally change(Files.readString(main), 2102)
   }
 
   test("a client that does not apply the server's edits gets suggestions without commands") {
