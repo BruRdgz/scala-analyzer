@@ -119,7 +119,8 @@ private[scalaanalyzer] object HostLock {
    * Runs a query on the host's dispatch thread, for the platform code that insists on the event thread.
    *
    * The dispatch thread takes its own read through [[query]], so work queued there before (the platform's `invokeLater`
-   * tasks, some of which write) runs first, and a write cancels the query as it cancels any other.
+   * tasks, some of which write) runs first, and a write cancels the query as it cancels any other. The caller's
+   * [[RequestCancellation]] cancels the query too, also while it still waits in the dispatch thread's queue.
    *
    * The caller waits for the dispatch thread and must hold neither the read lock, the write lock nor write intent: a
    * dispatch-thread task that writes waits for the caller's read or write intent to end, and the dispatch thread's own
@@ -128,11 +129,16 @@ private[scalaanalyzer] object HostLock {
    * @param body action that reads PSI
    * @return the result of `body`
    * @throws IllegalStateException when the thread holds the read lock, the write lock or write intent
+   * @throws com.intellij.openapi.progress.ProcessCanceledException when a write or the caller's request cancels the
+   *                                                                query
    */
   def queryOnDispatchThread[T](body: => T): T = {
     if (isReading || isWriting || hasWriteIntent)
       throw new IllegalStateException("the dispatch thread cannot be awaited inside a read, an edit or write intent")
-    HostDispatchThread.call(query(body))
+    // The request's cancellation is a thread-local of the caller, which the dispatch thread does not see on its own.
+    val cancellation = Option(requestCancellation.get())
+
+    HostDispatchThread.call(cancellation.fold(query(body))(cancelledBy(_)(query(body))))
   }
 
   /** Cancels every query currently running through [[query]]. */

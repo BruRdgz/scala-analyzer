@@ -89,6 +89,12 @@ final class ScalaLanguageServer(
   /** Whether the client can show a document, with a selection, when the server asks. */
   @volatile private var showsDocuments = false
 
+  /**
+   * Whether the client asks for a code action's edit by `codeAction/resolve` once the user chooses it, keeping the
+   * action's `data` until then: the edit of Implement members is then left to that request.
+   */
+  @volatile private var resolvesActionEdits = false
+
   /** The project to open once the client says it is ready (`initialized`). */
   @volatile private var workspace = Option.empty[Path]
 
@@ -387,6 +393,10 @@ final class ScalaLanguageServer(
     appliesEdits = workspaceCapabilities.flatMap(w => Option(w.getApplyEdit)).exists(_.booleanValue)
     showsDocuments = windowCapabilities.flatMap(w => Option(w.getShowDocument))
       .exists(_.isSupport)
+    resolvesActionEdits = textCapabilities.flatMap(c => Option(c.getCodeAction)).exists { actions =>
+      Option(actions.getDataSupport).exists(_.booleanValue) &&
+        Option(actions.getResolveSupport).flatMap(r => Option(r.getProperties)).exists(_.contains("edit"))
+    }
 
     val folders = Option(params.getWorkspaceFolders).map(_.asScala.toSeq).getOrElse(Seq.empty)
     val rootUri = folders.headOption.map(_.getUri).orElse(Option(params.getRootUri))
@@ -434,6 +444,7 @@ final class ScalaLanguageServer(
       signatures.setRetriggerCharacters(signatureRetriggers)
       val actions = scalaOnly(new CodeActionRegistrationOptions)
       actions.setCodeActionKinds(actionKinds)
+      actions.setResolveProvider(true)
       languageRegistrations = Seq(
         "codeLens" -> lenses, "signatureHelp" -> signatures,
         "formatting" -> scalaOnly(new DocumentFormattingRegistrationOptions),
@@ -451,7 +462,9 @@ final class ScalaLanguageServer(
       capabilities.setImplementationProvider(true)
       capabilities.setCallHierarchyProvider(true)
       capabilities.setTypeHierarchyProvider(true)
-      capabilities.setCodeActionProvider(new CodeActionOptions(actionKinds))
+      val actions = new CodeActionOptions(actionKinds)
+      actions.setResolveProvider(true)
+      capabilities.setCodeActionProvider(actions)
       languageRegistrations = Seq.empty
     }
     capabilities.setRenameProvider(rename)
@@ -1373,6 +1386,8 @@ final class ScalaLanguageServer(
      *
      * Runs on a read thread. An action the session marks as disabled carries its reason and no edit. An action that
      * fixes or suppresses a problem lists, as its diagnostics, the context's diagnostics that report that problem.
+     * For a client that resolves edits, Implement members has no edit but the `data` that `resolveCodeAction` computes
+     * it from: the document, the range's start and the document's version.
      *
      * @param params the document, the range to act on, the kinds the client asked for and the diagnostics it shows
      *               there; the session gets the range and the kinds as they are
@@ -1384,24 +1399,69 @@ final class ScalaLanguageServer(
         val shown = params.getContext.getDiagnostics.asScala.toSeq
         val inspectionIds = s.inspectionDescriptions.map(_.id).toSet
         val showsInspections = shown.exists(problem => Option(problem.getCode).exists(code => inspectionIds(code.getLeft)))
+        val start = lineColumn(params.getRange.getStart)
 
-        s.codeActions(path, lineColumn(params.getRange.getStart), lineColumn(params.getRange.getEnd), requested, showsInspections)
+        s.codeActions(path, start, lineColumn(params.getRange.getEnd), requested, showsInspections, resolvesActionEdits)
           .map { (choice, changes) =>
             val action = new CodeAction(choice.title)
             action.setKind(choice.kind)
             val fixed = choice.problems.map(ScalaLanguageServer.this.diagnostic)
             val reporting = shown.filter(problem => fixed.exists(reports(problem, _)))
             if (reporting.nonEmpty) action.setDiagnostics(reporting.asJava)
-            choice.disabled match {
-              case Some(reason) => action.setDisabled(new CodeActionDisabled(reason))
-              case None =>
-                val document = new VersionedTextDocumentIdentifier(path.toUri.toString, versions.get(path))
-                val edit = new TextDocumentEdit(document, textEdits(changes))
-                action.setEdit(new WorkspaceEdit(java.util.List.of(LspEither.forLeft[TextDocumentEdit, ResourceOperation](edit))))
+            (choice.disabled, changes) match {
+              case (Some(reason), _) => action.setDisabled(new CodeActionDisabled(reason))
+              case (None, Some(edits)) =>
+                action.setEdit(versionedEdit(path.toUri.toString, versions.get(path), edits))
+              case (None, None) =>
+                val data = new JsonObject
+                data.addProperty("uri", path.toUri.toString)
+                data.addProperty("line", Integer.valueOf(start.line))
+                data.addProperty("character", Integer.valueOf(start.column))
+                data.addProperty("version", versions.get(path))
+                action.setData(data)
             }
             LspEither.forRight[Command, CodeAction](action)
           }.asJava
       }
+
+    /**
+     * Gives Implement members, which `codeAction` offered without an edit, the edit for the document version it was
+     * offered for.
+     *
+     * Runs on a read thread. The edit is computed only once the user chooses the action: its preview occupies the
+     * host's dispatch thread, which the code actions of every caret move must not wait for. The request fails as
+     * cancelled (`RequestCancelled`) when the document is no longer in that version, as the override command does.
+     *
+     * @param action an action this server returned, with its `data`
+     * @return the same action with its versioned edit; unchanged when it has no `data` of this server's
+     */
+    override def resolveCodeAction(action: CodeAction): CompletableFuture[CodeAction] = {
+      val offered = action.getData match {
+        case data: JsonObject =>
+          for {
+            uri <- stringMember(data, "uri")
+            line <- intMember(data, "line")
+            column <- intMember(data, "character")
+            version <- intMember(data, "version")
+          } yield (uri, LineColumn(line, column), version)
+        case _ => None
+      }
+
+      offered.fold(CompletableFuture.completedFuture(action)) { (uri, at, version) =>
+        onRead("codeAction/resolve", new TextDocumentIdentifier(uri), action) { (s, path) =>
+          if (versions.get(path) != version) throw new ProcessCanceledException
+          action.setEdit(versionedEdit(uri, version, s.implementMembers(path, at)))
+          action
+        }
+      }
+    }
+
+    /** A workspace edit that makes `changes` to `version` of the document at `uri`. */
+    private def versionedEdit(uri: String, version: Integer, changes: Seq[TextChange]): WorkspaceEdit = {
+      val edit = new TextDocumentEdit(new VersionedTextDocumentIdentifier(uri, version), textEdits(changes))
+
+      new WorkspaceEdit(java.util.List.of(LspEither.forLeft[TextDocumentEdit, ResourceOperation](edit)))
+    }
 
     /**
      * Returns the symbol-name range that a following rename request may edit.

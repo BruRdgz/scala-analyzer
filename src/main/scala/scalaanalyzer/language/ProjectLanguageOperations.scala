@@ -342,6 +342,23 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
   }
 
   /**
+   * Computes the changes of Implement members for the class at a position: every member it has to implement, inserted
+   * as the IDE's dialog does by default. Only Scala files have them.
+   *
+   * @param path registered project-source path
+   * @param at caret position, in the class, object or trait whose members are implemented
+   * @return the changes against the current buffer; empty when the position is not in a class, object or trait, and
+   *         for a file that is not Scala
+   */
+  def implementMembers(path: Path, at: LineColumn): Seq[TextChange] = file(path) match {
+    case sourceFile: ScalaFile =>
+      val edits = host.implementMembers(sourceFile, host.read(offset(document(sourceFile), at)))
+
+      host.read(edits.map(textChange(document(sourceFile), _)))
+    case _ => Seq.empty
+  }
+
+  /**
    * Computes the changes that format a range of the file (all of it without one). Only Scala files are formatted.
    *
    * The buffer is unchanged. A whole-file request uses scalafmt when a configuration is found for the path; every
@@ -746,18 +763,23 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
    * Previews the plugin's applicable actions for a range, with their edits against the current document.
    *
    * The buffer is unchanged. Organize imports is included only when `only` requests its source-action kind or an
-   * ancestor kind. Only Scala files have actions.
+   * ancestor kind. Only Scala files have actions. Implement members is previewed only when `only` accepts its kind,
+   * and not at all for a caller that `resolvesEdits`.
    *
    * @param path registered project-source path
    * @param start selection start
    * @param end selection end; equal to `start` for a caret request
    * @param only action kinds to accept, with their descendants; empty accepts every contextual fix and refactoring
    * @param withInspections whether the caller shows inspection problems here, whose fixes are wanted at once
-   * @return each accepted action paired with its edits, and the problems it fixes or suppresses in its result; empty
-   *         for a file that is not Scala
+   * @param resolvesEdits whether the caller asks for an action's edits once the user chooses it, so that Implement
+   *                      members, whose preview occupies the host's dispatch thread, is offered without them
+   * @return each accepted action paired with its edits, and the problems it fixes or suppresses in its result; the
+   *         edits of Implement members are absent when `resolvesEdits`, and [[implementMembers]] at `start` computes
+   *         them. Empty for a file that is not Scala
    */
   def codeActions(path: Path, start: LineColumn, end: LineColumn, only: Seq[String] = Seq.empty,
-      withInspections: Boolean = false): Seq[(CodeActionResult, Seq[TextChange])] = file(path) match {
+      withInspections: Boolean = false, resolvesEdits: Boolean = false)
+      : Seq[(CodeActionResult, Option[Seq[TextChange]])] = file(path) match {
     case sourceFile: ScalaFile =>
       val sourceDocument = document(sourceFile)
 
@@ -765,21 +787,26 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
       def accepts(kind: String): Boolean = only.isEmpty || only.exists(k => kind == k || kind.startsWith(k + "."))
 
       // The host reads for itself: Implement members previews on the dispatch thread, so this must not hold a read.
-      val contextual =
-        if (accepts("quickfix") || accepts("refactor.rewrite") || accepts("refactor.inline")) {
-          val range = host.read(new TextRange(offset(sourceDocument, start), offset(sourceDocument, end)))
-
-          host.codeActions(sourceFile, range, withInspections).filter(choice => accepts(choice.kind))
-        } else Seq.empty
+      val range = host.read(new TextRange(offset(sourceDocument, start), offset(sourceDocument, end)))
+      val offered =
+        if (accepts("quickfix") || accepts("refactor.rewrite") || accepts("refactor.inline"))
+          host.codeActions(sourceFile, range, withInspections)
+        else CodeActions.Offered(Seq.empty, None)
+      val implementing = offered.implementMembers.filter(action => accepts(action.kind))
+      val (previewed, deferred) =
+        if (resolvesEdits) (None, implementing)
+        else (implementing.map(host.previewImplementMembers(sourceFile, range, _)), None)
       val source =
         if (only.nonEmpty && accepts("source.organizeImports")) Seq(host.organizeImports(sourceFile))
         else Seq.empty
-      val choices = contextual ++ source
+      val choices = offered.choices.filter(choice => accepts(choice.kind)) ++ previewed ++ source
 
       host.read {
         choices.map { choice =>
           CodeActionResult(choice.title, choice.kind, choice.disabled, pluginProblems(sourceDocument, choice.problems)) ->
-            choice.edits.map(textChange(sourceDocument, _))
+            Some(choice.edits.map(textChange(sourceDocument, _)))
+        } ++ deferred.map { action =>
+          CodeActionResult(action.title, action.kind, None, pluginProblems(sourceDocument, action.problems)) -> None
         }
       }
     case _ => Seq.empty
