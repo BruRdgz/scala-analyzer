@@ -873,6 +873,41 @@ class EditingTest extends munit.FunSuite {
     } finally host.closeSource(file)
   }
 
+  // The chooser shows both overloads as `f(x: Shown): Int`; each is overridden alone, and an identifier listed before
+  // one of them disappeared is unknown rather than the other's.
+  test("Override Members tells apart overloads that the chooser shows alike") {
+    val parameterTypes = Seq("left", "right").map { pack =>
+      scalaFile(s"${pack}Shown", s"package $pack\nclass Shown\n")
+    }
+    val base =
+      "package test\n\nclass Overloaded {\n  def f(x: left.Shown): Int = 1\n  def f(x: right.Shown): Int = 2\n}\n"
+    val marked = base + "class Overloads extends Overloaded {\n  <caret>\n}\n"
+    val original = marked.replace("<caret>", "")
+    // The overload in the chooser's order, and the package of the parameter type that the override imports.
+    val cases = Seq(0 -> "left", 1 -> "right")
+    TestHost.libraryReport
+    val file = scalaFile("Overloads", original)
+    try {
+      val at = marked.indexOf("<caret>")
+      val overloads = host.overridableMembers(file, at).filter(_.owner == "test.Overloaded")
+      assertEquals(overloads.map(_.signature), Seq("f(x: Shown): Int", "f(x: Shown): Int"))
+      assertEquals(overloads.map(_.id).distinct.size, 2, overloads.toString)
+
+      for ((index, pack) <- cases) {
+        val expected = s"package test\n\nimport $pack.Shown\n\n" + base.stripPrefix("package test\n\n") +
+          "class Overloads extends Overloaded {\n  override def f(x: Shown): Int = super.f(x)\n}\n"
+        assertEquals(applyEdits(original, host.overrideMembers(file, at, Seq(overloads(index).id))), expected, pack)
+      }
+
+      val first = "  def f(x: left.Shown): Int = 1\n"
+      val firstAt = original.indexOf(first)
+      host.edit(file, firstAt, firstAt + first.length, "")
+      intercept[MemberOverrides.UnknownMembers] {
+        host.overrideMembers(file, at - first.length, Seq(overloads.head.id))
+      }
+    } finally (file +: parameterTypes).foreach(host.closeSource)
+  }
+
   test("type-import actions keep colliding candidates separate and preserve the source") {
     val targets = Seq("first", "second").map { pack =>
       scalaFile(s"${pack}ImportChoice", s"package $pack\nclass ImportChoice\n")

@@ -678,8 +678,9 @@ class LanguageServerTest extends munit.FunSuite {
   }
 
   // `Greeting` (line 2, column 17 of Greeting.scala) and `GreetingSuite` (line 2, column 6 of GreetingSuite.scala) lead
-  // to each other, by name, from the test's body too (line 3); `Counter` (line 8, column 6) has no test. The suite uses
-  // nothing of Greeting, so that the reference and call-hierarchy tests of `text` find no use in it.
+  // to each other, by name, from the test's body too (line 3) and from the end of the suite's file (line 5, after its
+  // last newline), whose only class it is; `Counter` (line 8, column 6) has no test. The suite uses nothing of
+  // Greeting, so that the reference and call-hierarchy tests of `text` find no use in it.
   test("goes from a class to its tests and from a test to the classes it tests") {
     def testTargets(path: Path, position: Position) =
       server.testTargets(new TextDocumentPositionParams(document(path), position))
@@ -687,6 +688,7 @@ class LanguageServerTest extends munit.FunSuite {
     assertEquals(testTargets(greeting, new Position(2, 20)), Seq((greetingSuite.toUri.toString, new Position(2, 6))))
     assertEquals(testTargets(greetingSuite, new Position(2, 8)), Seq((greeting.toUri.toString, new Position(2, 17))))
     assertEquals(testTargets(greetingSuite, new Position(3, 10)), Seq((greeting.toUri.toString, new Position(2, 17))))
+    assertEquals(testTargets(greetingSuite, new Position(5, 0)), Seq((greeting.toUri.toString, new Position(2, 17))))
     assertEquals(testTargets(counter, new Position(8, 6)), Seq.empty)
   }
 

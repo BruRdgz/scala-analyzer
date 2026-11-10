@@ -17,7 +17,7 @@ import com.intellij.psi.{
   SyntaxTraverser,
 }
 import com.intellij.psi.search.GlobalSearchScope
-import com.intellij.psi.util.{PsiTreeUtil, PsiTypesUtil}
+import com.intellij.psi.util.{PsiTreeUtil, PsiTypesUtil, PsiUtilCore}
 import com.intellij.testIntegration.TestFinderHelper
 import org.jetbrains.plugins.scala.annotator.gutter.{ScalaGoToDeclarationHandler, ScalaGotoTypeDeclarationProvider}
 import org.jetbrains.plugins.scala.annotator.hints.Text
@@ -605,7 +605,8 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
    * Locates what the IDE's Go to Test navigates to from a position: the classes that the test class around it tests,
    * or the tests of the class around it.
    *
-   * Library declarations are located as `definition` locates them.
+   * The element at the caret is chosen as `GotoTestOrCodeHandler.getSelectedElement` chooses it, so a caret at the end
+   * of the file stands for the last character. Library declarations are located as `definition` locates them.
    *
    * @param path registered project-source path
    * @param at caret position
@@ -614,13 +615,13 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
    */
   def testTargets(path: Path, at: LineColumn): Seq[(Path, LineColumn)] = host.read {
     val sourceFile = file(path)
-    val source = Option(sourceFile.findElementAt(offset(document(sourceFile), at)))
-      .flatMap(element => Option(TestFinderHelper.findSourceElement(element)))
-    val targets = source match {
-      case Some(element) if TestFinderHelper.isTest(element) => TestFinderHelper.findClassesForTest(element).asScala.toSeq
-      case Some(element) => TestFinderHelper.findTestsForClass(element).asScala.toSeq
-      case None => Seq.empty
-    }
+    val selected = PsiUtilCore.getElementAtOffset(sourceFile, offset(document(sourceFile), at))
+    // As in the handler, the source element only decides whether there is anything to look for; the finders are
+    // asked about the selected element.
+    val targets =
+      if (TestFinderHelper.findSourceElement(selected) == null) Seq.empty
+      else if (TestFinderHelper.isTest(selected)) TestFinderHelper.findClassesForTest(selected).asScala.toSeq
+      else TestFinderHelper.findTestsForClass(selected).asScala.toSeq
 
     locationsInOrder(targets)
   }
