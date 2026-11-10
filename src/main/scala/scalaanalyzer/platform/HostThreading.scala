@@ -2,11 +2,15 @@ package scalaanalyzer.platform
 
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.application.{ReadActionListener, WriteActionListener, WriteIntentReadActionListener}
-import com.intellij.openapi.progress.{EmptyProgressIndicator, ProgressIndicator, ProgressManager}
+import com.intellij.openapi.progress.{
+  EmptyProgressIndicator, ProcessCanceledException, ProgressIndicator, ProgressManager
+}
 import com.intellij.openapi.util.{Computable, Disposer}
 import com.intellij.util.ui.EDT
 
-import java.util.concurrent.{Callable, ConcurrentHashMap, CopyOnWriteArrayList, ExecutionException, Executors}
+import java.util.concurrent.{
+  Callable, CancellationException, ConcurrentHashMap, CopyOnWriteArrayList, ExecutionException, Executors, Future
+}
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.locks.{ReentrantLock, ReentrantReadWriteLock}
 
@@ -138,7 +142,7 @@ private[scalaanalyzer] object HostLock {
     // The request's cancellation is a thread-local of the caller, which the dispatch thread does not see on its own.
     val cancellation = Option(requestCancellation.get())
 
-    HostDispatchThread.call(cancellation.fold(query(body))(cancelledBy(_)(query(body))))
+    HostDispatchThread.call(cancellation.fold(query(body))(cancelledBy(_)(query(body))), cancellation)
   }
 
   /** Cancels every query currently running through [[query]]. */
@@ -146,16 +150,21 @@ private[scalaanalyzer] object HostLock {
 
   /**
    * Cancellation shared by the queries of one client request: cancelling it cancels the query running for the
-   * request and every query the request starts afterwards.
+   * request and every query the request starts afterwards, and the dispatch-thread tasks still waiting in the queue.
    */
   final class RequestCancellation {
     @volatile private var cancelled = false
     private val running = ConcurrentHashMap.newKeySet[ProgressIndicator]()
+    private val queued = ConcurrentHashMap.newKeySet[Future[?]]()
 
-    /** Marks the request cancelled and cancels its running queries; may be called from any thread. */
+    /**
+     * Marks the request cancelled, cancels its running queries and stops its waiting dispatch-thread tasks from
+     * running; may be called from any thread.
+     */
     def cancel(): Unit = {
       cancelled = true
       running.forEach(_.cancel())
+      queued.forEach(_.cancel(false))
     }
 
     /**
@@ -169,6 +178,26 @@ private[scalaanalyzer] object HostLock {
       running.add(indicator)
       if (cancelled) indicator.cancel()
     }
+
+    /**
+     * Registers a task submitted to the dispatch thread and cancels it at once if the request is already cancelled.
+     *
+     * Registers before reading the flag, as [[track]] does. Cancelling a task that already runs only releases its
+     * waiting caller: the task goes on until its own query, cancelled through [[track]], ends.
+     *
+     * @param task the submitted task
+     */
+    private[platform] def trackQueued(task: Future[?]): Unit = {
+      queued.add(task)
+      if (cancelled) task.cancel(false)
+    }
+
+    /**
+     * Stops tracking a dispatch-thread task once its caller stopped waiting for it.
+     *
+     * @param task task previously passed to `trackQueued`
+     */
+    private[platform] def untrackQueued(task: Future[?]): Unit = queued.remove(task)
 
     /** Whether the request was cancelled. */
     private[HostLock] def isCancelled: Boolean = cancelled
@@ -358,13 +387,22 @@ private[scalaanalyzer] object HostDispatchThread {
    * On the dispatch thread `body` runs immediately.
    *
    * @param body work to run on the dispatch thread
+   * @param cancellation cancellation of the request that waits, which stops a `body` still queued from running
    * @return the result of `body`
+   * @throws ProcessCanceledException when `cancellation` was cancelled while `body` waited or ran
    */
-  def call[T](body: => T): T =
+  def call[T](body: => T, cancellation: Option[HostLock.RequestCancellation] = None): T =
     if (isCurrent) body
-    else
-      try executor.submit((() => body): Callable[T]).get()
-      catch { case e: ExecutionException => throw e.getCause }
+    else {
+      val task = executor.submit((() => body): Callable[T])
+
+      cancellation.foreach(_.trackQueued(task))
+      try task.get()
+      catch {
+        case e: ExecutionException => throw e.getCause
+        case _: CancellationException => throw new ProcessCanceledException
+      } finally cancellation.foreach(_.untrackQueued(task))
+    }
 
   /** Waits until the work scheduled so far has run. */
   def drain(): Unit = invokeAndWait(() => ())

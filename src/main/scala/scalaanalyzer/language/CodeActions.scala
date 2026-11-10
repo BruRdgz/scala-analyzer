@@ -311,8 +311,8 @@ final class CodeActions(intentionClasses: Seq[String], descriptorClasses: Seq[St
    *
    * The insertion runs on the dispatch thread as a query of its own, so the caller must not hold the read lock (see
    * [[MemberOverrides.implementAll]]). The cancellation of the caller's request propagates. A write that cancels only
-   * the preview, such as an edit of another file, disables the action rather than failing the caller's other actions;
-   * another failure is logged and disables it too.
+   * the preview, such as an edit of another file, is retried once; if it cancels the retry too, the action is
+   * disabled rather than failing the caller's other actions. Another failure is logged and disables it too.
    *
    * @param file Scala file the action was collected for
    * @param range the range it was collected for
@@ -321,9 +321,13 @@ final class CodeActions(intentionClasses: Seq[String], descriptorClasses: Seq[St
    * @throws ProcessCanceledException when the caller's request is cancelled
    */
   def implementMembers(file: ScalaFile, range: TextRange, offered: ImplementMembers): Choice =
-    try Choice(offered.title, offered.kind, MemberOverrides.implementAll(file, range.getStartOffset).edits, None,
-      offered.problems)
-    catch {
+    try {
+      def edits = MemberOverrides.implementAll(file, range.getStartOffset).edits
+      // An edit of another document cancels the preview without making it wrong, so it gets one more attempt.
+      val previewed = try edits catch { case _: ProcessCanceledException if !HostLock.isRequestCancelled => edits }
+
+      Choice(offered.title, offered.kind, previewed, None, offered.problems)
+    } catch {
       case e: ProcessCanceledException if HostLock.isRequestCancelled => throw e
       case _: ProcessCanceledException =>
         Choice(offered.title, offered.kind, Seq.empty, Some("An edit interrupted the preview of this action."),

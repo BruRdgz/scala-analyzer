@@ -2070,6 +2070,31 @@ class LanguageServerTest extends munit.FunSuite {
     } finally change(Files.readString(main), 2102)
   }
 
+  // A source the client never opened has no version: the action is resolved to an unversioned edit, as the actions that
+  // are offered with an edit are, rather than offered and then ignored.
+  test("Implement members is resolved for a source the client never opened") {
+    val service = server.getTextDocumentService
+    // A source created on disk: no other test opens it, so the server knows no version of it.
+    val unopened = fixture.resolve("core/src/main/scala/core/Unopened.scala")
+    val text = "package core\n\ntrait Area { def area: Double }\n\nabstract class Rect extends Area\n"
+    val at = new Position(4, "abstract class Rect".length)
+
+    Files.writeString(unopened, text)
+    try {
+      filesChanged(unopened -> FileChangeType.Created)
+      val params = new CodeActionParams(document(unopened), new Range(at, at), new CodeActionContext(JavaList.of()))
+      val offered = service.codeAction(params).get(1, TimeUnit.MINUTES).asScala.map(_.getRight).toSeq
+      val implement = offered.find(_.getTitle == "Implement members").getOrElse(fail(offered.toString))
+      assertEquals(implement.getEdit, null)
+
+      val edit = service.resolveCodeAction(implement).get(1, TimeUnit.MINUTES).getEdit.getDocumentChanges.get(0).getLeft
+      assertEquals(edit.getTextDocument.getUri, unopened.toUri.toString)
+      assertEquals(edit.getTextDocument.getVersion, null)
+      assert(edit.getEdits.asScala.exists(_.getNewText.contains("override def area: Double = ???")), edit.toString)
+    } finally Files.delete(unopened)
+    filesChanged(unopened -> FileChangeType.Deleted)
+  }
+
   test("a client that does not apply the server's edits gets suggestions without commands") {
     closedServer
     releaseModules()

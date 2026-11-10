@@ -1417,7 +1417,8 @@ final class ScalaLanguageServer(
                 data.addProperty("uri", path.toUri.toString)
                 data.addProperty("line", Integer.valueOf(start.line))
                 data.addProperty("character", Integer.valueOf(start.column))
-                data.addProperty("version", versions.get(path))
+                // An unversioned document (never opened by the client) has no version member; its edit is unversioned.
+                Option(versions.get(path)).foreach(version => data.addProperty("version", version))
                 action.setData(data)
             }
             LspEither.forRight[Command, CodeAction](action)
@@ -1430,10 +1431,13 @@ final class ScalaLanguageServer(
      *
      * Runs on a read thread. The edit is computed only once the user chooses the action: its preview occupies the
      * host's dispatch thread, which the code actions of every caret move must not wait for. The request fails as
-     * cancelled (`RequestCancelled`) when the document is no longer in that version, as the override command does.
+     * cancelled (`RequestCancelled`) when the document is no longer in that version, as the override command does. A
+     * document that was unversioned when the action was offered is resolved to an unversioned edit, as the actions
+     * with an edit are, for as long as the client has not opened it.
      *
-     * @param action an action this server returned, with its `data`
-     * @return the same action with its versioned edit; unchanged when it has no `data` of this server's
+     * @param action an action this server returned, with its `data` (which lsp4j reads from the wire as a
+     *               `JsonElement`)
+     * @return the same action with its edit; unchanged when it has no `data` of this server's
      */
     override def resolveCodeAction(action: CodeAction): CompletableFuture[CodeAction] = {
       val offered = action.getData match {
@@ -1442,17 +1446,34 @@ final class ScalaLanguageServer(
             uri <- stringMember(data, "uri")
             line <- intMember(data, "line")
             column <- intMember(data, "character")
-            version <- intMember(data, "version")
+            version <- offeredVersion(data)
           } yield (uri, LineColumn(line, column), version)
         case _ => None
       }
 
       offered.fold(CompletableFuture.completedFuture(action)) { (uri, at, version) =>
         onRead("codeAction/resolve", new TextDocumentIdentifier(uri), action) { (s, path) =>
-          if (versions.get(path) != version) throw new ProcessCanceledException
-          action.setEdit(versionedEdit(uri, version, s.implementMembers(path, at)))
+          action.setEdit(versionedEdit(uri, version, implemented(s, path, at, version)))
           action
         }
+      }
+    }
+
+    /**
+     * Implements the members of the class at `at`, once more if a write cancelled the first attempt while the request
+     * is still wanted and the document is still in the offered version, as `inspected` does: another document's edit
+     * or a build import cancels the preview without making the answer wrong.
+     *
+     * @param version the version the action was offered for, `null` for an unversioned document
+     * @throws ProcessCanceledException when the request is cancelled or the document is no longer in that version
+     */
+    private def implemented(s: ProjectSession, path: Path, at: LineColumn, version: Integer): Seq[TextChange] = {
+      def isOffered = versions.get(path) == version
+
+      if (!isOffered) throw new ProcessCanceledException
+      try s.implementMembers(path, at)
+      catch {
+        case _: ProcessCanceledException if !HostLock.isRequestCancelled && isOffered => s.implementMembers(path, at)
       }
     }
 
@@ -1916,6 +1937,16 @@ final class ScalaLanguageServer(
   private def intMember(json: JsonObject, name: String): Option[Int] = Option(json.get(name)).collect {
     case value: JsonPrimitive if value.isNumber => value.getAsInt
   }
+
+  /**
+   * The document version a code action's `data` was offered for: `Some(null)` when it names none, as for a document
+   * the client never opened; absent when the member is not a number.
+   */
+  private def offeredVersion(json: JsonObject): Option[Integer] =
+    Option(json.get("version")).filterNot(_.isJsonNull) match {
+      case None => Some(null)
+      case Some(_) => intMember(json, "version").map(Integer.valueOf)
+    }
 
   /** Reads a non-blank string member, absent when the member is missing, not a JSON string or blank. */
   private def stringMember(json: JsonObject, name: String): Option[String] = Option(json.get(name)).collect {

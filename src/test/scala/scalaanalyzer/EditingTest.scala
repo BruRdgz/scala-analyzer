@@ -865,6 +865,37 @@ class EditingTest extends munit.FunSuite {
     assert(!ran)
   }
 
+  // Without it the request's read thread stays blocked until the dispatch thread dequeues the task, however long the
+  // work ahead of it takes.
+  test("a request's cancellation releases its query that still waits in the dispatch thread's queue") {
+    val cancellation = new HostLock.RequestCancellation
+    val blocked = new CountDownLatch(1)
+    val release = new CountDownLatch(1)
+    val ran = new java.util.concurrent.atomic.AtomicBoolean(false)
+    val executor = Executors.newSingleThreadExecutor()
+
+    HostDispatchThread.invokeLater { () =>
+      blocked.countDown()
+      release.await()
+    }
+    try {
+      assert(blocked.await(30, TimeUnit.SECONDS), "the dispatch thread did not start the blocking task")
+      val waiting = CompletableFuture.supplyAsync(
+        () => scala.util.Try(HostLock.cancelledBy(cancellation)(HostLock.queryOnDispatchThread(ran.set(true)))),
+        executor)
+      // Let the query reach the queue behind the blocking task before cancelling.
+      Thread.sleep(200)
+      cancellation.cancel()
+      // The dispatch thread is still blocked: the waiting thread was released by the cancellation alone.
+      assert(waiting.get(30, TimeUnit.SECONDS).failed.get.isInstanceOf[ProcessCanceledException])
+    } finally {
+      release.countDown()
+      executor.shutdown()
+    }
+    HostDispatchThread.drain()
+    assert(!ran.get)
+  }
+
   // The oracle is the plugin's ScalaOverrideImplementTest (`testOverrideFunction`).
   test("Override Members lists what a class can override and overrides the chosen members") {
     val marked = "package test\n\nclass A {\n  def foo(): A = null\n  def bar: Int = 1\n}\n" +
