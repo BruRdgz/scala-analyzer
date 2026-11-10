@@ -31,7 +31,8 @@ object MemberOverrides {
   /**
    * A member the chooser lists for a class.
    *
-   * @param id opaque key of the member, which identifies it again while the class and its supertypes are unchanged
+   * @param id opaque key of the member, which identifies it again while the class and its supertypes are unchanged;
+   *           no other member listed for the class has it
    * @param signature the member as the chooser shows it, such as `foo(x: Int): String`
    * @param owner the class or trait that declares the member
    */
@@ -99,7 +100,7 @@ object MemberOverrides {
    *         a class, object or trait, or nothing is left to override
    */
   def overridable(file: ScalaFile, offset: Int): Seq[Member] = atCaret(file, offset) { editor =>
-    listing(file, editor, implement = false).toSeq.flatMap(_.members.map(member))
+    listing(file, editor, implement = false).toSeq.flatMap(found => rows(found.members))
   }
 
   /**
@@ -118,7 +119,7 @@ object MemberOverrides {
     ChangeEngine.run(file) { copy =>
       val editor = previewEditorAt(offset)
       val offered = listing(copy, editor, implement = false)
-      val byId = offered.toSeq.flatMap(_.members).map(chooser => member(chooser).id -> chooser).toMap
+      val byId = offered.toSeq.flatMap(found => rows(found.members).map(_.id).zip(found.members)).toMap
       val unknown = ids.filterNot(byId.contains)
 
       if (unknown.nonEmpty) throw new UnknownMembers(unknown)
@@ -242,12 +243,27 @@ object MemberOverrides {
     try call
     catch { case error: InvocationTargetException => throw error.getCause }
 
-  /** The chooser's row for a member: its text, its owner's name, and the two together as the member's identity. */
-  private def member(chooser: ClassMember): Member = {
-    val owner = chooser.getParentNodeDelegate.getText
-    val signature = chooser.getText
+  /**
+   * The chooser's rows for members: each member's text and its owner's name, with the two together as its identity.
+   *
+   * Overloads whose parameter types differ only in their packages, such as `f(x: a.T)` and `f(x: b.T)`, show the same
+   * text, so the rows that share an identity are numbered in the chooser's order, which within an owner is the source
+   * order. Only such rows are numbered: an overload that appears or disappears after the listing then makes the
+   * identifiers of the others unknown, rather than one of them silently that of another member.
+   *
+   * @param chooser the members in the chooser's order
+   * @return one row per member, in the same order
+   */
+  private def rows(chooser: Seq[ClassMember]): Seq[Member] = {
+    val shown = chooser.map(member => (member.getParentNodeDelegate.getText, member.getText))
+    val sharing = shown.groupMapReduce(identity)(_ => 1)(_ + _)
 
-    Member(s"$owner#$signature", signature, owner)
+    shown.zipWithIndex.map { case (row @ (owner, signature), index) =>
+      val key = s"$owner#$signature"
+      val id = if (sharing(row) == 1) key else s"$key@${shown.take(index).count(_ == row) + 1}"
+
+      Member(id, signature, owner)
+    }
   }
 
   /** The editor of the running preview session, with its caret moved to `offset`. */
