@@ -28,7 +28,7 @@ import com.intellij.openapi.progress.impl.CoreProgressManager
 import com.intellij.openapi.project.{DumbModeTask, DumbService, Project}
 import com.intellij.openapi.util.{Condition, Disposer, Key, TextRange, UserDataHolderBase}
 import com.intellij.openapi.util.registry.Registry
-import com.intellij.openapi.vfs.VirtualFile
+import com.intellij.openapi.vfs.{ReadonlyStatusHandler, VirtualFile}
 import com.intellij.featureStatistics.FeatureUsageTracker
 import com.intellij.lang.parameterInfo.{LanguageParameterInfo, ParameterInfoHandler}
 import com.intellij.navigation.ItemPresentationProviders
@@ -63,6 +63,7 @@ import com.intellij.codeInsight.highlighting.HighlightErrorFilter
 import com.intellij.codeInsight.multiverse.{CodeInsightContextManager, CodeInsightContexts, MultiverseEnabler}
 import com.intellij.codeInsight.navigation.{ClassImplementationsSearch, MethodImplementationsSearch}
 import com.intellij.codeInsight.runner.JavaMainMethodProvider
+import com.intellij.codeInsight.template.TemplateManager
 import com.intellij.codeInspection.{GlobalInspectionContext, InspectionManager, InspectionManagerBase, SuppressManager}
 import com.intellij.codeInspection.ex.{EntryPointsManager, EntryPointsManagerBase}
 import com.intellij.concurrency.JobLauncher
@@ -86,7 +87,7 @@ import com.intellij.lang.cacheBuilder.{CacheBuilderRegistry, WordsScanner}
 import com.intellij.lang.customFolding.{NetBeansCustomFoldingProvider, VisualStudioCustomFoldingProvider}
 import com.intellij.lang.findUsages.LanguageFindUsages
 import com.intellij.lang.folding.CustomFoldingProvider
-import com.intellij.lang.impl.modcommand.{ModCommandBatchExecutorImpl, ModCommandServiceImpl}
+import com.intellij.lang.impl.modcommand.ModCommandServiceImpl
 import com.intellij.lang.injection.InjectedLanguageManager
 import com.intellij.lang.java.{
   JavaFindUsagesProvider, JavaFormattingModelBuilder, JavaParserDefinition, JavaSyntaxHighlighterFactory
@@ -103,7 +104,6 @@ import com.intellij.openapi.application.{
 }
 import com.intellij.openapi.application.ex.ApplicationEx
 import com.intellij.openapi.command.CommandProcessor
-import com.intellij.openapi.command.impl.CoreCommandProcessor
 import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.editor.Editor
 import com.intellij.openapi.editor.actions.FlipCommaIntention
@@ -270,7 +270,9 @@ import org.jetbrains.plugins.scalaDoc.lang.parser.ScalaDocParserDefinition
 import kotlin.coroutines.EmptyCoroutineContext
 import kotlinx.coroutines.CoroutineScopeKt
 import scalaanalyzer.{HostConfig, ModuleModel, ScalaPsiHost}
-import scalaanalyzer.language.{ChangeEngine, CodeActions, Completion, InlayHints, Inspections, Rename}
+import scalaanalyzer.language.{
+  ChangeEngine, CodeActions, Completion, InlayHints, Inspections, PostfixCompletion, Rename
+}
 import scalaanalyzer.platform.{Descriptors, ExtensionBean, dispatch, tableProxy}
 import scalaanalyzer.ScalaPsiHost.{CompletionWeighers, SemanticExtensionPoints, scalaCompletionContributors}
 
@@ -309,6 +311,10 @@ private[scalaanalyzer] object HostBootstrap {
     ExtensionBean(Map("key" -> "completion", "id" -> weigher.id, "order" -> weigher.order,
       "implementationClass" -> s"com.intellij.codeInsight.completion.${weigher.className}"))
   }
+
+  /** The host's own Scala completion contributors; `first`, so a plugin contributor's `stopHere` cannot hide them. */
+  private val HostCompletionContributors = Seq(ExtensionBean(Map("language" -> "Scala", "id" -> "hostPostfixTemplates",
+    "order" -> "first", "implementationClass" -> classOf[PostfixCompletion.Contributor].getName)))
 
   /** The platform's Java completion contributor as a descriptor bean, registered under the Java plugin's id. */
   private val JavaCompletionContributors = Seq(ExtensionBean(Map("language" -> "JAVA",
@@ -372,9 +378,10 @@ private[scalaanalyzer] object HostBootstrap {
     /** Application-level services, answered by the application proxy's `getService`. */
     private val appServices = new ServiceTable("Application")
 
-    /** Implementation class names of the Scala and Java completion contributors, instantiated without injection. */
+    /** Implementation class names of the Scala, Java and host completion contributors, made without injection. */
     private val completionContributors =
-      (scalaCompletionContributors(config.scalaPluginJars) ++ JavaCompletionContributors).map(_.implementation).toSet
+      (scalaCompletionContributors(config.scalaPluginJars) ++ HostCompletionContributors ++ JavaCompletionContributors)
+        .map(_.implementation).toSet
 
     /** Project-level services, answered by the project proxy's `getService`. */
     private val projectServices = new ServiceTable("Project")
@@ -458,7 +465,9 @@ private[scalaanalyzer] object HostBootstrap {
       case ("runWriteAction", Array(c: Computable[?])) => runWriteAction(c.compute()).asInstanceOf[AnyRef]
       case ("runWriteAction", Array(c: ThrowableComputable[?, ?])) => runWriteAction(c.compute()).asInstanceOf[AnyRef]
       case ("assertIsNonDispatchThread" | "assertReadAccessNotAllowed", _) => null
-      case ("isUnitTestMode", _) => java.lang.Boolean.valueOf(config.unitTestMode || Rename.isAnsweringDialogs)
+      case ("isUnitTestMode", _) =>
+        java.lang.Boolean.valueOf(
+          config.unitTestMode || Rename.isAnsweringDialogs || PostfixCompletion.isAnsweringDialogs)
       case ("isInternal" | "isEAP" | "isDisposed", _) => java.lang.Boolean.FALSE
       case ("isHeadlessEnvironment" | "isCommandLine", _) => java.lang.Boolean.TRUE
       // The stored value is a reference of unknown type `?`.
@@ -709,7 +718,8 @@ private[scalaanalyzer] object HostBootstrap {
           Set("completion", "proximity").contains(bean.attributes.getOrElse("key", ""))
       }
       for ((epName, beans) <- Seq(
-             "com.intellij.completion.contributor" -> scalaCompletionContributors(config.scalaPluginJars),
+             "com.intellij.completion.contributor" ->
+               (scalaCompletionContributors(config.scalaPluginJars) ++ HostCompletionContributors),
              "com.intellij.weigher" -> weighers)) {
         declare(epName)
         if (beans.isEmpty) throw new IllegalStateException(s"no completion beans for $epName")
@@ -889,7 +899,7 @@ private[scalaanalyzer] object HostBootstrap {
       declare(TextPresentationTransformers.Companion.getEP.getName)
       appServices.register(classOf[TextPresentationTransformers])(new TextPresentationTransformers)
       // PSI writes check command state; the core processor tracks it without UI or undo.
-      appServices.register(classOf[CommandProcessor])(new CoreCommandProcessor)
+      appServices.register(classOf[CommandProcessor])(new HostCommandProcessor)
       // Legacy inspection fixes may prepare writable files only inside their isolated preview session.
       appServices.register(classOf[FileModificationService])(new FileModificationService {
         override def prepareFileForWrite(file: PsiFile): Boolean =
@@ -1064,7 +1074,7 @@ private[scalaanalyzer] object HostBootstrap {
       appServices.register(classOf[TransactionGuard])(new TransactionGuardImpl)
       // Annotations carry their quick fixes, which the platform wraps as intentions when the annotation is created.
       // The batch executor applies textual mod commands to preview copies without the desktop executor.
-      appServices.register(classOf[ModCommandExecutor])(new ModCommandBatchExecutorImpl)
+      appServices.register(classOf[ModCommandExecutor])(new HostModCommandExecutor)
       appServices.register(classOf[ModCommandService])(new ModCommandServiceImpl)
       // Interpolation references give completion its Scala prefix inside plain strings; file paths and URL providers
       // need IDE navigation.
@@ -1747,6 +1757,8 @@ private[scalaanalyzer] object HostBootstrap {
         case ("DefaultProjectFactory.getDefaultProject", _) => project
       }))
       projectServices.register(classOf[CodeStyleManager])(new CodeStyleManagerImpl(project))
+      projectServices.register(classOf[TemplateManager])(new HostTemplateManager)
+      projectServices.register(classOf[ReadonlyStatusHandler])(new HostReadonlyStatusHandler)
       // No language injection in the host: every file is its own top-level file.
       projectServices.register(classOf[InjectedLanguageManager])(new Host_InjectedLanguageManager(dispatch {
         case ("InjectedLanguageManager.getTopLevelFile", Array(e: PsiElement)) => e.getContainingFile

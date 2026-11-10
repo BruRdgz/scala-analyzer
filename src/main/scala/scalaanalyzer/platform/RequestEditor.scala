@@ -40,6 +40,8 @@ private[scalaanalyzer] final class RequestEditor(
     case ("isCamelWords", _) => java.lang.Boolean.FALSE
     case ("isInsertParenthesesAutomatically", _) => java.lang.Boolean.valueOf(
       EditorSettingsExternalizable.getInstance.isInsertParenthesesAutomatically)
+    // Introducing a variable renames it in the editor when it can; the host has no in-place session to start.
+    case ("isVariableInplaceRenameEnabled", _) => java.lang.Boolean.FALSE
   }
 
   /** Builds the layered lexer lazily from the document's PSI and current text snapshot. */

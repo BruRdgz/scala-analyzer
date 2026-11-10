@@ -37,6 +37,12 @@
   range, code and message). They include the plugin's suppression actions (`//noinspection <id>` for the statement,
   definition, class or file), previewed like any fix; unused imports are suppressed under `ScalaUnusedImport`. A request
   that carries inspection diagnostics gets their fixes even before the file's diagnostics were computed.
+- Postfix templates are completion items after `expr.`: the plugin's `if`, `else`, `match`, `for`, `var`, `field`,
+  `not`, `par`, `cast`, `try`, `null`, `notnull`, `nn`, `println`, `sout`, `prtln`, `return`, `throw`, `assert`,
+  `while`, `dowhile`, `Option`, `Seq` and `List`, those that apply to the expression before the dot, shown as snippets
+  with their example. Choosing one replaces `expr.key` with the template's expansion and puts the caret where the IDE
+  does; where several expressions qualify, the innermost is taken, and a name the IDE asks for is its suggestion.
+  Clients that do not apply the server's edits do not get them.
 
 ## 0.2.0 — 2026-11-09
 

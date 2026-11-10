@@ -33,7 +33,7 @@ It exposes editor features through the **Language Server Protocol (LSP)** and im
 | Area | Capabilities |
 | --- | --- |
 | Diagnostics | Scala plugin and compiler diagnostics; current-buffer compilation for Scala 3; selected native inspections, also over the whole project (Inspect Code, listed by group, inspection and file in VS Code's Inspection Results view). |
-| Completion | Automatic imports, insertion handlers and signature help. |
+| Completion | Automatic imports, insertion handlers, postfix templates (`expr.if`, `.match`, `.for`, `.var`, `.not`...) and signature help. |
 | Inlay hints | Inferred types, parameter names, implicit arguments and conversions, method chains. Type names are links to their declarations, an inferred definition type can be written into the source, and `scalaAnalyzer.inlayHints.*` selects the kinds shown. |
 | Navigation | Definitions (through the plugin's Go to Declaration), type definitions, references, implementations, go to super, call/type hierarchies and workspace symbols; library sources and decompiled classes. |
 | Documentation | Markdown hover with declaration context, parameters, return values and linked references. |
@@ -176,8 +176,9 @@ is partial, indexes are kept in memory, and each process serves one workspace.
   code actions are limited to current-file previews.
 - Unwrap actions are offered with every code-action request at the caret, in the order of the IDE's Unwrap popup,
   without its highlighting of the affected code. Change access modifier is not offered: it needs the IDE's rename UI.
-- Some completion contributors require IDE services that are unavailable. Live templates have no snippet tab stops;
-  completion followed by handler edits takes two undo steps.
+- Some completion contributors require IDE services that are unavailable. Live templates, postfix templates among
+  them, have no snippet tab stops: the caret goes where their end is; completion followed by handler edits takes two
+  undo steps.
 - Inlay hints are text labels without the IDE's interactive presentation or range hints (`1 to 5`). Their settings
   are the host's, read from `workspace/configuration` (`scalaAnalyzer.inlayHints.*`) by a client that answers it; the
   IDE's X-Ray mode, hint length and per-method parameter-name exclusions are not offered. Label parts get their
