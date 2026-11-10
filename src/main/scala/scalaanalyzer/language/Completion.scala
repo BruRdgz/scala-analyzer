@@ -4,6 +4,7 @@ import com.intellij.codeInsight.completion.*
 import com.intellij.codeInsight.completion.impl.CompletionSorterImpl
 import com.intellij.codeInsight.intention.preview.IntentionPreviewUtils
 import com.intellij.codeInsight.lookup.{Classifier, Lookup, LookupElement, LookupElementBuilder, LookupElementPresentation, LookupElementRenderer, WeighingContext}
+import com.intellij.codeInsight.template.postfix.templates.PostfixTemplate
 import com.intellij.modcommand.{ActionContext, ModCommandExecutor, ModNavigate}
 import com.intellij.modcompletion.ModCompletionItem
 import com.intellij.openapi.editor.Editor
@@ -39,9 +40,14 @@ import scala.util.control.NonFatal
  * through the [[ChangeEngine]].
  */
 object Completion {
-  /** Completion categories exposed by the host, before a protocol adapter maps them to editor enums. */
+  /**
+   * Completion categories exposed by the host, before a protocol adapter maps them to editor enums.
+   *
+   * `Snippet` is a postfix template: choosing it only makes sense with its insert handler, which writes its expansion.
+   */
   enum Kind {
-    case EnumMember, Enum, Interface, Module, TypeParameter, Class, Constructor, Method, Field, Variable, Value, Keyword
+    case EnumMember, Enum, Interface, Module, TypeParameter, Class, Constructor, Method, Field, Variable, Value, Keyword,
+      Snippet
   }
 
   /** Bounds rendering and response size while retaining enough choices for the user to narrow the query. */
@@ -393,7 +399,7 @@ object Completion {
   }
 
   /** Creates completion-only PSI through the file factory without the write access required by PsiFile.copy. */
-  private final class TemporaryCopy(original: PsiFile, text: String) extends AutoCloseable {
+  private[language] final class TemporaryCopy(original: PsiFile, text: String) extends AutoCloseable {
     /** The parsed copy of `text`; `original` is its original file. */
     val file: PsiFile = PsiFileFactory.getInstance(original.getProject)
       .createFileFromText(original.getName, original.getLanguage, text, false, false)
@@ -535,6 +541,8 @@ object Completion {
         case _ => Kind.Value
       }
     case _ if isKeyword(element) => Kind.Keyword
+    // A postfix template has no PSI; its object is the template.
+    case _ if element.getObject.isInstanceOf[PostfixTemplate] => Kind.Snippet
     case _ => Kind.Value
   }
 

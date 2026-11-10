@@ -33,7 +33,7 @@ It exposes editor features through the **Language Server Protocol (LSP)** and im
 | Area | Capabilities |
 | --- | --- |
 | Diagnostics | Scala plugin and compiler diagnostics; current-buffer compilation for Scala 3; selected native inspections, also over the whole project (Inspect Code, listed by group, inspection and file in VS Code's Inspection Results view). |
-| Completion | Automatic imports, insertion handlers and signature help. |
+| Completion | Automatic imports, insertion handlers, postfix templates (`expr.if`, `.match`, `.for`, `.var`, `.not`...) and signature help. |
 | Inlay hints | Inferred types, parameter names, implicit arguments and conversions, method chains. Type names are links to their declarations, an inferred definition type can be written into the source, and `scalaAnalyzer.inlayHints.*` selects the kinds shown. |
 | Navigation | Definitions (through the plugin's Go to Declaration), type definitions, references, implementations, go to super, go to test (from a class to its tests and back), call/type hierarchies and workspace symbols; library sources and decompiled classes. |
 | Documentation | Markdown hover with declaration context, parameters, return values and linked references. |
@@ -179,12 +179,13 @@ is partial, indexes are kept in memory, and each process serves one workspace.
 - Inline (`refactor.inline`) is offered for a `val`, a `def` or a type alias that only its own file can see (a local
   or a private member), at the declaration or at a usage, as two actions: inline every usage and remove the
   declaration, or inline this usage only. As in the IDE, it is not offered where the plugin refuses (for example a
-  recursive or generic method, a method used without a call, a `val` of a function type); `var`s are left out too. A public or
-  `protected` member, a `private[pkg]` one and a Scala 3 top-level private one are left out even when no other file
-  uses them: Inline of a member used in several files is unavailable. The IDE's choice to keep the declaration after
+  recursive or generic method, a method used without a call, a `val` of a function type); `var`s are left out too. A
+  public or `protected` member, a `private[pkg]` one and a Scala 3 top-level private one are left out even when no
+  other file uses them: Inline of a member used in several files is unavailable. The IDE's choice to keep the declaration after
   inlining every usage is not offered.
-- Some completion contributors require IDE services that are unavailable. Live templates have no snippet tab stops;
-  completion followed by handler edits takes two undo steps.
+- Some completion contributors require IDE services that are unavailable. Live templates, postfix templates among
+  them, have no snippet tab stops: the caret goes where their end is; completion followed by handler edits takes two
+  undo steps.
 - Inlay hints are text labels without the IDE's interactive presentation or range hints (`1 to 5`). Their settings
   are the host's, read from `workspace/configuration` (`scalaAnalyzer.inlayHints.*`) by a client that answers it; the
   IDE's X-Ray mode, hint length and per-method parameter-name exclusions are not offered. Label parts get their

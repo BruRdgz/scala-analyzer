@@ -31,7 +31,8 @@ class AdapterSurfaceTest extends munit.FunSuite {
         org.jetbrains.plugins.scala.ScalaLanguage.INSTANCE, null).asScala.map(_.getClass.getName).toSet
       val declared = ScalaPsiHost.scalaCompletionContributors(
         sys.props("scalaanalyzer.scalaPluginJars").split(java.io.File.pathSeparator).toSeq.map(java.nio.file.Path.of(_))).map(_.implementation).toSet
-      assertEquals(contributors, declared)
+      // The host adds its postfix template contributor to the plugin's.
+      assertEquals(contributors, declared + classOf[scalaanalyzer.language.PostfixCompletion.Contributor].getName)
       assert(declared.exists(_.endsWith("ScalaClassNameCompletionContributor")), declared)
       val weighers = com.intellij.psi.WeighingService.getWeighers(com.intellij.codeInsight.completion.CompletionService.RELEVANCE_KEY)
         .asScala.map(_.toString).toSeq

@@ -492,6 +492,61 @@ class EditingTest extends munit.FunSuite {
     }
   }
 
+  // Before and after texts are those of the plugin's postfixTemplate/tabCompletion test data.
+  test("postfix templates complete after a dot and expand to what the IDE writes, caret included") {
+    def program(body: String) = s"object Example {\n  def foo(o: AnyRef, list: List[Int]) = {\n    $body\n  }\n}\n"
+    val cases = Seq(
+      ("if", "o != null.if", "if (o != null) {<caret>}"),
+      ("match", "o.match", "o match {\n      case <caret> =>\n    }"),
+      ("for", "list.for", "for (elem <- list) {<caret>}"),
+      ("var", "2.var + 5", "val i: Int = 2\n    i<caret> + 5"),
+      ("not", "if (1 == 1.not) {}", "if (!(1 == 1)<caret>) {}"),
+      ("par", "o.toString.par", "(o.toString)<caret>"),
+      ("notnull", "o.notnull", "if (o != null) {<caret>}"),
+    )
+    for ((lookup, typed, expected) <- cases) {
+      // The caret is at the end of the typed key.
+      val marked = program(typed.replaceFirst(s"\\.$lookup", s".$lookup<caret>"))
+      val file = scalaFile("Postfix", marked.replace("<caret>", ""))
+      try {
+        val offset = marked.indexOf("<caret>")
+        val items = host.completion(file, offset).items
+        val item = items.find(_.lookup == lookup).getOrElse(fail(s"$typed: no item $lookup"))
+        assertEquals(item.kind, Completion.Kind.Snippet, typed)
+        assert(item.hasHandler, typed)
+        assertEquals(choose(file, offset, lookup), program(expected), typed)
+      } finally host.closeSource(file)
+    }
+  }
+
+  test("a postfix template is offered with its example, for the key typed so far") {
+    // `if` applies to a Boolean expression only; the caret is at the end of the key, as when typing it.
+    for (typed <- Seq("i", "if")) {
+      val text = s"object Keyed { def foo(flag: Boolean) = flag.$typed }"
+      val file = scalaFile("Keyed", text)
+      try {
+        val item = host.completion(file, text.indexOf(s"flag.$typed") + s"flag.$typed".length).items
+          .find(_.lookup == "if").getOrElse(fail(s"no item if after `$typed`"))
+        assertEquals((item.typeText, item.prefixText), (Some("if (expr)"), typed), typed)
+      } finally host.closeSource(file)
+    }
+  }
+
+  test("no postfix template is offered after a package or type qualifier") {
+    val cases = Seq(
+      ("import scala.col\nobject ImportQualifier", "scala.col"),
+      ("object TypeQualifier { val x: scala.Lis = null }", "scala.Lis"),
+    )
+    for ((text, qualified) <- cases) {
+      val file = scalaFile("Qualifier", text)
+      try {
+        val items = host.completion(file, text.indexOf(qualified) + qualified.length).items
+        assert(items.nonEmpty, qualified)
+        assertEquals(items.filter(_.kind == Completion.Kind.Snippet), Seq.empty, qualified)
+      } finally host.closeSource(file)
+    }
+  }
+
   test("a chosen class is imported by its package prefix when the code style asks for it") {
     val manager = com.intellij.psi.codeStyle.CodeStyleSettingsManager.getInstance(host.project)
     val settings = host.read(manager.getCurrentSettings.clone())

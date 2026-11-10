@@ -1035,7 +1035,9 @@ final class ScalaLanguageServer(
     override def completion(params: CompletionParams): CompletableFuture[LspEither[java.util.List[CompletionItem], CompletionList]] =
       onSource("completion", params.getTextDocument, LspEither.forRight(new CompletionList())) { (s, path) =>
         val choices = s.completion(path, lineColumn(params.getPosition))
-        val items = choices.items.zipWithIndex.map((choice, rank) => completionItem(params.getTextDocument.getUri, choice, rank))
+        // A postfix template exists only through the expansion that follows its insertion.
+        val offered = choices.items.filter(choice => appliesEdits || choice.suggestion.kind != Completion.Kind.Snippet)
+        val items = offered.zipWithIndex.map((choice, rank) => completionItem(params.getTextDocument.getUri, choice, rank))
         LspEither.forRight(new CompletionList(choices.incomplete, items.asJava))
       }
 
@@ -1675,6 +1677,7 @@ final class ScalaLanguageServer(
     case Completion.Kind.Variable => CompletionItemKind.Variable
     case Completion.Kind.Value => CompletionItemKind.Value
     case Completion.Kind.Keyword => CompletionItemKind.Keyword
+    case Completion.Kind.Snippet => CompletionItemKind.Snippet
   }
 
   /** Encodes a ranked suggestion and attaches insertion replay when the client can apply follow-up edits. */
