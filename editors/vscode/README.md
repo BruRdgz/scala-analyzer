@@ -11,7 +11,8 @@ for Scala files and also handles Java files in that workspace.
 
 Click the **Scala** status bar item for a menu, or run the commands from the palette (category `scala-analyzer`):
 **Compile Build**, **Reimport Build**, **Inspect Code**, **Clear Inspection Results**, **Restart Server**,
-**Show Type Info**, **Go to Super**, **Go to Test**, **Override Members…**, **Show Status** and **Show Log File**.
+**Show Type Info**, **Go to Super**, **Go to Test**, **Override Members…**, **Toggle X-Ray**, **Show Status** and
+**Show Log File**.
 Compiling is also the workspace build task, so **Ctrl+Shift+B** runs it (or add
 `{ "type": "scala-analyzer", "task": "compile" }` to `tasks.json`). Its outcome shows briefly in the status bar; a
 failed compile opens the Problems panel with the diagnostics.
@@ -30,6 +31,13 @@ their names, not uTest ones.
 does, and overrides the ones you pick; it is in the editor context menu for Scala files. It has no default key; bind one
 with the command `scalaAnalyzer.chooseMembersToOverride`. Implementing the abstract members is a code action (the light
 bulb, **Implement members**).
+
+**Toggle X-Ray** (Ctrl+Alt+X, Cmd+Alt+X on macOS, in Scala editors) flips `scalaAnalyzer.inlayHints.xRay`, in the
+workspace settings when they set it and in the user settings otherwise. It is the plugin's X-Ray mode, which the IDE
+shows while you hold Ctrl: the types of all definitions, of lambda parameters, placeholders and pattern variables,
+parameter names, by-name arguments, `.apply` calls, method chains and implicit arguments. In Scala 3 files, whose
+errors come from the compiler, the IDE shows type and method chain hints only in X-Ray mode, so this is how to see
+them.
 
 **Inspect Code** runs the server's inspections over every Scala source of the build (not the generated ones) and lists
 their problems, with a cancellable progress notification. The results are a snapshot: the next run replaces them and

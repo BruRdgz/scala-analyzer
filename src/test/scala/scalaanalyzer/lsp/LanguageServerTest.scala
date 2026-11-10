@@ -1280,6 +1280,14 @@ class LanguageServerTest extends munit.FunSuite {
     } finally change(original, 381)
   }
 
+  /** The client's inlay hint settings change: the server reads them and asks for the hints again. */
+  private def settings(answer: JsonObject): Unit = {
+    Client.hintRefreshes.clear()
+    Client.inlayHintSettings = answer
+    server.getWorkspaceService.didChangeConfiguration(new DidChangeConfigurationParams(answer))
+    assert(Client.hintRefreshes.poll(1, TimeUnit.MINUTES) != null, "the server did not ask for the hints again")
+  }
+
   test("inlay hints follow the settings the client answers") {
     val text = """package app
                  |object Hints {
@@ -1292,13 +1300,6 @@ class LanguageServerTest extends munit.FunSuite {
       new VersionedTextDocumentIdentifier(main.toUri.toString, version), JavaList.of(new TextDocumentContentChangeEvent(value))))
     def labels(): Seq[String] = server.getTextDocumentService.inlayHint(new InlayHintParams(document(main),
       new Range(new Position(0, 0), new Position(6, 0)))).get(1, TimeUnit.MINUTES).asScala.map(labelText).toSeq
-    /** The client's settings change: the server reads them and asks for the hints again. */
-    def settings(answer: JsonObject): Unit = {
-      Client.hintRefreshes.clear()
-      Client.inlayHintSettings = answer
-      server.getWorkspaceService.didChangeConfiguration(new DidChangeConfigurationParams(answer))
-      assert(Client.hintRefreshes.poll(1, TimeUnit.MINUTES) != null, "the server did not ask for the hints again")
-    }
     val original = Files.readString(main).replace("val text: String", "val text: Int")
     try {
       change(text, 382)
@@ -1317,6 +1318,32 @@ class LanguageServerTest extends munit.FunSuite {
     } finally {
       settings(new JsonObject)
       change(original, 383)
+    }
+  }
+
+  // The plugin takes the type hints of a Scala 3 file, whose errors come from the compiler, only in X-Ray mode.
+  test("X-Ray mode shows the type hints of a Scala 3 file, and the hints follow it off again") {
+    val service = server.getTextDocumentService
+    val text = "package core3\nobject Names3:\n  def names = Option(1).toList\n"
+    def labels(): Seq[String] = service.inlayHint(new InlayHintParams(document(greet3),
+      new Range(new Position(0, 0), new Position(3, 0)))).get(1, TimeUnit.MINUTES).asScala.map(labelText).toSeq
+    def xRay(enabled: Boolean): Unit = {
+      val answer = new JsonObject
+      answer.addProperty("xRay", enabled)
+      settings(answer)
+    }
+    service.didOpen(new DidOpenTextDocumentParams(new TextDocumentItem(greet3.toUri.toString, "scala", 1, text)))
+    try {
+      assert(!labels().contains(": List[Int]"), labels())
+
+      xRay(true)
+      assert(labels().contains(": List[Int]"), labels())
+
+      xRay(false)
+      assert(!labels().contains(": List[Int]"), labels())
+    } finally {
+      settings(new JsonObject)
+      service.didClose(new DidCloseTextDocumentParams(document(greet3)))
     }
   }
 

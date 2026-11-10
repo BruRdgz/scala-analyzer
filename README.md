@@ -188,7 +188,11 @@ is partial, indexes are kept in memory, and each process serves one workspace.
   undo steps.
 - Inlay hints are text labels without the IDE's interactive presentation or range hints (`1 to 5`). Their settings
   are the host's, read from `workspace/configuration` (`scalaAnalyzer.inlayHints.*`) by a client that answers it; the
-  IDE's X-Ray mode, hint length and per-method parameter-name exclusions are not offered. Label parts get their
+  IDE's hint length and per-method parameter-name exclusions are not offered. X-Ray mode is a setting
+  (`scalaAnalyzer.inlayHints.xRay`, off by default; the VS Code extension's **Toggle X-Ray** flips it) rather than a
+  held key, with the plugin's default X-Ray hints but not its editor changes (indent guides, method separators). In
+  Scala 3 files, whose errors come from the compiler, the plugin shows type and method chain hints only in X-Ray mode,
+  as in the IDE. Label parts get their
   locations and tooltips from `inlayHint/resolve`, so a client without resolve support shows plain labels, and a
   type written from a hint is the hint's text: it adds no import. Project IDE code-style
   settings are not imported, and range formatting uses the IntelliJ formatter even when scalafmt is configured.

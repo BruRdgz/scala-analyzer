@@ -303,6 +303,7 @@ final class ScalaLanguageServer(
       parameterNames = toggle("parameterNames", defaults.parameterNames),
       methodChains = toggle("methodChains", defaults.methodChains),
       implicits = toggle("implicits", defaults.implicits),
+      xRay = toggle("xRay", defaults.xRay),
     )
   }
 

@@ -32,6 +32,14 @@
   variable types, obvious types, parameter names, method chains, implicits), read with `workspace/configuration` once the
   client is ready and again after `workspace/didChangeConfiguration`; the server then sends `workspace/inlayHint/refresh`.
   The defaults are the IDE's, except implicit hints, which stay on.
+- X-Ray mode is the setting `scalaAnalyzer.inlayHints.xRay` (off by default), applied and refreshed like the other
+  inlay hint settings. It shows what the plugin shows in X-Ray mode with the IDE's default X-Ray options: the types
+  of all `def`s, `val`s and `var`s without one (obvious ones too), of lambda parameters, placeholders and pattern
+  variables, parameter names, by-name arguments, `.apply` calls and method chains, and implicit hints even when they
+  are off. Scala 3 files, whose errors come from the compiler, get type and method chain hints only in X-Ray mode, as
+  in the IDE. Range hints and the editor's indent guides and method separators stay out. The VS Code extension adds
+  **Toggle X-Ray** (Ctrl+Alt+X in Scala editors, Cmd+Alt+X on macOS), which flips the setting in the workspace
+  settings when they hold it and in the user settings otherwise.
 - `scalaAnalyzer/inspect` also answers `inspections`: the display name and group path (such as `Scala`, `General`) of
   each inspection that reported a problem, read from the plugin's registrations and keyed by the `code` of its
   diagnostics. Unused imports are described by the unused-declaration registration, whose name and group they share.
