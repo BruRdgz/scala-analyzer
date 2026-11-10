@@ -37,6 +37,11 @@
   range, code and message). They include the plugin's suppression actions (`//noinspection <id>` for the statement,
   definition, class or file), previewed like any fix; unused imports are suppressed under `ScalaUnusedImport`. A request
   that carries inspection diagnostics gets their fixes even before the file's diagnostics were computed.
+- Inline (`refactor.inline` code actions) for `val`s, `def`s and type aliases that only their own file can see: at the
+  declaration or at a usage, **Inline all and remove the declaration**; at a usage of a declaration with other usages,
+  also **Inline this occurrence**. They run the plugin's inline processors on a preview copy and are not offered
+  where the plugin's handlers refuse, or for members other files can see. The server advertises the `refactor.inline`
+  kind.
 
 ## 0.2.0 — 2026-11-09
 

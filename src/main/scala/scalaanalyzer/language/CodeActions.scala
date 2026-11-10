@@ -57,7 +57,7 @@ object CodeActions {
 }
 
 /**
- * Previews plugin intentions, annotator fixes, surround and unwrap actions as source edits.
+ * Previews plugin intentions, annotator fixes, surround and unwrap actions and inlinings as source edits.
  *
  * Callers hold PSI read access. Actions run against copies through the platform's preview contract;
  * unsupported previews are disabled with a reason when the action is known to be available.
@@ -82,7 +82,7 @@ final class CodeActions(intentionClasses: Seq[String], descriptorClasses: Seq[St
   }
 
   /**
-   * Collects previewed fixes, intentions and surround actions for a source range.
+   * Collects previewed fixes, intentions, surround actions and inlinings for a source range.
    *
    * Unusable previews are returned disabled when availability was established. Cancellation propagates;
    * failures inside an action's availability or preview check are logged before continuing with other choices.
@@ -172,7 +172,8 @@ final class CodeActions(intentionClasses: Seq[String], descriptorClasses: Seq[St
         }
       }
 
-      (typeImports(file, range, problems) ++ choices ++ surrounded ++ unwrapped(file, range, editor)).distinct
+      (typeImports(file, range, problems) ++ choices ++ surrounded ++ unwrapped(file, range, editor) ++
+        inlinings(file, range)).distinct
     }
   }
 
@@ -214,6 +215,34 @@ final class CodeActions(intentionClasses: Seq[String], descriptorClasses: Seq[St
             HostLog.warn(s"unwrap action $title could not be previewed", e)
             Choice(title, "refactor.rewrite", Seq.empty, Some("This action is unavailable in the headless host."))
         }
+      }
+    }
+  }
+
+  /**
+   * Offers the inlinings at the range's start, each previewed on its own copy.
+   *
+   * A failure while looking for them leaves them out; one while previewing leaves the action disabled.
+   */
+  private def inlinings(file: ScalaFile, range: TextRange): Seq[Choice] = {
+    val found =
+      try Inline.actions(file, range.getStartOffset)
+      catch {
+        case e: ProcessCanceledException => throw e
+        case e @ (NonFatal(_) | _: LinkageError) =>
+          HostLog.warn("inlinings could not be looked up", e)
+          Seq.empty
+      }
+
+    found.map { action =>
+      try {
+        val (result, _) = preview(file)(action.perform)
+        Choice(action.title, "refactor.inline", result.edits, None)
+      } catch {
+        case e: ProcessCanceledException => throw e
+        case e @ (NonFatal(_) | _: LinkageError) =>
+          HostLog.warn(s"code action ${action.title} could not be previewed", e)
+          Choice(action.title, "refactor.inline", Seq.empty, Some("This inlining could not be previewed."))
       }
     }
   }

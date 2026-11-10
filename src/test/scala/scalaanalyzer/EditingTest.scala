@@ -9,7 +9,7 @@ import org.jetbrains.plugins.scala.lang.psi.api.ScalaFile
 import org.jetbrains.plugins.scala.lang.psi.api.statements.ScFunction
 
 import scalaanalyzer.TestHost.{applyEdits, choose}
-import scalaanalyzer.language.{ChangeEngine, Completion, ProjectSearch}
+import scalaanalyzer.language.{ChangeEngine, CodeActions, Completion, ProjectSearch}
 import scalaanalyzer.platform.{CallLog, HostDispatchThread, HostLock, HostLog, RequestEditor}
 
 import java.nio.file.Path
@@ -629,6 +629,119 @@ class EditingTest extends munit.FunSuite {
         assertEquals(applyEdits(original, chosen.edits).replaceAll("\\s+", " "), expected)
         assertEquals(host.read(file.getText), original)
       } finally host.closeSource(file)
+    }
+  }
+
+  // Expected texts follow the plugin's inline tests (testdata/refactoring/inline), moved into a block or a private
+  // member.
+  test("inline actions replace the usages of a declaration that only its file sees, on a copy") {
+    val all = "Inline all and remove the declaration"
+    val one = "Inline this occurrence"
+    final case class InlineCase(name: String, offered: Seq[String], title: String, marked: String, expected: String)
+
+    val cases = Seq(
+      InlineCase("every usage of a local val, from its declaration", Seq(all), all,
+        """object InlineVal {
+          |  def f: Int = {
+          |    val <caret>r = 33
+          |    r + r
+          |  }
+          |}
+          |""".stripMargin,
+        """object InlineVal {
+          |  def f: Int = {
+          |    33 + 33
+          |  }
+          |}
+          |""".stripMargin),
+      InlineCase("every usage of a local val, from a usage", Seq(all, one), all,
+        """object InlineVal {
+          |  def f: Int = {
+          |    val r = 33
+          |    r + <caret>r
+          |  }
+          |}
+          |""".stripMargin,
+        """object InlineVal {
+          |  def f: Int = {
+          |    33 + 33
+          |  }
+          |}
+          |""".stripMargin),
+      InlineCase("one usage of a local val", Seq(all, one), one,
+        """object InlineVal {
+          |  def f: Int = {
+          |    val r = 33
+          |    r + <caret>r
+          |  }
+          |}
+          |""".stripMargin,
+        """object InlineVal {
+          |  def f: Int = {
+          |    val r = 33
+          |    r + 33
+          |  }
+          |}
+          |""".stripMargin),
+      InlineCase("a local def with parameters", Seq(all), all,
+        """object InlineDef {
+          |  def f: String = {
+          |    def <caret>label(a: Int, b: String): String = a.toString + b
+          |    label(5, "foo")
+          |  }
+          |}
+          |""".stripMargin,
+        """object InlineDef {
+          |  def f: String = {
+          |    5.toString + "foo"
+          |  }
+          |}
+          |""".stripMargin),
+      InlineCase("a private type alias", Seq(all), all,
+        """object InlineAlias {
+          |  private type <caret>My = Int
+          |  private val first: My = 3
+          |  private val second: My = 4
+          |}
+          |""".stripMargin,
+        """object InlineAlias {
+          |  private val first: Int = 3
+          |  private val second: Int = 4
+          |}
+          |""".stripMargin),
+    )
+    val refused = Seq(
+      "a public member" -> "object Public { val <caret>a = 1; def f: Int = a }",
+      "a val that is never used" -> "object Unused { def f: Int = { val <caret>a = 1; 2 } }",
+      "a var" -> "object Variable { def f: Int = { var <caret>a = 1; a + a } }",
+      "a name of a destructuring" -> "object Pair { def f: Int = { val (<caret>a, b) = (1, 2); a + b } }",
+      "a method used without a call" ->
+        "object Reference { def f: Int => Int = { def <caret>inc(i: Int) = i + 1; inc } }",
+      "a recursive method" ->
+        "object Recursive { def f: Int = { def <caret>down(i: Int): Int = if (i == 0) 0 else down(i - 1); down(3) } }",
+    )
+    def inlinings(marked: String): (ScalaFile, String, Seq[CodeActions.Choice]) = {
+      val original = marked.replace("<caret>", "")
+      val file = scalaFile("Inlined", original)
+      val at = marked.indexOf("<caret>")
+
+      (file, original, host.codeActions(file, new TextRange(at, at)).filter(_.kind == "refactor.inline"))
+    }
+
+    for (testCase <- cases) {
+      val (file, original, actions) = inlinings(testCase.marked)
+      try {
+        assertEquals(actions.map(_.title), testCase.offered, testCase.name)
+        val chosen = actions.find(_.title == testCase.title).getOrElse(fail(actions.toString))
+        assertEquals(chosen.disabled, None)
+        assertEquals(applyEdits(original, chosen.edits), testCase.expected, testCase.name)
+        assertEquals(host.read(file.getText), original)
+      } finally host.closeSource(file)
+    }
+    for ((name, marked) <- refused) {
+      val (file, _, actions) = inlinings(marked)
+      try assertEquals(actions, Seq.empty, name)
+      finally host.closeSource(file)
     }
   }
 

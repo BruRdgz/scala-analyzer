@@ -316,7 +316,8 @@ class LanguageServerTest extends munit.FunSuite {
     assertEquals(methods("textDocument/signatureHelp").getAsJsonArray("retriggerCharacters").asScala.map(_.getAsString).toSeq,
       Seq(","))
     assertEquals(methods("textDocument/codeAction").getAsJsonArray("codeActionKinds").asScala.map(_.getAsString).toSeq,
-      Seq(CodeActionKind.QuickFix, CodeActionKind.RefactorRewrite, CodeActionKind.SourceOrganizeImports))
+      Seq(CodeActionKind.QuickFix, CodeActionKind.RefactorRewrite, CodeActionKind.RefactorInline,
+        CodeActionKind.SourceOrganizeImports))
   }
 
   test("discovers suite and test code lenses with plugin runner selections and BSP target identities") {
@@ -1435,6 +1436,42 @@ class LanguageServerTest extends munit.FunSuite {
       val combined = service.codeAction(params).get(1, TimeUnit.MINUTES).asScala.map(_.getRight.getKind).toSet
       assertEquals(combined, Set(CodeActionKind.SourceOrganizeImports, CodeActionKind.QuickFix))
     } finally change(original, 29)
+  }
+
+  test("inline is offered for a declaration only its file sees, and not for a member used from another module") {
+    val original = Files.readString(main).replace("val text: String", "val text: Int")
+    val local = "package app\nobject Inlining {\n  def f: Int = {\n    val r = 33\n    r + r\n  }\n}\n"
+    val crossModule = "package app\nimport core.*\nobject UsesGreeting { val t: String = Greeting(\"x\").text }\n"
+    val service = server.getTextDocumentService
+    def change(value: String, version: Int): Unit = service.didChange(new DidChangeTextDocumentParams(
+      new VersionedTextDocumentIdentifier(main.toUri.toString, version),
+      java.util.List.of(new TextDocumentContentChangeEvent(value))))
+    def inlinings(path: Path, at: Position): Seq[CodeAction] = {
+      val context = new CodeActionContext(java.util.List.of())
+      context.setOnly(java.util.List.of(CodeActionKind.RefactorInline))
+      service.codeAction(new CodeActionParams(document(path), new Range(at, at), context))
+        .get(1, TimeUnit.MINUTES).asScala.map(_.getRight).toSeq
+    }
+    try {
+      change(local, 300)
+      val actions = inlinings(main, new Position(3, 8))
+      assertEquals(actions.map(_.getTitle), Seq("Inline all and remove the declaration"))
+      assertEquals(actions.head.getKind, CodeActionKind.RefactorInline)
+      assertEquals(actions.head.getDisabled, null)
+      val edit = actions.head.getEdit.getDocumentChanges.get(0).getLeft
+      assertEquals(edit.getTextDocument.getVersion, Integer.valueOf(300))
+      val snapshot = new com.intellij.openapi.editor.impl.DocumentImpl(local, true)
+      def offset(p: Position) = snapshot.getLineStartOffset(p.getLine) + p.getCharacter
+      val inlined = edit.getEdits.asScala.toSeq.reverse.foldLeft(local)((current, textEdit) =>
+        current.substring(0, offset(textEdit.getRange.getStart)) + textEdit.getNewText +
+          current.substring(offset(textEdit.getRange.getEnd)))
+      assertEquals(inlined, local.replace("    val r = 33\n    r + r", "    33 + 33"))
+
+      // `text` is public and used from `app`: the declaration (line 3 of Greeting.scala) and the call offer nothing.
+      assertEquals(inlinings(greeting, new Position(3, 6)), Seq.empty)
+      change(crossModule, 301)
+      assertEquals(inlinings(main, new Position(2, crossModule.split("\n")(2).indexOf(".text") + 1)), Seq.empty)
+    } finally change(original, 302)
   }
 
   test("inspection diagnostics preserve IDs and tags and fixes return versioned edits") {
