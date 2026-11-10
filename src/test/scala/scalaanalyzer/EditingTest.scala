@@ -10,7 +10,10 @@ import org.jetbrains.plugins.scala.lang.psi.api.ScalaFile
 import org.jetbrains.plugins.scala.lang.psi.api.statements.ScFunction
 
 import scalaanalyzer.TestHost.{applyEdits, choose}
-import scalaanalyzer.language.{ChangeEngine, CodeActions, Completion, MemberOverrides, ProjectSearch}
+import scalaanalyzer.build.{DocumentCompiler, ScalafmtFormatting}
+import scalaanalyzer.language.{
+  ChangeEngine, CodeActions, Completion, MemberOverrides, ProjectLanguageOperations, ProjectSearch,
+}
 import scalaanalyzer.platform.{CallLog, HostDispatchThread, HostLock, HostLog, RequestEditor}
 
 import java.nio.file.Path
@@ -323,6 +326,125 @@ class EditingTest extends munit.FunSuite {
       case f: ScalaFile => f
       case other => fail(s"not Scala: $other")
     }
+
+  /**
+   * Runs `query` on the language operations over one source, whose text is `marked` without its `|`, the caret's place.
+   *
+   * @param fileName the source's name, whose extension picks its language
+   * @param marked the source's text, with `|` where the caret is
+   * @param query reads the operations, the source's path, its text and the caret's position
+   */
+  private def atCaret[A](fileName: String, marked: String)(
+      query: (ProjectLanguageOperations, Path, String, LineColumn) => A): A = {
+    val text = marked.replace("|", "")
+    val before = marked.substring(0, marked.indexOf('|'))
+    val caret = LineColumn(before.count(_ == '\n'), before.length - (before.lastIndexOf('\n') + 1))
+    val path = Path.of(s"/editing/$fileName")
+    val file = host.openFile(path, text, module)
+    val formatterCache = Path.of(sys.props("scalaanalyzer.stateDir")).resolve("scalafmt")
+
+    try Using.resources(new DocumentCompiler, new ScalafmtFormatting(formatterCache)) { (compiler, scalafmt) =>
+      query(new ProjectLanguageOperations(host, Path.of("/editing"), compiler, scalafmt, _ => file), path, text, caret)
+    } finally host.closeSource(file)
+  }
+
+  /** The identifier, or else the run of operator characters, that starts at a position of `text`. */
+  private def nameAt(text: String, at: LineColumn): String = {
+    val rest = text.drop(text.linesWithSeparators.take(at.line).map(_.length).sum + at.column)
+
+    if (rest.head.isUnicodeIdentifierPart) rest.takeWhile(_.isUnicodeIdentifierPart)
+    else rest.takeWhile("+-*/<>=!&|^%~?:#@\\".contains(_))
+  }
+
+  // The IDE looks around the caret (TargetElementUtil.adjustOffset, and the platform's leavesAroundOffset), so that a
+  // caret right after a name stands for it; at the start of a name the name is to the right of the caret.
+  test("go to definition finds the name around a caret as the IDE does") {
+    final case class Case(label: String, fileName: String, marked: String, definitions: Seq[String])
+    val cases = Seq(
+      Case("Scala, before a call's arguments", "Sample.scala",
+        "object Sample {\n  def foo(i: Int): Int = i\n  val x = foo|(1)\n}\n", Seq("foo")),
+      Case("Scala, at the end of a line", "Sample.scala",
+        "object Sample {\n  def foo: Int = 1\n  val x = foo|\n}\n", Seq("foo")),
+      Case("Scala, in a name", "Sample.scala", "object Sample {\n  def foo: Int = 1\n  val x = f|oo\n}\n", Seq("foo")),
+      Case("Scala, before a member selection", "Sample.scala",
+        "object Sample {\n  def foo: Int = 1\n  val x = Sample|.foo\n}\n", Seq("Sample")),
+      Case("Scala, at the start of a selected member", "Sample.scala",
+        "object Sample {\n  def foo: Int = 1\n  val x = Sample.|foo\n}\n", Seq("foo")),
+      Case("Scala, an operator after a value", "Sample.scala",
+        "class Point {\n  def *(i: Int): Point = this\n}\nobject Sample {\n  val p = new Point\n  val q = p|*2\n}\n",
+        Seq("*")),
+      Case("Scala, after a closing parenthesis", "Sample.scala",
+        "object Sample {\n  def foo(i: Int): Int = i\n  val x = foo(1)| + 1\n}\n", Seq.empty),
+      Case("Java, before a call's arguments", "Sample.java",
+        "class Sample {\n  int foo(int i) { return i; }\n  int x = foo|(1);\n}\n", Seq("foo")),
+      Case("Java, before an operator", "Sample.java", "class Sample {\n  int x = 1;\n  int y = x|+2;\n}\n", Seq("x")),
+      Case("Java, at the end of a statement", "Sample.java",
+        "class Sample {\n  int x = 1;\n  int y = x|;\n}\n", Seq("x")),
+      Case("Java, before a member selection", "Sample.java",
+        "class Sample {\n  static int foo() { return 1; }\n  int y = Sample|.foo();\n}\n", Seq("Sample")),
+      Case("Java, at the start of a selected member", "Sample.java",
+        "class Sample {\n  static int foo() { return 1; }\n  int y = Sample.|foo();\n}\n", Seq("foo")),
+    )
+
+    for (c <- cases) atCaret(c.fileName, c.marked) { (operations, path, text, caret) =>
+      val definitions = operations.definition(path, caret).map((_, position) => nameAt(text, position))
+
+      assertEquals(definitions, c.definitions, c.label)
+    }
+  }
+
+  test("go to type definition finds the name around a caret as the IDE does") {
+    final case class Case(label: String, fileName: String, marked: String)
+    val cases = Seq(
+      Case("Scala, a value before a member selection", "Sample.scala",
+        "class Point\nobject Sample {\n  val p = new Point\n  val q = p|.toString\n}\n"),
+      Case("Scala, a value at the end of a line", "Sample.scala",
+        "class Point\nobject Sample {\n  val p = new Point\n  val q = p|\n}\n"),
+      Case("Scala, a declared name", "Sample.scala", "class Point\nobject Sample {\n  val p| = new Point\n}\n"),
+      Case("Java, a field before a member selection", "Sample.java",
+        "class Point {}\nclass Sample {\n  Point p;\n  int h = p|.hashCode();\n}\n"),
+      Case("Java, a field at the end of a statement", "Sample.java",
+        "class Point {}\nclass Sample {\n  Point p;\n  Point q = p|;\n}\n"),
+      Case("Java, a declared name", "Sample.java", "class Point {}\nclass Sample {\n  Point p|;\n}\n"),
+    )
+
+    for (c <- cases) atCaret(c.fileName, c.marked) { (operations, path, text, caret) =>
+      val types = operations.typeDefinition(path, caret).map((_, position) => nameAt(text, position))
+
+      assertEquals(types, Seq("Point"), c.label)
+    }
+  }
+
+  test("hover, highlights and renaming find the name before a caret as the IDE does") {
+    final case class Case(label: String, fileName: String, marked: String, name: String, hover: String)
+    val declaration = LineColumn(1, 6)
+    val usage = LineColumn(2, 10)
+    val cases = Seq(
+      Case("Scala, before a call's arguments", "Sample.scala",
+        "object Sample {\n  def foo(i: Int): Int = i\n  val x = foo|(1)\n}\n", "foo", "def foo(i: Int): Int"),
+      Case("Scala, at the end of a line", "Sample.scala",
+        "object Sample {\n  val a = 1\n  val b = a|\n}\n", "a", "val a: Int"),
+      Case("Scala, a declared name", "Sample.scala",
+        "object Sample {\n  val a| = 1\n  val b = a\n}\n", "a", "val a: Int"),
+      Case("Java, before an operator", "Sample.java",
+        "class Sample {\n  int x = 1;\n  int y = x|+2;\n}\n", "x", "int x"),
+      Case("Java, at the end of a statement", "Sample.java",
+        "class Sample {\n  int x = 1;\n  int y = x|;\n}\n", "x", "int x"),
+    )
+
+    for (c <- cases) atCaret(c.fileName, c.marked) { (operations, path, _, caret) =>
+      val hover = operations.hover(path, caret)
+      val occurrences = operations.highlights(path, caret).map(_.range.start).sortBy(p => (p.line, p.column))
+      val renamed = operations.prepareRename(path, caret)
+      // The name the caret touches is the one that renaming replaces: the occurrence on the caret's line.
+      val touched = Seq(declaration, usage).filter(_.line == caret.line).head
+      val name = LineRange(touched, touched.copy(column = touched.column + c.name.length))
+
+      assert(hover.exists(_.contains(c.hover)), s"hover, ${c.label}: $hover")
+      assertEquals(occurrences, Seq(declaration, usage), s"highlights, ${c.label}")
+      assertEquals(renamed, name, s"rename, ${c.label}")
+    }
+  }
 
   test("completion renders member signatures, and its handler adds the parentheses once chosen") {
     val text = "object Complete { val emoji = \"😀\"; def message(n: Int): String = \"hi\"; Complete.mes }"

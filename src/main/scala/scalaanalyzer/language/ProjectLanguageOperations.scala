@@ -1,5 +1,6 @@
 package scalaanalyzer.language
 
+import com.intellij.codeInsight.TargetElementUtil
 import com.intellij.codeInsight.highlighting.{JavaReadWriteAccessDetector, ReadWriteAccessDetector}
 import com.intellij.ide.util.treeView.smartTree.TreeElement
 import com.intellij.lang.annotation.HighlightSeverity
@@ -17,7 +18,7 @@ import com.intellij.psi.{
   SyntaxTraverser,
 }
 import com.intellij.psi.search.GlobalSearchScope
-import com.intellij.psi.util.{PsiTreeUtil, PsiTypesUtil, PsiUtilCore}
+import com.intellij.psi.util.{PsiTypesUtil, PsiUtilCore}
 import com.intellij.testIntegration.TestFinderHelper
 import org.jetbrains.plugins.scala.annotator.gutter.{ScalaGoToDeclarationHandler, ScalaGotoTypeDeclarationProvider}
 import org.jetbrains.plugins.scala.annotator.hints.Text
@@ -487,7 +488,7 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
    * Renders a referenced or declared symbol with its language's signature and documentation.
    *
    * @param path registered project-source path
-   * @param at referenced or declared symbol position
+   * @param at referenced or declared symbol position; a position just after a name stands for that name
    * @return Markdown with the signature in a fenced block, followed by the documentation when it can be read; `None`
    *         when no symbol is found or the plugin has no quick information for it
    */
@@ -495,9 +496,9 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
     val sourceFile = file(path)
     val atOffset = offset(document(sourceFile), at)
     // The referenced symbol, or the one declared at `at` when the cursor is on a declaration's name.
-    val subject = Option(sourceFile.findReferenceAt(atOffset)) match {
+    val subject = CaretTargets.reference(sourceFile, atOffset) match {
       case Some(reference) => Option(reference.resolve()).map(_ -> reference.getElement)
-      case None => declarationNamedAt(sourceFile, atOffset).map(declaration => declaration -> declaration)
+      case None => CaretTargets.declaration(sourceFile, atOffset).map(declaration => declaration -> declaration)
     }
 
     for {
@@ -532,13 +533,6 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
         None
     }
 
-  /** Finds a declaration whose name identifier contains `at`, when there is no reference at that offset. */
-  private def declarationNamedAt(file: PsiFile, at: Int): Option[PsiNameIdentifierOwner] =
-    Option(file.findElementAt(at)).flatMap { leaf =>
-      Option(PsiTreeUtil.getParentOfType(leaf, classOf[PsiNameIdentifierOwner]))
-        .filter(owner => owner.getNameIdentifier != null && owner.getNameIdentifier.getTextRange.contains(at))
-    }
-
   /**
    * Describes the type under a caret or of a selected expression, as the IDE's Type Info action does. Only Scala
    * files have it.
@@ -562,11 +556,12 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
    *
    * A Scala source asks the plugin's Go to Declaration, which also covers synthetic members (a case class's `apply`
    * leads to the case class), companions, `end` markers, `given` imports and package objects; when it has no target,
-   * and for a Java source, the reference at the position is resolved directly. A library declaration is located in
-   * its attached source or decompiled text, materialized as a read-only file under the host's state directory.
+   * and for a Java source, the references that the IDE's symbol lookup finds at the position are resolved directly. A
+   * library declaration is located in its attached source or decompiled text, materialized as a read-only file under
+   * the host's state directory.
    *
    * @param path registered project-source path
-   * @param at reference position
+   * @param at reference position; a position just after a name stands for that name
    * @return each declaration's file and the position of its name, distinct and ordered by file and position; empty
    *         when nothing resolves there or the declarations are in neither a project source nor a library file
    */
@@ -579,7 +574,11 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
     }
     val targets =
       if (pluginTargets.nonEmpty) pluginTargets
-      else Option(sourceFile.findReferenceAt(atOffset)).flatMap(reference => Option(reference.resolve())).toSeq
+      else CaretTargets.at(sourceFile, atOffset).toSeq.flatMap {
+        case CaretTargets.Target.Referenced(elements) => elements
+        // The IDE navigates from a declaration to itself; this method has never answered that.
+        case CaretTargets.Target.Declared(_) => Seq.empty
+      }
 
     locationsOf(targets)
   }
@@ -587,9 +586,11 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
   /** The targets of the plugin's Go to Declaration at an offset; empty when it has none there. */
   private def declarationTargets(file: ScalaFile, at: Int): Seq[PsiElement] =
     Using.resource(new RequestEditor(document(file), host.project, at)) { request =>
-      // The handler is given the editor, but only the file and the offset decide its targets.
+      // The handler is given the editor, but only the file and the offset decide its targets. The IDE gives it the leaf
+      // at the adjusted offset and the offset itself (`fromGTDProvidersInner`).
       val handler = new ScalaGoToDeclarationHandler
-      val targets = handler.getGotoDeclarationTargets(file.findElementAt(at), at, request.editor)
+      val leaf = file.findElementAt(TargetElementUtil.adjustOffset(file, document(file), at))
+      val targets = handler.getGotoDeclarationTargets(leaf, at, request.editor)
 
       Option(targets).map(_.toSeq).getOrElse(Seq.empty)
     }
@@ -649,27 +650,28 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
    * Library declarations are located as `definition` locates them.
    *
    * @param path registered project-source path
-   * @param at referenced or declared symbol position
+   * @param at referenced or declared symbol position; a position just after a name stands for that name
    * @return the declaration locations, distinct and in the order the type lookup finds them; empty when the symbol
    *         has no type declaration to navigate to
    */
   def typeDefinition(path: Path, at: LineColumn): Seq[(Path, LineColumn)] = host.read {
     val sourceFile = file(path)
     val atOffset = offset(document(sourceFile), at)
-    val symbol = Option(sourceFile.findReferenceAt(atOffset))
-      .flatMap(r => Option(r.resolve()))
-      .orElse(declarationNamedAt(sourceFile, atOffset))
+    val symbols = CaretTargets.at(sourceFile, atOffset).toSeq.flatMap {
+      case CaretTargets.Target.Referenced(elements) => elements
+      case CaretTargets.Target.Declared(element) => Seq(element)
+    }
 
-    val types = if (sourceFile.isInstanceOf[PsiJavaFile]) symbol.toSeq.flatMap {
+    val types = if (sourceFile.isInstanceOf[PsiJavaFile]) symbols.flatMap {
       case clazz: PsiClass => Seq(clazz)
       case variable: PsiVariable => Option(PsiTypesUtil.getPsiClass(variable.getType.getDeepComponentType)).toSeq
       case method: PsiMethod if method.isConstructor => Option(method.getContainingClass).toSeq
       case method: PsiMethod =>
         Option(method.getReturnType).flatMap(t => Option(PsiTypesUtil.getPsiClass(t.getDeepComponentType))).toSeq
       case _ => Seq.empty
-    } else symbol.flatMap { s =>
-      Option(new ScalaGotoTypeDeclarationProvider().getSymbolTypeDeclarations(s))
-    }.toSeq.flatten
+    } else symbols.flatMap { s =>
+      Option(new ScalaGotoTypeDeclarationProvider().getSymbolTypeDeclarations(s)).toSeq.flatten
+    }
 
     types.flatMap(sourceLocation).distinct.map(location => location.path -> location.position)
   }
@@ -816,7 +818,7 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
    * Validates the rename target and locates its name.
    *
    * @param path registered project-source path
-   * @param at referenced or declared symbol position
+   * @param at referenced or declared symbol position; a position just after a name stands for that name
    * @return start and end of the name to rename
    * @throws Rename.Refused when the position has no renameable project-source target or no name
    */
@@ -827,9 +829,12 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
     host.renameTarget(sourceFile, cursor)
 
     host.read {
-      val reference = Option(sourceFile.findReferenceAt(cursor))
+      val reference = CaretTargets.reference(sourceFile, cursor)
         .map(r => r.getRangeInElement.shiftRight(r.getElement.getTextRange.getStartOffset))
-      val name = reference.orElse(declarationNamedAt(sourceFile, cursor).map(_.getNameIdentifier.getTextRange))
+      val declaredName = CaretTargets.declaration(sourceFile, cursor).collect {
+        case owner: PsiNameIdentifierOwner if owner.getNameIdentifier != null => owner.getNameIdentifier.getTextRange
+      }
+      val name = reference.orElse(declaredName)
         .getOrElse(throw new Rename.Refused(Seq("There is no name to rename here.")))
 
       LineRange(position(document(sourceFile), name.getStartOffset), position(document(sourceFile), name.getEndOffset))
@@ -1034,7 +1039,7 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
    * the plugin's detector.
    *
    * @param path registered project-source path
-   * @param at caret position
+   * @param at caret position; a position just after a name stands for that name
    * @return the distinct occurrences, the symbol's declaration first when it is in this document; empty when neither
    *         a handler nor a named symbol is at the position
    */
@@ -1078,12 +1083,12 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
   /** The declaration and references of the named symbol at `atOffset` that lie in `sourceFile`, with write markers. */
   private def symbolOccurrences(sourceFile: PsiFile, atOffset: Int): Seq[Occurrence] = {
     val sourceDocument = document(sourceFile)
-    val target = Option(sourceFile.findReferenceAt(atOffset)) match {
-      case Some(reference) => Option(reference.resolve())
-      case None => declarationNamedAt(sourceFile, atOffset)
+    val targets = CaretTargets.at(sourceFile, atOffset).toSeq.flatMap {
+      case CaretTargets.Target.Referenced(elements) => elements
+      case CaretTargets.Target.Declared(element) => Seq(element)
     }
 
-    target.collect { case named: PsiNamedElement if named.getName != null => named }.toSeq.flatMap { named =>
+    targets.collect { case named: PsiNamedElement if named.getName != null => named }.flatMap { named =>
       val access: ReadWriteAccessDetector = sourceFile match {
         case _: PsiJavaFile => new JavaReadWriteAccessDetector
         case _ => new ScalaReadWriteAccessDetector
