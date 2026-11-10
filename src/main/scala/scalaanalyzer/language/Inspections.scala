@@ -286,9 +286,12 @@ final class Inspections(descriptors: Seq[ExtensionBean]) {
         }
         range -> action
       }
-      // The IDE offers these beside the problem's fixes; the host previews them like any other fix.
+      // The IDE offers these beside the problem's fixes; the host previews them like any other fix. The plugin
+      // returns one for every kind of container and the IDE offers those whose container encloses the problem:
+      // the wrapper never asks a quick fix whether it is available, so any other would be offered with no edit.
       val suppressions = suppressor.getSuppressActions(problem.getPsiElement, id).toSeq.collect {
-        case fix: AbstractBatchSuppressByNoInspectionCommentFix =>
+        case fix: AbstractBatchSuppressByNoInspectionCommentFix
+            if fix.isAvailable(holder.getProject, problem.getPsiElement) =>
           range -> QuickFixWrapper.wrap(problem, new Inspections.Suppression(problem.getPsiElement, fix))
       }
       Diagnostic(severity, range, ProblemDescriptorUtil.renderDescriptionMessage(problem, problem.getPsiElement),
