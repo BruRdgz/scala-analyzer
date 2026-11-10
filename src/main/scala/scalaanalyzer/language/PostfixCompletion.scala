@@ -60,9 +60,12 @@ object PostfixCompletion {
     /** Adds one item per template that applies to the expression before the typed `.key`, if there is one. */
     override def fillCompletionVariants(parameters: CompletionParameters, result: CompletionResultSet): Unit =
       for (key <- typedKey(parameters.getOriginalFile.getText, parameters.getOffset)) {
-        val items = applicable(parameters, key).map(element)
+        val keyed = result.withPrefixMatcher(key.prefix)
+        // The result set drops the items its matcher rejects: checking their templates would only cost time, and the
+        // copy of the file is not even made when the typed key matches no template.
+        val candidates = templates.filter(template => keyed.getPrefixMatcher.prefixMatches(element(template)))
 
-        result.withPrefixMatcher(key.prefix).addAllElements(items.asJava)
+        if (candidates.nonEmpty) keyed.addAllElements(applicable(parameters, key, candidates).map(element).asJava)
       }
   }
 
@@ -77,8 +80,9 @@ object PostfixCompletion {
     }
   }
 
-  /** The templates that apply to the expression ending at the dot, found in a copy of the file without the key. */
-  private def applicable(parameters: CompletionParameters, key: TypedKey): Seq[PostfixTemplate] =
+  /** The `candidates` that apply to the expression ending at the dot, found in a copy of the file without the key. */
+  private def applicable(parameters: CompletionParameters, key: TypedKey,
+                         candidates: Seq[PostfixTemplate]): Seq[PostfixTemplate] =
     Using.Manager { resources =>
       val original = parameters.getOriginalFile
       val text = original.getText
@@ -92,7 +96,7 @@ object PostfixCompletion {
 
       val context = PsiUtilCore.getElementAtOffset(copy, PostfixLiveTemplate.positiveOffset(key.dot))
 
-      templates.filter(isApplicable(_, context, copyDocument, key.dot))
+      candidates.filter(isApplicable(_, context, copyDocument, key.dot))
     }.get
 
   /** Asks the template; one that fails is logged and left out without dropping the others. */
