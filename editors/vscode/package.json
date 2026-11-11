@@ -2,7 +2,7 @@
   "name": "scala-analyzer",
   "displayName": "Scala (scala-analyzer)",
   "description": "Scala diagnostics, completion, formatting, navigation, symbols and semantic colors from the IntelliJ Scala plugin, through the scala-analyzer language server.",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "publisher": "brurdgz",
   "license": "Apache-2.0",
   "repository": {

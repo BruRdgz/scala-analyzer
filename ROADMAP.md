@@ -159,6 +159,14 @@ More of the IDE's navigation, code insight and inspections, each through the plu
   published before the inspections finish.
 - Single-file Inline, postfix templates, and Implement and Override members.
 
+## 0.3.1 — release (2026-11-11)
+
+Fixes from an audit of the invariants the code relied on without stating or enforcing them: diagnostics cancelled by
+another write are computed again, a preview counts only its own thread's logged errors, the dispatch thread stays the
+event thread after a task throws, code actions check the document's stamp across their reads, progress is optional,
+edits of closed documents are unversioned, a run can start behind a cancelled one, and the Inspection Results view
+detaches a problem once.
+
 ## Next — 0.4
 
 - Move a class or file from the editor's file explorer (`workspace/willRenameFiles` over the plugin's move handler).
@@ -172,6 +180,21 @@ More of the IDE's navigation, code insight and inspections, each through the plu
   file or the project); read-only first, since rename and quick fixes would write to files the agent also edits. The
   session reads the disk, and a tool answers "still importing" rather than an empty result during the BSP import.
   First check what Claude Code already gets from registering the server as a plugin's LSP.
+- Left by the 0.3.1 audit (each checked in the code, none fixed):
+  - A pending writer cancels every query before it owns write intent, including the queries of the thread that holds
+    the intent (`HostLock.write`): a dispatch-thread `psiChanged` fails a rename that nothing changed.
+  - `ScalaPsiHost.replaceText` changes and commits the document before it reindexes, with no rollback: when the stubs
+    do not pair with the PSI, the symbol index loses the file, the word and import indexes keep the old text, the rest of
+    the `didChange` is dropped, and the next import makes the session unavailable. `rename`'s restore loop has the same
+    shape. First find out whether ordinary typing can produce unpairable stubs.
+  - Build problems of non-Scala-3 sources are published at the positions of the last build, against the current buffer
+    (only with `compilerErrorsScala2`); `DiagnosticsClient.published` keeps the entries of removed targets.
+  - Lifecycle spread over fields: `ScalaLanguageServer` (`session`, `projectRequested`, `shutdownRequested`, `ending`,
+    the executors, `state`; a missing or second `initialized` hangs or opens twice) and `ProjectSession` (its status and
+    `inspectableSources` answer stale counts after a partial import); `BuildConnection` has no state for a request
+    that timed out on the client but goes on in the server.
+  - The progress callback of an import runs under the host write lock: a client that stops reading its messages stalls
+    every query.
 
 ## Later
 

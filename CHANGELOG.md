@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.3.1 — 2026-11-11
+
+Fixes of invariants that the code relied on without stating or enforcing them, found by an audit of the code base.
+
+- A document's diagnostics are computed again when a write that is not its own cancels them: another document's edit,
+  an import or a settings change. Before, the document kept no new diagnostics, or only those published before its
+  inspections, until its next edit.
+- A code action is no longer disabled, and Organize imports no longer fails, because another request or the
+  diagnostics logged an error while the action was previewed: only the errors logged by the preview's own thread count.
+- The host's dispatch thread stays the platform's event thread after a task queued on it throws, and the failure is
+  logged. Before, the thread that replaced it was not the event thread, so the plugin's event-thread checks failed.
+- Code actions are cancelled when their document changes between the reads that compute them, instead of converting
+  ranges of one version of the text against another, or failing with an internal error.
+- Opening and importing the project go on without progress when the client does not acknowledge the progress token in
+  time or a progress report cannot be sent. Before, the project failed to open.
+- The edits of a document the client has closed (the other files of a rename, an action resolved for it) are
+  unversioned. They carried the version the document had before it was closed, which the client numbers anew when it
+  opens the document again.
+- A test or main run can start while a cancelled one is still ending, for instance in its compile: it waits for it
+  instead of being refused with "a run is already in progress".
+- VS Code: applying a fix from the Inspection Results view no longer removes the file's other problems from the view
+  while they stay in the Problems panel.
+
 ## 0.3.0 — 2026-11-11
 
 - Go to Definition asks the plugin's Go to Declaration for Scala sources, so it also covers case-class construction
