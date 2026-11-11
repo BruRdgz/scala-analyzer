@@ -702,12 +702,16 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
   private def nameSpan(declaration: PsiElement): Option[SourceSpan] =
     Option(declaration.getContainingFile).flatMap(sourceSpan(_, nameRange(declaration)))
 
-  /** Locates a declaration's navigation target, materializing attached or decompiled library text when needed. */
+  /**
+   * Locates a declaration's navigation target, materializing attached or decompiled library text when needed.
+   * A target with no offset in its file, such as a synthetic member the plugin answers, has no location.
+   */
   private def sourceLocation(declaration: PsiElement): Option[SourceLocation] = {
     val target = declaration.getNavigationElement
-    val nameOffset = nameRange(target).getStartOffset
 
     for {
+      _ <- Option.when(target.getTextOffset >= 0)(())
+      nameOffset = nameRange(target).getStartOffset
       targetFile <- Option(target.getContainingFile)
       location <- targetFile.getViewProvider.getVirtualFile match {
         case source: SourceFile => Some(SourceLocation(source.path, position(document(targetFile), nameOffset)))
@@ -891,7 +895,7 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
     }
 
     for {
-      location <- if (navigation.getTextOffset < 0) None else sourceLocation(element)
+      location <- sourceLocation(element)
       targetFile <- Option(navigation.getContainingFile)
       target <- targetFile.getViewProvider.getVirtualFile match {
         case source: SourceFile => Some(HierarchyTarget(source.path.toUri.toString,

@@ -80,6 +80,8 @@
   the editor and in Inspect Code, each with its fix. `InspectionsOracle` replays the plugin's tests of them: 467 agree,
   0 disagree, 107 skip (the five inspections off by default, 13 tests whose hint the oracle cannot evaluate, 3 that
   need Scala 2.10).
+- Go to Definition no longer fails when the plugin answers a synthetic member with no position in its file; such a
+  target has no location, as in the call and type hierarchies.
 
 ## 0.2.0 — 2026-11-09
 
