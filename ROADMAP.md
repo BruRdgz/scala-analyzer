@@ -157,6 +157,15 @@ Toward the IDE's UI in the editor, the logic in the server and the VS Code exten
   same before treating it as a host problem.
 - Each to decide: extract/introduce refactorings as code actions, Change Signature, debugging (DAP), worksheets.
 
+## 0.4
+
+- AI agents over MCP: a `--mcp` mode of the same binary, a second transport over `ProjectSession` beside `lsp`
+  (MCP is JSON-RPC 2.0 over stdio, which lsp4j's jsonrpc already speaks). Tools addressed by qualified name rather
+  than line and column (references, implementers, callers, type of an expression, diagnostics and inspections of a
+  file or the project); read-only first, since rename and quick fixes would write to files the agent also edits. The
+  session reads the disk, and a tool answers "still importing" rather than an empty result during the BSP import.
+  First check what Claude Code already gets from registering the server as a plugin's LSP.
+
 ## Later
 
 - A persistent index, for fast startup.
