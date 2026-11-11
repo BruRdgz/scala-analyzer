@@ -148,17 +148,24 @@ Toward the IDE's UI in the editor, the logic in the server and the VS Code exten
 - Inspect Code over the whole project, generated sources skipped.
 - Sources follow their files on disk while they are not open in the editor.
 
-## Next — 0.3
+## 0.3 — release (2026-11-11)
+
+More of the IDE's navigation, code insight and inspections, each through the plugin's own handler:
+
+- Go to Definition through the plugin's Go to Declaration; Go to Super and Go to Test.
+- Document highlights from the plugin's usage handlers; split/join lists, Flip ',', Unwrap and Remove as code actions.
+- Inlay hints with links to declarations, an accept-type edit, per-kind settings and X-Ray mode.
+- Inspection Results view in VS Code; the collection inspections that the IDE enables by default, with diagnostics
+  published before the inspections finish.
+- Single-file Inline, postfix templates, and Implement and Override members.
+
+## Next — 0.4
 
 - Move a class or file from the editor's file explorer (`workspace/willRenameFiles` over the plugin's move handler).
-- Go to Test and Go to Super.
 - Inspect Code reports "Unused expression without side effects" on the patterns of `case` clauses that follow a guard
   whose `if` ends its line (`HostBootstrap`, the application table proxy): check whether the plugin in the IDE does the
   same before treating it as a host problem.
 - Each to decide: extract/introduce refactorings as code actions, Change Signature, debugging (DAP), worksheets.
-
-## 0.4
-
 - AI agents over MCP: a `--mcp` mode of the same binary, a second transport over `ProjectSession` beside `lsp`
   (MCP is JSON-RPC 2.0 over stdio, which lsp4j's jsonrpc already speaks). Tools addressed by qualified name rather
   than line and column (references, implementers, callers, type of an expression, diagnostics and inspections of a

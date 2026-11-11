@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 — 2026-11-11
 
 - Go to Definition asks the plugin's Go to Declaration for Scala sources, so it also covers case-class construction
   calls (to the case class), companions, `end` markers, `given` imports, `this(...)` calls, for-comprehensions and
