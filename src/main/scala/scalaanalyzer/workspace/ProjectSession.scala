@@ -352,18 +352,20 @@ final class ProjectSession private (
    * This may run concurrently with session operations and waits for import application. Scala 3 compiler
    * diagnostics use the current buffer when compile settings are available; other compiler diagnostics come
    * from the last build compile. Java sources use the platform's syntax and semantic analysis of the current
-   * buffer, without running javac.
+   * buffer, without running javac. A Scala source's other problems can come first, through `early`, while its
+   * inspections run.
    *
    * @param path registered project-source path
+   * @param early receives the problems to show while a Scala source's inspections run, when they have to
    * @return the plugin's problems, then the compiler's; empty for a source that is neither Scala nor Java
    */
-  def problems(path: Path): Seq[FileProblem] = {
+  def problems(path: Path, early: Seq[FileProblem] => Unit = _ => ()): Seq[FileProblem] = {
     val readLock = importSnapshotLock.readLock()
     readLock.lock()
     try {
       val source = file(path)
       val spec = moduleSpec(source)
-      language.problems(path, spec, buildProblems.get.getOrElse(path, Seq.empty))
+      language.problems(path, spec, buildProblems.get.getOrElse(path, Seq.empty), early)
     } finally readLock.unlock()
   }
 

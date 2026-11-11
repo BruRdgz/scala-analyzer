@@ -2,12 +2,13 @@ package scalaanalyzer
 
 import com.intellij.codeInsight.daemon.impl.{AnnotationHolderImpl, AnnotationSessionImpl}
 import com.intellij.lang.annotation.{Annotation, Annotator, HighlightSeverity}
+import com.intellij.openapi.editor.RangeMarker
 import com.intellij.openapi.fileTypes.FileTypeRegistry
 import com.intellij.openapi.module.Module
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.util.{Key, TextRange, UserDataHolderBase}
 import com.intellij.openapi.vfs.VirtualFile
-import com.intellij.psi.{PsiElement, PsiErrorElement, PsiFile, PsiJavaFile, PsiManager, SyntaxTraverser}
+import com.intellij.psi.{PsiDocumentManager, PsiElement, PsiErrorElement, PsiFile, PsiJavaFile, PsiManager, SyntaxTraverser}
 import com.intellij.psi.impl.PsiManagerEx
 import com.intellij.psi.util.{CachedValue, CachedValueProvider, CachedValuesManager, PsiModificationTracker}
 import org.jetbrains.plugins.scala.lang.psi.api.ScalaFile
@@ -85,8 +86,17 @@ final class ScalaPsiHost private[scalaanalyzer] (
   /** The mounted JDK's home, written while the write lock is held. */
   @volatile private var jdkHome: Option[Path] = None
 
-  /** A file's problems until PSI changes: code actions reuse those the diagnostics computed for the same buffer. */
-  private val diagnosticsCache = Key.create[CachedValue[Seq[Diagnostic]]]("scala-analyzer.diagnostics")
+  /** A file's syntax and annotator problems until PSI changes: code actions reuse those of the same buffer. */
+  private val generalCache = Key.create[CachedValue[Seq[Diagnostic]]]("scala-analyzer.general-diagnostics")
+
+  /** A file's inspection problems until PSI changes: code actions reuse them with their fixes. */
+  private val inspectionCache = Key.create[CachedValue[Seq[Diagnostic]]]("scala-analyzer.inspection-diagnostics")
+
+  /**
+   * A file's last computed inspection problems, each with a marker its document moves through later edits; without
+   * their fixes, which hold the PSI of the text they were computed for.
+   */
+  private val lastInspections = Key.create[Seq[(RangeMarker, Diagnostic)]]("scala-analyzer.last-inspections")
 
   /**
    * Runs `query` as the IDE's read actions run: concurrently with other queries, never during an edit. An edit that
@@ -628,10 +638,10 @@ final class ScalaPsiHost private[scalaanalyzer] (
 
   /**
    * Text actions for the selected range, preserving their annotator fixes and previewing on file copies. Until the
-   * file's diagnostics are computed, only what the range touches is analyzed and inspection fixes are left out: the
-   * first request on an opened file does not wait for the whole file's analysis, and editors ask again when the
-   * diagnostics arrive. A caller that already shows inspection problems in the range asks for their fixes with
-   * `withInspections`, since the editor will not ask again.
+   * file's general diagnostics are computed, only what the range touches is analyzed, and until its inspections are,
+   * their fixes are left out: the first request on an opened file does not wait for the whole file's analysis, and
+   * editors ask again when the diagnostics arrive. A caller that already shows inspection problems in the range asks
+   * for their fixes with `withInspections`, since the editor will not ask again.
    *
    * Implement members is offered but not previewed: its preview occupies the host's single dispatch thread, so it runs
    * only when the caller asks for it ([[previewImplementMembers]] or [[implementMembers]]).
@@ -644,9 +654,10 @@ final class ScalaPsiHost private[scalaanalyzer] (
    * @return the actions available for the range; those that fix or suppress an inspection problem say which
    */
   def codeActions(file: ScalaFile, range: TextRange, withInspections: Boolean = false): CodeActions.Offered = read {
-    val computed = Option(file.getUserData(diagnosticsCache)).filter(_.hasUpToDateValue).map(_.getValue)
-    def uncached = problemsAround(file, range) ++ (if (withInspections) inspections.diagnostics(file) else Seq.empty)
-    val problems = computed.getOrElse(uncached)
+    val general = upToDate(file, generalCache).getOrElse(problemsAround(file, range))
+    val inspected = upToDate(file, inspectionCache)
+      .getOrElse(if (withInspections) inspectionDiagnostics(file) else Seq.empty)
+    val problems = general ++ inspected
 
     CodeActions.Offered(actions.collect(file, range, problems), actions.implementMembersOffer(file, range, problems))
   }
@@ -730,12 +741,48 @@ final class ScalaPsiHost private[scalaanalyzer] (
    * The problems of a physical file are cached until PSI changes.
    *
    * @param file Scala source to analyze under cancellable read access
-   * @return current problems and available plugin fixes with UTF-16 source ranges
+   * @return current problems and available plugin fixes with UTF-16 source ranges: [[generalDiagnostics]], then
+   *         [[inspectionDiagnostics]]
    */
-  def diagnostics(file: ScalaFile): Seq[Diagnostic] = HostLock.query {
-    if (!file.isPhysical) collectDiagnostics(file)
-    else CachedValuesManager.getManager(project).getCachedValue(file, diagnosticsCache, () =>
-      CachedValueProvider.Result.create(collectDiagnostics(file), PsiModificationTracker.MODIFICATION_COUNT), false)
+  def diagnostics(file: ScalaFile): Seq[Diagnostic] = HostLock.query(generalDiagnostics(file) ++ inspectionDiagnostics(file))
+
+  /**
+   * Collects syntax errors and annotator problems, as the IDE's general highlighting pass does before its inspections
+   * run. The rules of [[diagnostics]] apply.
+   *
+   * @param file Scala source to analyze under cancellable read access
+   * @return the part of [[diagnostics]] that is not an inspection's
+   */
+  def generalDiagnostics(file: ScalaFile): Seq[Diagnostic] = HostLock.query(cached(file, generalCache) {
+    syntaxErrors(file) ++ annotatorProblems(file, SyntaxTraverser.psiTraverser(file))
+  })
+
+  /**
+   * Collects the problems of the host's selected native inspections, remembering them for
+   * [[previousInspectionDiagnostics]]. The rules of [[diagnostics]] apply.
+   *
+   * @param file Scala source to inspect under cancellable read access
+   * @return the part of [[diagnostics]] that is an inspection's
+   */
+  def inspectionDiagnostics(file: ScalaFile): Seq[Diagnostic] = HostLock.query(cached(file, inspectionCache) {
+    val found = inspections.diagnostics(file)
+    remember(file, found)
+    found
+  })
+
+  /**
+   * The inspection problems to show while [[inspectionDiagnostics]] are computed again, as the IDE keeps a file's
+   * highlights until its next pass ends: the last ones computed, at the ranges later edits moved them to. Their fixes
+   * are left out, since they edit the old text, as are the problems whose text was removed.
+   *
+   * @param file Scala source being analyzed, under cancellable read access
+   * @return `None` when the inspection problems of the current PSI are computed already; empty before the first time
+   */
+  def previousInspectionDiagnostics(file: ScalaFile): Option[Seq[Diagnostic]] = HostLock.query {
+    if (upToDate(file, inspectionCache).isDefined) None
+    else Some(Option(file.getUserData(lastInspections)).toSeq.flatten.collect {
+      case (marker, problem) if marker.isValid => problem.copy(range = marker.getTextRange)
+    })
   }
 
   /**
@@ -756,9 +803,25 @@ final class ScalaPsiHost private[scalaanalyzer] (
    */
   def inspectionDescriptions: Seq[InspectionDescription] = inspections.descriptions
 
-  /** Runs the syntax check, the annotator and the inspections over the whole file. */
-  private def collectDiagnostics(file: ScalaFile): Seq[Diagnostic] =
-    syntaxErrors(file) ++ annotatorProblems(file, SyntaxTraverser.psiTraverser(file)) ++ inspections.diagnostics(file)
+  /** `compute`'s result for a physical `file` until PSI changes; that of a file with no buffer is computed each time. */
+  private def cached(file: ScalaFile, key: Key[CachedValue[Seq[Diagnostic]]])(compute: => Seq[Diagnostic]): Seq[Diagnostic] =
+    if (!file.isPhysical) compute
+    else CachedValuesManager.getManager(project).getCachedValue(file, key, () =>
+      CachedValueProvider.Result.create(compute, PsiModificationTracker.MODIFICATION_COUNT), false)
+
+  /** What `key` holds for `file` while PSI has not changed since it was computed. */
+  private def upToDate(file: ScalaFile, key: Key[CachedValue[Seq[Diagnostic]]]): Option[Seq[Diagnostic]] =
+    Option(file.getUserData(key)).filter(_.hasUpToDateValue).map(_.getValue)
+
+  /** Replaces the inspection problems remembered for `file` with `found`, marking their ranges in its document. */
+  private def remember(file: ScalaFile, found: Seq[Diagnostic]): Unit =
+    Option(PsiDocumentManager.getInstance(project).getDocument(file)).foreach { document =>
+      val marked = found.map(problem => document.createRangeMarker(problem.range) -> problem.copy(fixes = Seq.empty))
+      // Two computations at once may each replace the other's without disposing them; the document holds markers
+      // weakly, so those are collected.
+      Option(file.getUserData(lastInspections)).foreach(_.foreach { case (marker, _) => marker.dispose() })
+      file.putUserData(lastInspections, marked)
+    }
 
   /** The syntax and annotator problems of the elements `range` touches, without descending into the others. */
   private def problemsAround(file: ScalaFile, range: TextRange): Seq[Diagnostic] = {

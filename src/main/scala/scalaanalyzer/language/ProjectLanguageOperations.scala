@@ -9,7 +9,7 @@ import com.intellij.lang.java.JavaDocumentationProvider
 import com.intellij.openapi.editor.Document
 import com.intellij.openapi.editor.colors.TextAttributesKey
 import com.intellij.openapi.module.Module
-import com.intellij.openapi.progress.ProgressManager
+import com.intellij.openapi.progress.{ProcessCanceledException, ProgressManager}
 import com.intellij.openapi.util.TextRange
 import com.intellij.openapi.util.text.StringUtil
 import com.intellij.psi.{
@@ -80,8 +80,13 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
   /** How the plugin's highlighting key is shown as a semantic token. */
   private final case class TokenStyle(kind: SemanticTokenKind, modifiers: Set[SemanticTokenModifier])
 
-  /** What `problems` reads from a Scala file in one read: the plugin's problems, compiler mode and buffer text. */
-  private final case class PluginReading(problems: Seq[FileProblem], compilerHighlighted: Boolean, text: String)
+  /**
+   * What `problems` reads from a Scala file before its inspections run, in one read: the plugin's general problems,
+   * the inspection problems to show meanwhile (none when the current ones are computed already), the compiler mode,
+   * and the buffer's text and modification stamp.
+   */
+  private final case class PluginReading(general: Seq[FileProblem], previousInspections: Option[Seq[FileProblem]],
+    compilerHighlighted: Boolean, text: String, stamp: Long)
 
   /** Gets the in-memory document owned by the platform for `file`. */
   private def document(file: PsiFile): Document = PsiDocumentManager.getInstance(host.project).getDocument(file)
@@ -423,20 +428,28 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
    * the build's compiler, the compiler's problems follow: a Scala 3 `spec` compiles the current buffer, anything
    * else reuses `lastBuildProblems`. A Java file has the platform's syntax and semantic problems, without javac.
    *
+   * The inspections of a large Scala file can take seconds after each edit, so when they have to run, `early` gets
+   * the other problems first, with the previous inspection problems where the edits moved them (see
+   * [[ScalaPsiHost.previousInspectionDiagnostics]]), as the IDE shows its general highlighting before its inspections.
+   *
    * @param path registered project-source path
    * @param spec compile settings of the source's module, if it has any
    * @param lastBuildProblems the last build's compiler diagnostics for this source
+   * @param early receives the problems to show while a Scala file's inspections run, in the result's order
    * @return the plugin's problems, labelled `scala-plugin` or `java-plugin`, then the compiler's, labelled `scalac`;
    *         empty for a file that is neither Scala nor Java
+   * @throws com.intellij.openapi.progress.ProcessCanceledException when the buffer is edited meanwhile
    */
-  def problems(path: Path, spec: Option[CompileSpec], lastBuildProblems: Seq[CompilerDiagnostic]): Seq[FileProblem] =
+  def problems(path: Path, spec: Option[CompileSpec], lastBuildProblems: Seq[CompilerDiagnostic],
+      early: Seq[FileProblem] => Unit = _ => ()): Seq[FileProblem] =
     file(path) match {
       case scalaFile: ScalaFile =>
         val reading = host.read {
           val sourceDocument = document(scalaFile)
-          val plugin = pluginProblems(sourceDocument, host.diagnostics(scalaFile))
 
-          PluginReading(plugin, host.isCompilerHighlighted(scalaFile), sourceDocument.getText)
+          PluginReading(pluginProblems(sourceDocument, host.generalDiagnostics(scalaFile)),
+            host.previousInspectionDiagnostics(scalaFile).map(pluginProblems(sourceDocument, _)),
+            host.isCompilerHighlighted(scalaFile), sourceDocument.getText, sourceDocument.getModificationStamp)
         }
 
         val fromCompiler =
@@ -451,7 +464,15 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
             reported.map(c => FileProblem(problemSeverity(c.severity), c.start, c.end, c.message, "scalac"))
           }
 
-        reading.problems ++ fromCompiler
+        reading.previousInspections.foreach(previous => early(reading.general ++ previous ++ fromCompiler))
+        val inspected = host.read {
+          val sourceDocument = document(scalaFile)
+          // The other problems are of the text read first: with another, the result would mix two versions.
+          if (sourceDocument.getModificationStamp != reading.stamp) throw new ProcessCanceledException()
+          pluginProblems(sourceDocument, host.inspectionDiagnostics(scalaFile))
+        }
+
+        reading.general ++ inspected ++ fromCompiler
       case javaFile: PsiJavaFile => host.read {
         val sourceDocument = document(javaFile)
 

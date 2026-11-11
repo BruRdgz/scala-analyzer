@@ -80,6 +80,11 @@
   the editor and in Inspect Code, each with its fix. `InspectionsOracle` replays the plugin's tests of them: 467 agree,
   0 disagree, 107 skip (the five inspections off by default, 13 tests whose hint the oracle cannot evaluate, 3 that
   need Scala 2.10).
+- A Scala source's diagnostics come in two publications when its inspections have to run, as the IDE highlights in
+  passes: first the syntax, annotator and compiler problems, with the inspection problems of the previous computation
+  where the edits since moved them; then all of them, with the inspections' current problems. The inspections of a
+  large file can take seconds after each edit (some 5.5 s for a 1900-line file of a real project, against 0.65 s
+  without the collection inspections), and before, its compiler errors waited for them.
 - Go to Definition no longer fails when the plugin answers a synthetic member with no position in its file; such a
   target has no location, as in the call and type hierarchies.
 

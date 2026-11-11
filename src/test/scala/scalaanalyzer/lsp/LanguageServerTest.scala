@@ -163,6 +163,29 @@ class LanguageServerTest extends munit.FunSuite {
     found.get.getDiagnostics.asScala.toSeq
   }
 
+  /** Versions for reopening Shout.java as a barrier, above those the tests give it. */
+  private val barrierVersions = new java.util.concurrent.atomic.AtomicInteger(1000)
+
+  /**
+   * Every publication for `path` at `version`, in order. The diagnostics thread computes one source at a time, in the
+   * order they were scheduled, and a Java source's diagnostics are published once, at the end of their computation:
+   * once those of Shout.java, reopened after, arrive, the computations scheduled before it are over.
+   */
+  private def publicationsOf(path: Path, version: Int): Seq[Seq[Diagnostic]] = {
+    val barrier = barrierVersions.incrementAndGet()
+    val shout = fixture.resolve("core/src/main/java/core/Shout.java")
+    server.getTextDocumentService.didOpen(new DidOpenTextDocumentParams(
+      new TextDocumentItem(shout.toUri.toString, "java", barrier, Files.readString(shout))))
+    val publications = Seq.newBuilder[Seq[Diagnostic]]
+    var arrived = false
+    while (!arrived) {
+      val next = Option(Client.published.poll(5, TimeUnit.MINUTES)).getOrElse(fail(s"no diagnostics for $path version $version"))
+      if (next.getUri == path.toUri.toString && next.getVersion == version) publications += next.getDiagnostics.asScala.toSeq
+      arrived = next.getUri == shout.toUri.toString && next.getVersion == barrier
+    }
+    publications.result()
+  }
+
   private def errors(diagnostics: Seq[Diagnostic]) =
     diagnostics.filter(_.getSeverity == DiagnosticSeverity.Error).map(_.getMessage)
 
@@ -1557,7 +1580,11 @@ class LanguageServerTest extends munit.FunSuite {
       java.util.List.of(new TextDocumentContentChangeEvent(value))))
     try {
       change(text, 170)
-      val problems = diagnosticsOf(main, 170)
+      def has(problems: Seq[Diagnostic], id: String) = problems.exists(p => p.getCode != null && p.getCode.getLeft == id)
+      val publications = publicationsOf(main, 170)
+      // The other problems come before the inspections run: those of this new text are only in the last publication.
+      assert(publications.headOption.exists(!has(_, "SimplifyBoolean")), publications.toString)
+      val problems = publications.last
       def named(id: String): Diagnostic = problems.find(p => p.getCode != null && p.getCode.getLeft == id)
         .getOrElse(fail(problems.toString))
       assert(named("ScalaDeprecation").getTags.contains(DiagnosticTag.Deprecated))
@@ -1585,7 +1612,7 @@ class LanguageServerTest extends munit.FunSuite {
       val corrected = TestHost.applyEdits(text, changes)
       assert(!corrected.contains("b == true"), corrected)
       change(corrected, 171)
-      assert(!diagnosticsOf(main, 171).exists(p => p.getCode != null && p.getCode.getLeft == "SimplifyBoolean"))
+      assert(!has(publicationsOf(main, 171).last, "SimplifyBoolean"))
     } finally {
       change(original, 172)
       service.documentSymbol(new DocumentSymbolParams(document(main))).get(1, TimeUnit.MINUTES)
@@ -1796,9 +1823,9 @@ class LanguageServerTest extends munit.FunSuite {
     val original = Files.readString(main).replace("val text: String", "val text: Int")
     def open(path: Path, version: Int, text: String): Unit = service.didOpen(new DidOpenTextDocumentParams(
       new TextDocumentItem(path.toUri.toString, "scala", version, text)))
-    // This last scheduled source drains earlier work before the diagnostic worker is paused.
+    // Earlier work is drained before the diagnostic worker is paused.
     open(greeting, 49, Files.readString(greeting))
-    diagnosticsOf(greeting, 49)
+    publicationsOf(greeting, 49)
     val computing = new CountDownLatch(1)
     val release = new CountDownLatch(1)
     val first = new java.util.concurrent.atomic.AtomicBoolean(true)
@@ -1828,7 +1855,10 @@ class LanguageServerTest extends munit.FunSuite {
           if (next.getUri == greeting.toUri.toString) greetingPublished = true
         }
       }
-      assertEquals(mainPublications, 2, "only the running and latest pending diagnostics should publish")
+      // Each computation publishes once, or twice when the inspections have to run; the eleven schedules would publish
+      // at least eleven times.
+      assert(mainPublications >= 2 && mainPublications <= 4,
+        s"only the running and latest pending diagnostics should publish, not $mainPublications times")
     } finally {
       release.countDown()
       sink.close()

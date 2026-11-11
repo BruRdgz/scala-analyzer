@@ -1634,17 +1634,23 @@ final class ScalaLanguageServer(
   /** Whether the client has not sent a newer version of `path` since this computation was scheduled. */
   private def isCurrent(path: Path, version: Integer): Boolean = !diagnostics.isShutdown && versions.get(path) == version
 
-  /** Computes and publishes diagnostics only while `version` remains the current document version. */
+  /**
+   * Computes and publishes diagnostics only while `version` remains the current document version. When a Scala
+   * source's inspections have to run, the other problems are published before them.
+   */
   private def publishDiagnostics(path: Path, version: Integer): Unit =
     if (isCurrent(path, version)) {
+      def publish(problems: Seq[FileProblem]): Unit =
+        if (isCurrent(path, version))
+          client.publishDiagnostics(new PublishDiagnosticsParams(path.toUri.toString, problems.map(diagnostic).asJava, version))
+
       try {
         // A file the build no longer has (deleted, or out of every module) has no problems left.
         val problems = timed("problems", System.nanoTime()) {
           val opened = session.join()
-          if (opened.isSource(path)) opened.problems(path) else Seq.empty
+          if (opened.isSource(path)) opened.problems(path, publish) else Seq.empty
         }
-        if (isCurrent(path, version))
-          client.publishDiagnostics(new PublishDiagnosticsParams(path.toUri.toString, problems.map(diagnostic).asJava, version))
+        publish(problems)
       } catch {
         // A later change cancelled this computation; that change scheduled its own.
         case _: ProcessCanceledException => ()

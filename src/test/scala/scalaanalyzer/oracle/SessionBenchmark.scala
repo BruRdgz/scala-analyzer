@@ -93,7 +93,12 @@ object SessionBenchmark {
         val lines = session.text(path).split("\n", -1)
         val end = LineColumn(lines.length - 1, lines.last.length)
         session.change(path, Some(LineRange(end, end)), "\n// edit")
-        measure("problems after an edit")(session.problems(path))
+        val editedAt = System.nanoTime()
+        def early(problems: Seq[?]): Unit = {
+          val kind = "problems before the inspections after an edit"
+          latencies(kind) = latencies.getOrElse(kind, Vector.empty) :+ (System.nanoTime() - editedAt) / 1_000_000
+        }
+        measure("problems after an edit")(session.problems(path, early))
         measure("semantic tokens after an edit")(session.semanticTokens(path))
         positions.find(_._1 == path).foreach { (_, at) =>
           measure("completion after an edit")(session.completion(path, at))
