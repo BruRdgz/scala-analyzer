@@ -134,13 +134,24 @@ private[language] object Inspections {
  * @param descriptors local inspection registrations from the pinned Scala plugin
  */
 final class Inspections(descriptors: Seq[ExtensionBean]) {
-  /** Short names of the inspections this host runs; construction fails unless the descriptors register all of them. */
+  /** Short names of the inspections chosen one by one; construction fails unless the descriptors register all of them. */
   private val supported = Set("ScalaDeprecation", "ScalaRedundantCast", "SimplifyBoolean",
     "ScalaUnusedSymbol", "ScalaUnusedExpression", "ScalaUnnecessarySemicolon", "RemoveRedundantReturn")
 
+  /**
+   * Whether a registration is one of the plugin's collection inspections that the IDE's default profile enables.
+   *
+   * They share one visitor and one fix (`OperationOnCollectionInspection`), so they are taken as a group; the
+   * `InspectionsOracle` replays the plugin's tests of each.
+   */
+  private def defaultCollectionInspection(bean: ExtensionBean): Boolean =
+    bean.implementation.startsWith("org.jetbrains.plugins.scala.codeInspection.collections.") &&
+      bean.attributes.get("enabledByDefault").contains("true")
+
   /** The registrations of the supported inspections. */
-  private val tools =descriptors.filter(bean => supported(bean.attributes.getOrElse("shortName", "")))
-  require(tools.map(_.attributes("shortName")).toSet == supported, "missing supported Scala inspections")
+  private val tools = descriptors.filter(bean =>
+    supported(bean.attributes.getOrElse("shortName", "")) || defaultCollectionInspection(bean))
+  require(supported.subsetOf(tools.map(_.attributes("shortName")).toSet), "missing supported Scala inspections")
 
   /**
    * The inspections that can report a problem, as the IDE names and groups them in its inspection results.

@@ -26,6 +26,8 @@ class InspectionsTest extends munit.FunSuite {
       ("ScalaUnusedSymbol", "object Inspect { private val dead = 2 }", "dead", "dead"),
       ("RemoveRedundantReturn", "object Inspect { def f: Int = { return 1 } }", "return", "return"),
       ("ScalaUnnecessarySemicolon", "object Inspect { val n = 1;\n}", ";", ";"),
+      ("FilterHeadOption", "object Inspect { val n = List(0).filter(x => true).headOption }",
+        "filter(x => true).headOption", "headOption"),
     )
     for ((id, text, highlighted, removed) <- cases) {
       val file = open("Inspect", text)
@@ -170,6 +172,24 @@ class InspectionsTest extends munit.FunSuite {
         assert(!host.diagnostics(file).exists(_.inspectionId.contains(id)), suppressed)
       } finally host.closeSource(file)
     }
+  }
+
+  test("previous inspection problems follow later edits until the inspections run again") {
+    val text = "object Inspect {\n  def f(b: Boolean): Boolean = b == true\n}"
+    val file = open("Inspect", text)
+    def simplifications(found: Seq[Diagnostic]) = found.filter(_.inspectionId.contains("SimplifyBoolean"))
+    def previous = host.previousInspectionDiagnostics(file).map(simplifications)
+    try {
+      assertEquals(simplifications(host.inspectionDiagnostics(file)).map(_.range.substring(text)), Seq("b == true"))
+      assertEquals(previous, None)
+      host.edit(file, 0, 0, "// moved\n")
+      val moved = previous.getOrElse(fail("the inspections of the edited file count as computed"))
+      assertEquals(moved.map(_.range.substring(host.read(file.getText))), Seq("b == true"))
+      assert(moved.forall(_.fixes.isEmpty), moved.toString)
+      val edited = host.read(file.getText)
+      host.edit(file, edited.indexOf("  def"), edited.indexOf("\n}"), "")
+      assertEquals(previous, Some(Seq.empty))
+    } finally host.closeSource(file)
   }
 
   test("Scala suppression comments suppress the selected inspection") {

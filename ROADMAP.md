@@ -40,8 +40,9 @@ Beta 1 remains implemented but untagged, and Beta 2 closed without inspections.
    before the next dependency upgrade: use a matching platform/plugin pair, review generated adapter diffs, and run
    the adapter surface plus semantic checks for changed boundaries. The surface test is one gate, not a compatibility
    verdict on its own.
-2. Inspections: decided in 0.2. A selected set runs per file and over the whole project (Inspect Code); widening the
-   set is open work, judged inspection by inspection.
+2. Inspections: decided in 0.2. A selected set runs per file and over the whole project (Inspect Code); 0.3 added
+   the collection inspections that the IDE enables by default, checked by `InspectionsOracle`. Widening the set
+   further is open work, judged inspection by inspection.
 
 #### Current package ownership
 

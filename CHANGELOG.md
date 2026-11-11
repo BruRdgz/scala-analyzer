@@ -75,6 +75,11 @@
   document's URI, the position, the identifiers and the document version. It applies a versioned edit, is cancelled when
   the document has changed, and fails with `InvalidParams` for an identifier the class does not offer. The VS Code
   extension adds **Override Members…**, a multi-select list followed by the command; it has no default key.
+- The plugin's collection inspections that the IDE enables by default (54, such as `filter(...).headOption` to
+  `find(...)`, `map(...).flatten` to `flatMap(...)` or `size == 0` to `isEmpty`) run with the other inspections, in
+  the editor and in Inspect Code, each with its fix. `InspectionsOracle` replays the plugin's tests of them: 467 agree,
+  0 disagree, 107 skip (the five inspections off by default, 13 tests whose hint the oracle cannot evaluate, 3 that
+  need Scala 2.10).
 
 ## 0.2.0 — 2026-11-09
 

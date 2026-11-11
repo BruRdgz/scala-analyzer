@@ -167,13 +167,14 @@ is partial, indexes are kept in memory, and each process serves one workspace.
 - CI exercises ordinary source-member navigation through the packaged server and installed extension.
 - Java binary short-name lookup is incomplete, and JDK symbols come
   from the JDK running the server.
-- Native inspections cover deprecation, selected redundancies, explicit unused imports and unannotated
-  declarations confined to the file. Wildcard/given import warnings and whole-project dead-code analysis are
-  outside this scope. Inspect Code (`scalaAnalyzer/inspect`) runs only these inspections, on the Scala sources that
-  the build does not mark as generated; it does not report syntax, type or compiler errors. The VS Code extension
-  shows its result in a separate list and omits files whose live diagnostics are already shown; other clients receive
-  every file's problems and must avoid showing them twice. Dialog-dependent actions, file/package moves and optional automatic renames are unavailable;
-  code actions are limited to current-file previews.
+- Native inspections cover deprecation, selected redundancies, explicit unused imports, unannotated
+  declarations confined to the file, and the collection inspections that the IDE enables by default.
+  Wildcard/given import warnings and whole-project dead-code analysis are outside this scope. Inspect Code
+  (`scalaAnalyzer/inspect`) runs only these inspections, on the Scala sources that the build does not mark as
+  generated; it does not report syntax, type or compiler errors. The VS Code extension shows its result in a separate
+  list and omits files whose live diagnostics are already shown; other clients receive every file's problems and
+  must avoid showing them twice. Dialog-dependent actions, file/package moves and optional automatic renames are
+  unavailable; code actions are limited to current-file previews.
 - Unwrap actions are offered with every code-action request at the caret, in the order of the IDE's Unwrap popup,
   without its highlighting of the affected code. Change access modifier is not offered: it needs the IDE's rename UI.
 - Inline (`refactor.inline`) is offered for a `val`, a `def` or a type alias that only its own file can see (a local
