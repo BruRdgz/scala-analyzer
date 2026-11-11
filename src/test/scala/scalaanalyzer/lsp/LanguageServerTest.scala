@@ -152,7 +152,16 @@ class LanguageServerTest extends munit.FunSuite {
     seen.result()
   }
 
-  private def diagnosticsOf(path: Path, version: Int): Seq[Diagnostic] = {
+  /**
+   * The diagnostics a source ends with at `version`. A Scala source can publish twice, before and after its inspections
+   * run; its last publication is awaited, so that no computation of a test outlives it.
+   */
+  private def diagnosticsOf(path: Path, version: Int): Seq[Diagnostic] =
+    if (path.toString.endsWith(".java")) firstDiagnosticsOf(path, version)
+    else publicationsOf(path, version).lastOption.getOrElse(fail(s"no diagnostics for $path version $version"))
+
+  /** The first diagnostics published for `path` at `version`; a Java source publishes them once. */
+  private def firstDiagnosticsOf(path: Path, version: Int): Seq[Diagnostic] = {
     val deadline = System.nanoTime() + 5.minutes.toNanos
     var found: Option[PublishDiagnosticsParams] = None
     while (found.isEmpty) {
@@ -1881,7 +1890,8 @@ class LanguageServerTest extends munit.FunSuite {
     } finally Files.delete(added)
     filesChanged(added -> FileChangeType.Deleted)
     // No longer a source: its problems are cleared, and nothing is answered about it.
-    assertEquals(diagnosticsOf(added, 1), Seq.empty)
+    // Published once, after an import that may end after a barrier's diagnostics.
+    assertEquals(firstDiagnosticsOf(added, 1), Seq.empty)
     assertEquals(server.getTextDocumentService.hover(new HoverParams(document(added), new Position(3, 23))).get(1, TimeUnit.MINUTES), null)
   }
 
