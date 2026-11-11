@@ -104,4 +104,37 @@ class TestRunTest extends munit.FunSuite {
       runner.close()
     }
   }
+
+  test("a run started after a cancelled one waits for it to end instead of being refused") {
+    val runner = new TestRun
+    val selection = TestRun.Selection("target", "scalatest", "Suite", None)
+    val entered = new CountDownLatch(1)
+    val release = new CountDownLatch(1)
+    val order = new LinkedBlockingQueue[String]()
+    def blocked(): TestRun.Environment = {
+      entered.countDown()
+      if (!release.await(10, TimeUnit.SECONDS)) throw new IllegalStateException("preparation was not released")
+      order.add("cancelled run ended")
+      throw new IllegalStateException("preparation ended after cancellation")
+    }
+    def next(): TestRun.Environment = {
+      order.add("next run prepared")
+      throw new IllegalStateException("no environment in this test")
+    }
+    try {
+      val cancelled = runner.start(selection, () => blocked(), _ => (), _ => ())
+      assert(entered.await(10, TimeUnit.SECONDS))
+      assert(cancelled.cancel(true))
+      val following = runner.start(selection, () => next(), _ => (), _ => ())
+      // The new run is the active one, so it is not cancelled and refuses another.
+      intercept[IllegalStateException](runner.start(selection, () => next(), _ => (), _ => ()))
+      release.countDown()
+      following.get(10, TimeUnit.SECONDS)
+      assertEquals(Seq(order.poll(10, TimeUnit.SECONDS), order.poll(10, TimeUnit.SECONDS)),
+        Seq("cancelled run ended", "next run prepared"))
+    } finally {
+      release.countDown()
+      runner.close()
+    }
+  }
 }

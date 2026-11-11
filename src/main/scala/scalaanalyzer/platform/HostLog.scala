@@ -40,6 +40,8 @@ object HostLog {
 
   private val sinks = new CopyOnWriteArrayList[Entry => Unit]()
   private val counts = new ConcurrentHashMap[Level, AtomicLong]()
+  /** Accepted messages logged by the current thread, by level ordinal. */
+  private val threadCounts = ThreadLocal.withInitial(() => new Array[Long](Level.values.length))
   /** Newest warnings and errors, at most `RecentProblems`; every access holds this deque's monitor. */
   private val recent = new ArrayDeque[Entry]()
 
@@ -118,6 +120,15 @@ object HostLog {
   def count(level: Level): Long = Option(counts.get(level)).fold(0L)(_.get)
 
   /**
+   * Counts the accepted messages that the current thread logged since it started, unlike [[count]], which other
+   * threads advance too.
+   *
+   * @param level severity to count
+   * @return number of accepted messages of that severity logged by the current thread
+   */
+  def threadCount(level: Level): Long = threadCounts.get()(level.ordinal)
+
+  /**
    * Captures the bounded history of accepted warnings and errors.
    *
    * @return recent entries, oldest first
@@ -135,6 +146,7 @@ object HostLog {
       val entry = Entry(Instant.now(), level, text)
 
       counts.computeIfAbsent(level, _ => new AtomicLong()).incrementAndGet()
+      threadCounts.get()(level.ordinal) += 1
       if (level.ordinal >= Level.Warn.ordinal) recent.synchronized {
         recent.addLast(entry)
         if (recent.size > RecentProblems) recent.removeFirst()

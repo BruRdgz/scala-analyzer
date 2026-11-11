@@ -352,9 +352,15 @@ private[scalaanalyzer] object HostLock {
  * Queued work runs in submission order on a single thread.
  */
 private[scalaanalyzer] object HostDispatchThread {
+  // A task queued by `invokeLater` that throws ends the executor's thread, and the executor starts another: each thread
+  // registers itself as the platform's EDT when it starts, so the replacement is the dispatch thread too.
   private val executor = Executors.newSingleThreadExecutor { runnable =>
-    val thread = new Thread(runnable, "scala-analyzer-dispatch")
+    val thread = new Thread(() => {
+      EDT.updateEdt()
+      runnable.run()
+    }, "scala-analyzer-dispatch")
     thread.setDaemon(true)
+    thread.setUncaughtExceptionHandler((_, error) => HostLog.error("a task of the dispatch thread failed", error))
     thread
   }
 

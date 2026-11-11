@@ -96,8 +96,12 @@ class LanguageServerTest extends munit.FunSuite {
 
   override def afterAll(): Unit = closedServer
 
-  /** Initializes `server` as an editor that, when `appliesEdits`, applies the server's edits and shows its documents. */
-  private def initialize(server: HostProtocol.LanguageServerWithStatus, root: Path, appliesEdits: Boolean = true, scoped: Boolean = false): InitializeResult = {
+  /**
+   * Initializes `server` as an editor that, when `appliesEdits`, applies the server's edits and shows its documents, and
+   * that, when `progress`, advertises work-done progress (which the recording client then refuses to create).
+   */
+  private def initialize(server: HostProtocol.LanguageServerWithStatus, root: Path, appliesEdits: Boolean = true, scoped: Boolean = false,
+      progress: Boolean = false): InitializeResult = {
     val params = new InitializeParams
     params.setWorkspaceFolders(java.util.List.of(new WorkspaceFolder(root.toUri.toString, root.getFileName.toString)))
     val workspace = new WorkspaceClientCapabilities
@@ -107,6 +111,7 @@ class LanguageServerTest extends munit.FunSuite {
     workspace.setInlayHint(new InlayHintWorkspaceCapabilities(true))
     val window = new WindowClientCapabilities
     window.setShowDocument(new ShowDocumentCapabilities(appliesEdits))
+    window.setWorkDoneProgress(progress)
     val capabilities = new ClientCapabilities
     capabilities.setWorkspace(workspace)
     capabilities.setWindow(window)
@@ -178,19 +183,25 @@ class LanguageServerTest extends munit.FunSuite {
   /**
    * Every publication for `path` at `version`, in order. The diagnostics thread computes one source at a time, in the
    * order they were scheduled, and a Java source's diagnostics are published once, at the end of their computation:
-   * once those of Shout.java, reopened after, arrive, the computations scheduled before it are over.
+   * once those of Shout.java, reopened after, arrive, the computations scheduled before it are over. A computation that
+   * a write cancelled is scheduled again, behind the barrier, so barriers follow until one arrives alone.
    */
   private def publicationsOf(path: Path, version: Int): Seq[Seq[Diagnostic]] = {
-    val barrier = barrierVersions.incrementAndGet()
     val shout = fixture.resolve("core/src/main/java/core/Shout.java")
-    server.getTextDocumentService.didOpen(new DidOpenTextDocumentParams(
-      new TextDocumentItem(shout.toUri.toString, "java", barrier, Files.readString(shout))))
     val publications = Seq.newBuilder[Seq[Diagnostic]]
-    var arrived = false
-    while (!arrived) {
-      val next = Option(Client.published.poll(5, TimeUnit.MINUTES)).getOrElse(fail(s"no diagnostics for $path version $version"))
-      if (next.getUri == path.toUri.toString && next.getVersion == version) publications += next.getDiagnostics.asScala.toSeq
-      arrived = next.getUri == shout.toUri.toString && next.getVersion == barrier
+    var quiet = false
+    while (!quiet) {
+      val barrier = barrierVersions.incrementAndGet()
+      server.getTextDocumentService.didOpen(new DidOpenTextDocumentParams(
+        new TextDocumentItem(shout.toUri.toString, "java", barrier, Files.readString(shout))))
+      var arrived = false
+      quiet = true
+      while (!arrived) {
+        val next = Option(Client.published.poll(5, TimeUnit.MINUTES)).getOrElse(fail(s"no diagnostics for $path version $version"))
+        if (next.getUri == path.toUri.toString && next.getVersion == version) publications += next.getDiagnostics.asScala.toSeq
+        arrived = next.getUri == shout.toUri.toString && next.getVersion == barrier
+        if (!arrived) quiet = false
+      }
     }
     publications.result()
   }
@@ -626,6 +637,20 @@ class LanguageServerTest extends munit.FunSuite {
     assertEquals(other.status().get(1, TimeUnit.MINUTES).get("state"), "failed")
   }
 
+  // The recording client does not implement `window/workDoneProgress/create`, so it answers the request with an error.
+  test("opens the project without progress when the client refuses to create it") {
+    val noBuild = Files.createTempDirectory("scala-analyzer-no-build")
+    val client = new RecordingClient
+    val other = connect(client)
+    initialize(other, noBuild, progress = true)
+    assertEquals(statesUntil(client, "failed"), Seq("importing", "failed"))
+    val logged = client.logged.asScala.map(_.getMessage)
+    // The opening goes on without progress, and fails for the missing build.
+    assert(logged.exists(_.contains("did not accept the progress")), logged.mkString("\n"))
+    assert(client.shown.poll(1, TimeUnit.MINUTES).getMessage.contains("could not open the project"))
+    assertEquals(other.status().get(1, TimeUnit.MINUTES).get("state"), "failed")
+  }
+
   // After the change above (`String` became `Int`), `.text` is at line 6, column 50: Greeting.text, declared on line 3
   // of Greeting.scala.
   test("shows the signature of the symbol under the cursor") {
@@ -764,6 +789,27 @@ class LanguageServerTest extends munit.FunSuite {
       .getContents.getRight.getValue.contains("def text: String"))
     assertEquals(spans(service.references(new ReferenceParams(document(main), new Position(6, 50), new ReferenceContext(false)))
       .get(1, TimeUnit.MINUTES).asScala.toSeq), Seq(span(main, 6, 49, 53)))
+  }
+
+  // A client numbers a document it opens again from scratch, so the version it had before it was closed is no longer
+  // the document's.
+  test("a rename's edit of a document the client closed is unversioned") {
+    val service = server.getTextDocumentService
+    // A source of its own, so that no other test sees it opened and closed.
+    val closed = fixture.resolve("core/src/main/scala/core/Closed.scala")
+    val text = "package core\n\nobject Closed { def value = 1; def twice = value * 2 }\n"
+    Files.writeString(closed, text)
+    try {
+      filesChanged(closed -> FileChangeType.Created)
+      service.didOpen(new DidOpenTextDocumentParams(new TextDocumentItem(closed.toUri.toString, "scala", 70, text)))
+      diagnosticsOf(closed, 70)
+      service.didClose(new DidCloseTextDocumentParams(document(closed)))
+      val at = new Position(2, text.linesIterator.drop(2).next().indexOf("value"))
+      val edit = service.rename(new RenameParams(document(closed), at, "amount")).get(1, TimeUnit.MINUTES)
+      val versions = edit.getDocumentChanges.asScala.map(_.getLeft.getTextDocument.getVersion).toSeq
+      assertEquals(versions, Seq(null))
+    } finally Files.delete(closed)
+    filesChanged(closed -> FileChangeType.Deleted)
   }
 
   // `println` (line 7 of Main.scala) is the library's; `1text` is no identifier.
@@ -1873,6 +1919,35 @@ class LanguageServerTest extends munit.FunSuite {
       sink.close()
       HostLog.threshold = threshold
     }
+  }
+
+  test("diagnostics cancelled by a write that is not their document's are computed again") {
+    val service = implementation.getTextDocumentService
+    // Earlier work is drained before the diagnostic worker's next read is armed.
+    service.didOpen(new DidOpenTextDocumentParams(new TextDocumentItem(greeting.toUri.toString, "scala", 59, Files.readString(greeting))))
+    publicationsOf(greeting, 59)
+    val armed = new java.util.concurrent.atomic.AtomicBoolean(true)
+    val met = new CountDownLatch(1)
+    val writer = new Thread(() => HostLock.write(()), "foreign-writer")
+    val listeners = com.intellij.openapi.util.Disposer.newDisposable()
+    // The diagnostics' first read starts a writer and waits until it waits for that read: the read's query then sees a
+    // pending write and is cancelled, as when another document's edit arrives while the diagnostics run.
+    HostLock.addReadListener(new com.intellij.openapi.application.ReadActionListener {
+      override def readActionStarted(action: Class[?]): Unit =
+        if (Thread.currentThread().getName == "scala-analyzer-diagnostics" && armed.compareAndSet(true, false)) {
+          writer.start()
+          val deadline = System.nanoTime() + 30.seconds.toNanos
+          while (writer.getState != Thread.State.WAITING && System.nanoTime() < deadline) Thread.onSpinWait()
+          met.countDown()
+        }
+    }, listeners)
+    try {
+      service.didOpen(new DidOpenTextDocumentParams(new TextDocumentItem(greeting.toUri.toString, "scala", 60, Files.readString(greeting))))
+      assert(met.await(30, TimeUnit.SECONDS), "the diagnostics' read did not meet the writer")
+      writer.join(30.seconds.toMillis)
+      assert(!writer.isAlive, "the writer did not end")
+      assert(publicationsOf(greeting, 60).nonEmpty, "the cancelled diagnostics were not computed again")
+    } finally com.intellij.openapi.util.Disposer.dispose(listeners)
   }
 
   test("opens a source file created after the import, and lets it go when it is deleted") {

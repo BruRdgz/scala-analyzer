@@ -40,15 +40,16 @@ final class TestRun extends AutoCloseable {
   /**
    * Starts a test selection on the run thread: it prepares the environment, then launches the runner.
    *
-   * Throws `IllegalStateException` if a run is already in progress. Cancelling the returned future terminates the
-   * runner and its child processes. A run that fails to prepare or launch reports the failure through `log` and
-   * `finished`; `finished` is not called after cancellation.
+   * Throws `IllegalStateException` if a run is already in progress and not cancelled; after a cancelled one, the new run
+   * waits for it to end. Cancelling the returned future terminates the runner and its child processes. A run that fails
+   * to prepare or launch reports the failure through `log` and `finished`; `finished` is not called after cancellation.
    *
    * @param selection suite, and optionally tests, to run
    * @param prepare supplies the runner's environment; called on the run thread, before the process starts
    * @param log receives the runner's output lines and test outcomes, from the run thread
    * @param finished receives the final summary once the runner exits, or a failed result if the run could not complete
-   * @return a future that completes with `null` after the runner process has exited and the run is no longer active
+   * @return a future that completes with `null` after the runner process has exited and the run is no longer active;
+   *         cancelling it completes it at once, while the run ends on the run thread
    */
   def start(selection: Selection, prepare: () => Environment, log: String => Unit,
             finished: Result => Unit): CompletableFuture[AnyRef] = submit(testJob(selection), prepare, log, finished)
@@ -67,10 +68,13 @@ final class TestRun extends AutoCloseable {
   def startMain(main: MainSelection, prepare: () => Environment, log: String => Unit,
                 finished: Result => Unit): CompletableFuture[AnyRef] = submit(mainJob(main), prepare, log, finished)
 
-  /** Makes `job` the active run and executes it on the run thread; fails if another run is active. */
+  /**
+   * Makes `job` the active run and queues it on the run thread, behind a cancelled run that is still ending; fails if
+   * another run is active and not cancelled.
+   */
   private def submit(job: Job, prepare: () => Environment, log: String => Unit,
                      finished: Result => Unit): CompletableFuture[AnyRef] = synchronized {
-    if (active.nonEmpty) throw new IllegalStateException("a run is already in progress")
+    if (active.exists(!_.cancelled)) throw new IllegalStateException("a run is already in progress")
 
     val run = new Run
 
@@ -80,7 +84,10 @@ final class TestRun extends AutoCloseable {
     run.answer
   }
 
-  /** Prepares and launches the run on the executor thread, then always cancels it, clears `active` and completes it. */
+  /**
+   * Prepares and launches the run on the executor thread, then always cancels it, clears `active` unless a newer run
+   * took its place, and completes it.
+   */
   private def execute(run: Run, job: Job, prepare: () => Environment,
                       log: String => Unit, finished: Result => Unit): Unit = {
     try {
@@ -102,7 +109,7 @@ final class TestRun extends AutoCloseable {
     } finally {
       run.cancel()
       run.awaitExit()
-      synchronized { active = None }
+      synchronized { if (active.exists(_ eq run)) active = None }
       run.answer.complete(null)
     }
   }

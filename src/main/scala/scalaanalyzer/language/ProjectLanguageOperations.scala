@@ -807,6 +807,7 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
    * @return each accepted action paired with its edits, and the problems it fixes or suppresses in its result; the
    *         edits of Implement members are absent when `resolvesEdits`, and [[implementMembers]] at `start` computes
    *         them. Empty for a file that is not Scala
+   * @throws com.intellij.openapi.progress.ProcessCanceledException when the buffer is edited meanwhile
    */
   def codeActions(path: Path, start: LineColumn, end: LineColumn, only: Seq[String] = Seq.empty,
       withInspections: Boolean = false, resolvesEdits: Boolean = false)
@@ -818,7 +819,8 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
       def accepts(kind: String): Boolean = only.isEmpty || only.exists(k => kind == k || kind.startsWith(k + "."))
 
       // The host reads for itself: Implement members previews on the dispatch thread, so this must not hold a read.
-      val range = host.read(new TextRange(offset(sourceDocument, start), offset(sourceDocument, end)))
+      val (range, stamp) = host.read(
+        (new TextRange(offset(sourceDocument, start), offset(sourceDocument, end)), sourceDocument.getModificationStamp))
       val offered =
         if (accepts("quickfix") || accepts("refactor.rewrite") || accepts("refactor.inline"))
           host.codeActions(sourceFile, range, withInspections)
@@ -833,6 +835,8 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
       val choices = offered.choices.filter(choice => accepts(choice.kind)) ++ previewed ++ source
 
       host.read {
+        // The reads above are separate, and an edit between them would mix two versions of the text in the result.
+        if (sourceDocument.getModificationStamp != stamp) throw new ProcessCanceledException()
         choices.map { choice =>
           CodeActionResult(choice.title, choice.kind, choice.disabled, pluginProblems(sourceDocument, choice.problems)) ->
             Some(choice.edits.map(textChange(sourceDocument, _)))

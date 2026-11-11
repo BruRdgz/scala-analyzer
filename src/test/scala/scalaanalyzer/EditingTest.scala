@@ -1026,6 +1026,16 @@ class EditingTest extends munit.FunSuite {
   // The dispatch thread runs the platform's `invokeLater` tasks, some of which write: a thread that reads, edits or holds
   // write intent and waits for it can wait for a writer that waits for it. That the hop refuses such a caller is what keeps the previews
   // that need the event thread from deadlocking with those tasks; the race itself cannot be made deterministic.
+  test("the dispatch thread stays the platform's event thread after a queued task throws") {
+    val errors = HostLog.count(HostLog.Level.Error)
+    HostDispatchThread.invokeLater(() => throw new IllegalStateException("thrown by a queued task (expected by this test)"))
+    assert(HostDispatchThread.call(HostDispatchThread.isCurrent), "the replacement thread is not the event thread")
+    // The ended thread logs its failure after the executor has started its replacement.
+    val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30)
+    while (HostLog.count(HostLog.Level.Error) == errors && System.nanoTime() < deadline) Thread.sleep(10)
+    assertEquals(HostLog.count(HostLog.Level.Error), errors + 1)
+  }
+
   test("a query on the dispatch thread is refused inside a read, an edit or write intent") {
     assertEquals(HostLock.queryOnDispatchThread(HostDispatchThread.isCurrent), true)
     intercept[IllegalStateException](host.read(HostLock.queryOnDispatchThread(())))
@@ -1185,6 +1195,44 @@ class EditingTest extends munit.FunSuite {
       host.edit(file, 0, original.length, changed)
       assertEquals(host.organizeImports(file).edits, Seq.empty)
     } finally host.closeSource(file)
+  }
+
+  test("code actions are cancelled when the buffer changes between their reads") {
+    val text = "object Mixed { val n = 1 + 2 }\n"
+    val path = Path.of("/editing/Mixed.scala")
+    val file = host.openFile(path, text, module)
+    val formatterCache = Path.of(sys.props("scalaanalyzer.stateDir")).resolve("scalafmt")
+    val requester = Thread.currentThread()
+    val reads = new java.util.concurrent.atomic.AtomicInteger()
+    val listeners = com.intellij.openapi.util.Disposer.newDisposable()
+    // The request's second read (after the one that takes the selection's offsets) finds the buffer edited.
+    HostLock.addReadListener(new com.intellij.openapi.application.ReadActionListener {
+      override def beforeReadActionStart(action: Class[?]): Unit =
+        if ((Thread.currentThread() eq requester) && reads.incrementAndGet() == 2) {
+          val edit = new Thread(() => host.edit(file, 0, 0, "// edited\n"))
+          edit.start()
+          edit.join()
+        }
+    }, listeners)
+    try Using.resources(new DocumentCompiler, new ScalafmtFormatting(formatterCache)) { (compiler, scalafmt) =>
+      val operations = new ProjectLanguageOperations(host, Path.of("/editing"), compiler, scalafmt, _ => file)
+      intercept[ProcessCanceledException](operations.codeActions(path, LineColumn(0, 23), LineColumn(0, 23)))
+    } finally {
+      com.intellij.openapi.util.Disposer.dispose(listeners)
+      host.closeSource(file)
+    }
+  }
+
+  test("a thread's log count leaves out what other threads log, as a preview's error check needs") {
+    val global = HostLog.count(HostLog.Level.Warn)
+    val own = HostLog.threadCount(HostLog.Level.Warn)
+    val other = new Thread(() => HostLog.warn("logged by another thread (expected by this test)"))
+    other.start()
+    other.join()
+    assertEquals(HostLog.count(HostLog.Level.Warn), global + 1)
+    assertEquals(HostLog.threadCount(HostLog.Level.Warn), own)
+    HostLog.warn("logged by the test's thread (expected by this test)")
+    assertEquals(HostLog.threadCount(HostLog.Level.Warn), own + 1)
   }
 
   test("organize imports preserves a local import dependency") {

@@ -161,16 +161,23 @@ class InspectionResults {
     this.onFileChanged(uri, remaining);
   }
 
-  /** @param {Node} problem */
+  /**
+   * Takes a listed problem out of the tree and of its file's list; a problem no longer listed is left alone.
+   * @param {Node} problem
+   */
   detach(problem) {
+    const key = String(problem.uri);
+    const listed = this.problemsByFile.get(key) ?? [];
+    // A fix's edit detaches its problem (followEdit) before the fix removes it: a second detach would climb from the
+    // node's stale parent and take the problem's siblings with it.
+    if (!listed.includes(problem)) return;
     let top = problem;
     while (top.parent && top.parent.children.length === 1) top = top.parent;
     const siblings = top.parent ? top.parent.children : this.roots;
     const index = siblings.indexOf(top);
     if (index < 0) return;
     siblings.splice(index, 1);
-    const key = String(problem.uri);
-    this.problemsByFile.set(key, (this.problemsByFile.get(key) ?? []).filter(listed => listed !== problem));
+    this.problemsByFile.set(key, listed.filter(other => other !== problem));
   }
 
   /**

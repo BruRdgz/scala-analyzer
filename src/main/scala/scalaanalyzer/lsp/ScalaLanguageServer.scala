@@ -174,6 +174,13 @@ final class ScalaLanguageServer(
   /** The project sources the client has open; the others follow their file on disk. */
   private val openDocuments = ConcurrentHashMap.newKeySet[Path]()
 
+  /**
+   * The version that an edit of `path` is made to: the client's latest while it has the document open, and `null`
+   * (an unversioned edit) otherwise. `versions` keeps a closed document's last version for its diagnostics, which a
+   * client that opens the document again numbers anew.
+   */
+  private def openVersion(path: Path): Integer = if (openDocuments.contains(path)) versions.get(path) else null
+
   /** Edits counted as they arrive, before their turn on the documents thread (see onEditsRequest). */
   private val editsReceived = new AtomicLong()
 
@@ -219,18 +226,33 @@ final class ScalaLanguageServer(
     }
   }
 
-  /** Runs `body` as a work-done progress the client shows (when it can), with `body`'s reports as its messages. */
-  private def withProgress[T](title: String)(body: (String => Unit) => T): T =
-    if (!reportsProgress) body(_ => ())
+  /**
+   * Runs `body` as a work-done progress the client shows (when it can), with `body`'s reports as its messages.
+   *
+   * Progress is only shown: a client that does not acknowledge the token in time gets none, and a report that cannot
+   * be sent is logged, so that neither fails `body`, which may be in the middle of changing the host.
+   */
+  private def withProgress[T](title: String)(body: (String => Unit) => T): T = {
+    val token = LspEither.forLeft[String, Integer](s"scala-analyzer-${progressTokens.incrementAndGet()}")
+
+    /** Sends a progress update after the client has acknowledged the token. */
+    def send(value: WorkDoneProgressNotification): Unit =
+      try client.notifyProgress(new ProgressParams(token, LspEither.forLeft[WorkDoneProgressNotification, Object](value)))
+      catch { case NonFatal(e) => HostLog.warn(s"could not report the progress of $title", e) }
+
+    // The client must know the token before progress is reported on it.
+    val registered = reportsProgress && (
+      try {
+        client.createProgress(new WorkDoneProgressCreateParams(token)).get(ProgressRegistrationDeadlineSeconds, TimeUnit.SECONDS)
+        true
+      } catch {
+        case NonFatal(e) =>
+          HostLog.warn(s"the client did not accept the progress of $title; it goes on without it", e)
+          false
+      })
+
+    if (!registered) body(_ => ())
     else {
-      val token = LspEither.forLeft[String, Integer](s"scala-analyzer-${progressTokens.incrementAndGet()}")
-
-      /** Sends a progress update after the client has acknowledged the token. */
-      def send(value: WorkDoneProgressNotification): Unit =
-        client.notifyProgress(new ProgressParams(token, LspEither.forLeft[WorkDoneProgressNotification, Object](value)))
-
-      // The client must know the token before progress is reported on it.
-      client.createProgress(new WorkDoneProgressCreateParams(token)).get(ProgressRegistrationDeadlineSeconds, TimeUnit.SECONDS)
       val begin = new WorkDoneProgressBegin
       begin.setTitle(title)
       send(begin)
@@ -241,6 +263,7 @@ final class ScalaLanguageServer(
       }
       finally send(new WorkDoneProgressEnd)
     }
+  }
 
   /** Asks the client to request lenses again: the modules, and so the test suites, may have changed. */
   private def refreshCodeLenses(): Unit =
@@ -312,22 +335,16 @@ final class ScalaLanguageServer(
    *
    * Blocks the calling thread until the import ends. The state is "importing" meanwhile and "ready" afterwards, with
    * code lenses refreshed when the client supports it. A failure is rethrown after the state is set: "failed" when the session is no longer
-   * usable, otherwise "ready" with a message saying whether the import had returned (only progress reporting failed)
-   * or the last imported snapshot remains active.
+   * usable, otherwise "ready" with a message saying that the last imported snapshot remains active.
    *
    * @param s session whose build is imported
    * @param reload `true` to reload the BSP workspace first, as when the build definition changed; `false` when only
    *               source files were created or deleted
    */
   private[lsp] def importAgain(s: ProjectSession, reload: Boolean): Unit = {
-    var importReturned = false
-
     setState("importing", "importing the build again")
     try {
-      withProgress("scala-analyzer: importing the build") { progress =>
-        s.importBuild(reload, progress)
-        importReturned = true
-      }
+      withProgress("scala-analyzer: importing the build")(progress => s.importBuild(reload, progress))
       val snapshot = s.snapshot
       setState("ready", s"${snapshot.moduleCount} modules, ${snapshot.sourceFileCount} source files")
       refreshCodeLenses()
@@ -335,10 +352,6 @@ final class ScalaLanguageServer(
       case error: Throwable =>
         val detail = Option(error.getMessage).filter(_.nonEmpty).getOrElse(error.getClass.getSimpleName)
         if (!s.isUsable) setState("failed", s.unavailableMessage.getOrElse(detail))
-        else if (importReturned) {
-          val snapshot = s.snapshot
-          setState("ready", s"${snapshot.moduleCount} modules, ${snapshot.sourceFileCount} source files; build imported, but progress reporting failed: $detail")
-        }
         else
           setState("ready", s"reimport failed before host updates; the last imported snapshot remains active and can be retried: $detail")
         throw error
@@ -1412,14 +1425,14 @@ final class ScalaLanguageServer(
             (choice.disabled, changes) match {
               case (Some(reason), _) => action.setDisabled(new CodeActionDisabled(reason))
               case (None, Some(edits)) =>
-                action.setEdit(versionedEdit(path.toUri.toString, versions.get(path), edits))
+                action.setEdit(versionedEdit(path.toUri.toString, openVersion(path), edits))
               case (None, None) =>
                 val data = new JsonObject
                 data.addProperty("uri", path.toUri.toString)
                 data.addProperty("line", Integer.valueOf(start.line))
                 data.addProperty("character", Integer.valueOf(start.column))
-                // An unversioned document (never opened by the client) has no version member; its edit is unversioned.
-                Option(versions.get(path)).foreach(version => data.addProperty("version", version))
+                // A document the client does not have open has no version member; its edit is unversioned.
+                Option(openVersion(path)).foreach(version => data.addProperty("version", version))
                 action.setData(data)
             }
             LspEither.forRight[Command, CodeAction](action)
@@ -1469,7 +1482,7 @@ final class ScalaLanguageServer(
      * @throws ProcessCanceledException when the request is cancelled or the document is no longer in that version
      */
     private def implemented(s: ProjectSession, path: Path, at: LineColumn, version: Integer): Seq[TextChange] = {
-      def isOffered = versions.get(path) == version
+      def isOffered = openVersion(path) == version
 
       if (!isOffered) throw new ProcessCanceledException
       try s.implementMembers(path, at)
@@ -1510,7 +1523,7 @@ final class ScalaLanguageServer(
     override def rename(params: RenameParams): CompletableFuture[WorkspaceEdit] =
       onEditsRequest("rename", params.getTextDocument, new WorkspaceEdit()) { (s, path) =>
         val edits = s.rename(path, lineColumn(params.getPosition), params.getNewName).map { file =>
-          val document = new VersionedTextDocumentIdentifier(file.path.toUri.toString, versions.get(file.path))
+          val document = new VersionedTextDocumentIdentifier(file.path.toUri.toString, openVersion(file.path))
           LspEither.forLeft[TextDocumentEdit, ResourceOperation](new TextDocumentEdit(document, textEdits(file.changes)))
         }
 
@@ -1636,7 +1649,8 @@ final class ScalaLanguageServer(
 
   /**
    * Computes and publishes diagnostics only while `version` remains the current document version. When a Scala
-   * source's inspections have to run, the other problems are published before them.
+   * source's inspections have to run, the other problems are published before them. A computation that a write
+   * cancels while `version` is still current is scheduled again.
    */
   private def publishDiagnostics(path: Path, version: Integer): Unit =
     if (isCurrent(path, version)) {
@@ -1652,8 +1666,9 @@ final class ScalaLanguageServer(
         }
         publish(problems)
       } catch {
-        // A later change cancelled this computation; that change scheduled its own.
-        case _: ProcessCanceledException => ()
+        // Any write cancels every query. A change of this document scheduled its own computation; any other write
+        // (another document's edit, an import, a settings change) leaves this version without diagnostics otherwise.
+        case _: ProcessCanceledException => if (isCurrent(path, version)) scheduleDiagnostics(path)
         case NonFatal(e) => HostLog.error(s"problems of $path failed", e)
       }
     }
@@ -2018,7 +2033,7 @@ final class ScalaLanguageServer(
             val identity = arguments(5).getAsString
 
             s.insertCompletion(path, start, prefixText, lookup, identity)
-              .foreach(applyFollowUp(uri, versions.get(path), _))
+              .foreach(applyFollowUp(uri, openVersion(path), _))
             null
           }
         }

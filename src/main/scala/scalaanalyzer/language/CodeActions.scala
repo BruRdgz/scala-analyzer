@@ -376,17 +376,18 @@ final class CodeActions(intentionClasses: Seq[String], descriptorClasses: Seq[St
   }
 
   /**
-   * Logged platform failures can leave a partial preview even when the plugin returns normally.
+   * Logged platform failures can leave a partial preview even when the plugin returns normally. Only errors logged on
+   * this thread count: the preview runs on it, while other requests and the diagnostics log on their own threads.
    *
    * @param intentionEditor whether the session's editor is the one the IDE previews an intention with (see
    *                        [[ChangeEngine.runIntention]])
    */
   private def preview[A](file: ScalaFile, intentionEditor: Boolean = false)(modify: ScalaFile => A)
       : (ChangeEngine.Result, A) = {
-    val errors = HostLog.count(HostLog.Level.Error)
+    val errors = HostLog.threadCount(HostLog.Level.Error)
     val result =
       if (intentionEditor) ChangeEngine.runIntention(file)(modify) else ChangeEngine.run(file)(modify)
-    if (HostLog.count(HostLog.Level.Error) != errors)
+    if (HostLog.threadCount(HostLog.Level.Error) != errors)
       throw new UnsupportedOperationException("An error was logged while previewing this action.")
     result
   }
