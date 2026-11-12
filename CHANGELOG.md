@@ -150,7 +150,7 @@ Fixes of invariants that the code relied on without stating or enforcing them, f
 - Semantic tokens that start at the same position keep the last one, whatever its length, in a defined order.
 - After a test run's compile, the build's compiler diagnostics are republished to the open documents, also when the
   compilation fails.
-- Code standardization across all packages, following [CONVENTIONS.md](CONVENTIONS.md); no other behavior change.
+- Code standardization across all packages, following [CONVENTIONS.md](docs/CONVENTIONS.md); no other behavior change.
 - Rename the project to `scala-analyzer`, including the launcher, release archives, VS Code extension,
   Scala/Java package (`scalaanalyzer`), JVM properties and custom protocol identifiers.
 - Migration from 0.1.0: install the new `brurdgz.scala-analyzer` extension and remove the old one; update

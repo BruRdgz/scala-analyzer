@@ -272,7 +272,7 @@ Numeric version tags (for example, `0.1.0`) publish the exact checked artifacts 
 `version.sbt` and the VSIX manifest must agree. Each release includes `build-info.json` with source/dependency
 coordinates and packaged-file hashes, plus `SHA256SUMS`. The workflow does not publish to the VS Code Marketplace.
 
-For planned work, see the [roadmap](ROADMAP.md). For release history, see the [changelog](CHANGELOG.md).
+For planned work, see the [roadmap](docs/ROADMAP.md). For release history, see the [changelog](CHANGELOG.md).
 
 ## License and acknowledgements
 
