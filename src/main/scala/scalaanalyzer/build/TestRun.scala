@@ -85,14 +85,15 @@ final class TestRun extends AutoCloseable {
   }
 
   /**
-   * Prepares and launches the run on the executor thread, then always cancels it, clears `active` unless a newer run
-   * took its place, and completes it.
+   * Prepares and launches the run on the executor thread unless it was cancelled first, then always cancels it, clears
+   * `active` unless a newer run took its place, and completes it.
    */
   private def execute(run: Run, job: Job, prepare: () => Environment,
                       log: String => Unit, finished: Result => Unit): Unit = {
     try {
-      val environment = prepare()
-      if (!run.cancelled) {
+      // A run cancelled while it waited behind another one does not prepare: its preparation compiles the build.
+      val environment = Option.unless(run.cancelled)(prepare())
+      environment.filterNot(_ => run.cancelled).foreach { environment =>
         val interpreter = job.interpreter(log)
         val process = run.launch(job.command(environment), environment.item)
         process.foreach { child =>

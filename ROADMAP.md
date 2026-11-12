@@ -180,9 +180,12 @@ detaches a problem once.
   file or the project); read-only first, since rename and quick fixes would write to files the agent also edits. The
   session reads the disk, and a tool answers "still importing" rather than an empty result during the BSP import.
   First check what Claude Code already gets from registering the server as a plugin's LSP.
-- Left by the 0.3.1 audit (each checked in the code, none fixed):
+- Left by the 0.3.1 audit, none fixed (read from the code or reported by reviewers; check before acting):
   - A pending writer cancels every query before it owns write intent, including the queries of the thread that holds
     the intent (`HostLock.write`): a dispatch-thread `psiChanged` fails a rename that nothing changed.
+  - A document opened before it became a source is tracked by halves: its `didChange`s are dropped until an import
+    registers it from disk, the next incremental change then lands on the disk text, and since only `didOpen` adds it
+    to `openDocuments`, its edits are unversioned and a watched-file change overwrites it.
   - `ScalaPsiHost.replaceText` changes and commits the document before it reindexes, with no rollback: when the stubs
     do not pair with the PSI, the symbol index loses the file, the word and import indexes keep the old text, the rest of
     the `didChange` is dropped, and the next import makes the session unavailable. `rename`'s restore loop has the same

@@ -132,6 +132,26 @@ class TestRunTest extends munit.FunSuite {
       following.get(10, TimeUnit.SECONDS)
       assertEquals(Seq(order.poll(10, TimeUnit.SECONDS), order.poll(10, TimeUnit.SECONDS)),
         Seq("cancelled run ended", "next run prepared"))
+
+      // A run cancelled while it still waits behind another one never prepares.
+      val blocking = new CountDownLatch(1)
+      val holding = runner.start(selection, () => {
+        order.add("holding run preparing")
+        blocking.await(10, TimeUnit.SECONDS)
+        throw new IllegalStateException("preparation ended after cancellation")
+      }, _ => (), _ => ())
+      assertEquals(order.poll(10, TimeUnit.SECONDS), "holding run preparing")
+      assert(holding.cancel(true))
+      val waiting = runner.start(selection, () => next(), _ => (), _ => ())
+      assert(waiting.cancel(true))
+      blocking.countDown()
+      val last = runner.start(selection, () => {
+        order.add("last run prepared")
+        throw new IllegalStateException("no environment in this test")
+      }, _ => (), _ => ())
+      last.get(10, TimeUnit.SECONDS)
+      assertEquals(order.poll(10, TimeUnit.SECONDS), "last run prepared")
+      assertEquals(order.poll(), null)
     } finally {
       release.countDown()
       runner.close()
