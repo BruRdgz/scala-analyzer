@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.2 — 2026-11-12
+
+Less memory for the server.
+
+- The Scala plugin is at a revision whose caches no longer build label strings for every cache instance
+  (SCL-26384). After a session over this repository, the server holds about 850 MB of live objects instead of
+  1370 MB, and its requests took about 10% less time.
+- The launcher keeps the committed heap near what the server uses, and lets it shrink after 5 idle minutes.
+  Before, the committed heap grew to the maximum (2 GB by default) during a session and stayed there while the
+  editor was idle.
+- `scalaAnalyzer/status` reports the committed heap next to the used and maximum heap.
+
 ## 0.3.1 — 2026-11-11
 
 Fixes of invariants that the code relied on without stating or enforcing them, found by an audit of the code base.

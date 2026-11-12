@@ -167,6 +167,11 @@ event thread after a task throws, code actions check the document's stamp across
 edits of closed documents are unversioned, a run can start behind a cancelled one, and the Inspection Results view
 detaches a problem once.
 
+## 0.3.2 — release (2026-11-12)
+
+Memory: the plugin pin moves to the upstream fix of its per-instance cache labels (SCL-26384), and the launcher sets
+G1 free ratios of 20-50% with a periodic collection after 5 idle minutes.
+
 ## Next — 0.4
 
 - Move a class or file from the editor's file explorer (`workspace/willRenameFiles` over the plugin's move handler).
