@@ -4,7 +4,7 @@ val requiredJavaVersion = 25
 val platformVersion = "263.7307.200"
 
 // The intellij-scala revision the host is built and tested against (branch idea263.x).
-val scalaPluginRevision = "d2b6e2aed33eaa02ab4b0c4a0db7fe5f3db1202f"
+val scalaPluginRevision = "79602300bb391187ee6c79890082706bdf9b6ad0"
 
 // The Scala plugin's own jars, built from intellij-scala with `sbt packageArtifactZip`.
 val scalaPluginLib = settingKey[File]("Directory with the Scala plugin's jars (Scala/lib)")

@@ -217,7 +217,7 @@ then build the server distribution:
 export JAVA_HOME=/absolute/path/to/jdk-25
 
 git clone https://github.com/JetBrains/intellij-scala ../intellij-scala
-git -C ../intellij-scala checkout d2b6e2aed33eaa02ab4b0c4a0db7fe5f3db1202f
+git -C ../intellij-scala checkout 79602300bb391187ee6c79890082706bdf9b6ad0
 (
   cd ../intellij-scala
   sbt --java-home "$JAVA_HOME" packageArtifactZip

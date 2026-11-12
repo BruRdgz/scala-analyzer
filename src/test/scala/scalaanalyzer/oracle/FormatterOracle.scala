@@ -42,7 +42,7 @@ object FormatterOracle {
     val lines = Vector.newBuilder[String]
     lines += "# Formatter oracle"
     lines += ""
-    lines += s"Platform 263.7307.200, plugin d2b6e2aed3, unit-test mode; ${(System.nanoTime() - started) / 1_000_000} ms."
+    lines += s"Platform 263.7307.200, plugin 79602300bb, unit-test mode; ${(System.nanoTime() - started) / 1_000_000} ms."
     lines += ""
     lines += "The .test corpus uses FileSetTestBase's separator and compares trimmed text. FormatterTestBase sets " +
       "USE_SCALADOC2_FORMATTING=true. Both multiline-string suites additionally enable opening quotes on a new line, " +
