@@ -652,6 +652,7 @@ final class ScalaLanguageServer(
       "logFile" -> logFile.map(_.toString).orNull,
       "project" -> project.orNull,
       "heapMb" -> map("used" -> java.lang.Long.valueOf((heap.totalMemory - heap.freeMemory) / (1024 * 1024)),
+        "committed" -> java.lang.Long.valueOf(heap.totalMemory / (1024 * 1024)),
         "max" -> java.lang.Long.valueOf(heap.maxMemory / (1024 * 1024))),
       "requests" -> map(requests.summary.map(s => s.kind -> map(
         "count" -> java.lang.Long.valueOf(s.count), "p50Ms" -> java.lang.Long.valueOf(s.p50),
