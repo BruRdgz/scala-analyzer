@@ -308,10 +308,7 @@ final class McpServer(
 
     val opened = session.join()
     followChangesOnDisk(opened)
-    call.tool match {
-      case McpTools.FindSymbol => McpTools.findSymbol(opened, root, call.arguments)
-      case other => throw new IllegalStateException(s"${other.name} is not a tool of the project")
-    }
+    McpTools.call(call.tool, opened, root, call.arguments)
   }
 
   /**
@@ -397,9 +394,10 @@ private object McpServer {
   /** What the model is told when it connects, on top of each tool's own description. */
   private val Instructions =
     "scala-analyzer answers questions about a Scala project from its build and the IntelliJ Scala plugin's analysis. " +
-      "Its tools address symbols by name (a name, optionally qualified by package or enclosing type), not by file " +
-      "position; lines and columns in their answers count from 1. The tools only read: edit files as usual, and the " +
-      "server follows what is saved on disk. While the project imports, call project_status until it is ready."
+      "Its navigation tools take a target in one of two ways: `symbol`, a name optionally qualified by package or " +
+      "enclosing type (find_symbol searches by partial name), or `file`, `line` and `text`, the identifier as written " +
+      "on that line. Lines and columns in their answers count from 1. The tools only read: edit files as usual, and " +
+      "the server follows what is saved on disk. While the project imports, call project_status until it is ready."
 
   /** Where the project is in opening and importing. */
   private enum Phase { case Starting, Importing, Ready, Failed }

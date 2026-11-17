@@ -2,7 +2,7 @@ package scalaanalyzer.mcp
 
 import com.google.gson.{JsonObject, JsonParser, JsonPrimitive}
 
-import scalaanalyzer.language.WorkspaceSymbolMatch
+import scalaanalyzer.language.OutlineSymbol
 import scalaanalyzer.workspace.ProjectSession
 
 import java.nio.file.Path
@@ -12,7 +12,8 @@ import scala.util.Try
 /**
  * The tools the MCP server offers, and what the ones that read the project answer.
  *
- * Tools address symbols by name, and report lines and columns counting from 1 (the session counts from 0).
+ * Tools address symbols by name, or by the text on a line (see [[ToolTarget]]), and report lines and columns counting
+ * from 1 (the session counts from 0). A tool that lists what it found cuts the list to its `limit` argument.
  */
 private[mcp] object McpTools {
   /**
@@ -34,6 +35,43 @@ private[mcp] object McpTools {
 
   /** The number of matches `find_symbol` lists when the call gives no limit. */
   private val DefaultSymbolLimit = 50
+
+  /** The number of entries the other tools list when the call gives no limit. */
+  private val DefaultLimit = 100
+
+  /** What the descriptions of the tools that take a target say about how to name it. */
+  private val TargetForms =
+    "The target is named in exactly one of two ways: `symbol`, a name optionally qualified by package and enclosing " +
+      "types (`core.Greeting`, `Greeting.text`); or `file`, `line` and `text`, the identifier as written on that line " +
+      "of a project source."
+
+  /** The properties of the arguments that name a target, as members of a JSON Schema's `properties`. */
+  private val TargetProperties = """
+    "symbol": {
+      "type": "string",
+      "description": "Symbol name, optionally qualified by package and enclosing types, e.g. core.Greeting or Greeting.text. A '#' separates like a '.'."
+    },
+    "file": {
+      "type": "string",
+      "description": "Project source, relative to the workspace root or absolute. Goes with line and text."
+    },
+    "line": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Line of the file, counting from 1. Goes with file and text."
+    },
+    "text": {
+      "type": "string",
+      "description": "The identifier (for type_of, the expression) as written on that line. Its first occurrence on the line is the target. Goes with file and line."
+    }"""
+
+  /** The property of the arguments that cuts a list, as a member of a JSON Schema's `properties`. */
+  private val LimitProperty = """
+    "limit": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Most entries to list (default 100)."
+    }"""
 
   /** Reports the state of the project; answers while it is still opening. */
   val ProjectStatus: Tool = Tool(
@@ -70,11 +108,126 @@ private[mcp] object McpTools {
     }"""),
   )
 
+  /** Says where a symbol is declared. */
+  val Definition: Tool = Tool(
+    name = "definition",
+    title = "Go to definition",
+    description = "Finds where the symbol at the target is declared, in the project or in a library: its " +
+      s"file:line:column and source line. Most useful on a use of the symbol, with file, line and text; with symbol it " +
+      s"answers the symbol's own declaration. $TargetForms Example: {\"file\": \"app/src/main/scala/app/Main.scala\", " +
+      "\"line\": 7, \"text\": \"loud\"}.",
+    inputSchema = targetSchema(limited = false),
+  )
+
+  /** Lists the usages of a symbol. */
+  val References: Tool = Tool(
+    name = "references",
+    title = "Find references",
+    description = "Lists the usages of the symbol at the target across the project sources, each with its " +
+      s"file:line:column and source line; the declaration itself is not listed. $TargetForms " +
+      "Example: {\"symbol\": \"core.Greeting\"}.",
+    inputSchema = targetSchema(limited = true),
+  )
+
+  /** Lists the implementations of a trait, class or method. */
+  val Implementations: Tool = Tool(
+    name = "implementations",
+    title = "Find implementations",
+    description = "Lists the project declarations that implement or override the trait, class or method at the " +
+      s"target, each with its file:line:column and source line. $TargetForms Example: {\"symbol\": \"Shape\"}.",
+    inputSchema = targetSchema(limited = true),
+  )
+
+  /** Lists the methods that call a method. */
+  val Callers: Tool = Tool(
+    name = "callers",
+    title = "Find callers",
+    description = "Lists the methods that call the method at the target, one level: the kind, name and " +
+      s"file:line:column of each caller. $TargetForms Example: {\"symbol\": \"Greeting.text\"}.",
+    inputSchema = targetSchema(limited = true),
+  )
+
+  /** Lists the methods that a method calls. */
+  val Callees: Tool = Tool(
+    name = "callees",
+    title = "Find callees",
+    description = "Lists the methods that the method at the target calls, one level: the kind, name and " +
+      s"file:line:column of each callee. $TargetForms Example: {\"symbol\": \"Main.main\"}.",
+    inputSchema = targetSchema(limited = true),
+  )
+
+  /** Lists the direct supertypes of a class, trait or object. */
+  val Supertypes: Tool = Tool(
+    name = "supertypes",
+    title = "Find supertypes",
+    description = "Lists the direct supertypes of the class, trait or object at the target, one level: the kind, " +
+      s"name and file:line:column of each, in the project or in a library. $TargetForms Example: {\"symbol\": \"Square\"}.",
+    inputSchema = targetSchema(limited = true),
+  )
+
+  /** Lists the direct subtypes of a class, trait or object. */
+  val Subtypes: Tool = Tool(
+    name = "subtypes",
+    title = "Find subtypes",
+    description = "Lists the project's direct subtypes of the class, trait or object at the target, one level: the " +
+      s"kind, name and file:line:column of each. $TargetForms Example: {\"symbol\": \"Shape\"}.",
+    inputSchema = targetSchema(limited = true),
+  )
+
+  /** Tells the type of a symbol or an expression. */
+  val TypeOf: Tool = Tool(
+    name = "type_of",
+    title = "Type of",
+    description = "Tells the type of the symbol or expression at the target, as the IDE's Type Info does. With " +
+      s"file, line and text, the text may be any expression on the line. $TargetForms " +
+      "Example: {\"file\": \"app/src/main/scala/app/Main.scala\", \"line\": 7, \"text\": \"Greeting(\\\"world\\\").text\"}.",
+    inputSchema = targetSchema(limited = false),
+  )
+
+  /** Shows the signature and documentation of a symbol. */
+  val Describe: Tool = Tool(
+    name = "describe",
+    title = "Describe symbol",
+    description = "Shows the signature and the documentation of the symbol at the target, as the IDE shows them on " +
+      s"hover, in Markdown. $TargetForms Example: {\"symbol\": \"Greet3.hello\"}.",
+    inputSchema = targetSchema(limited = false),
+  )
+
+  /** Lists the declarations of a file. */
+  val Outline: Tool = Tool(
+    name = "outline",
+    title = "File outline",
+    description = "Lists the declarations of a project source as an indented tree, as the IDE's structure view: each " +
+      "line has the kind, the name, the signature and the line of the name. Example: " +
+      "{\"file\": \"core/src/main/scala/core/Shape.scala\"}.",
+    inputSchema = schema("""{
+      "type": "object",
+      "properties": {
+        "file": {
+          "type": "string",
+          "description": "Project source, relative to the workspace root or absolute."
+        }
+      },
+      "required": ["file"],
+      "additionalProperties": false
+    }"""),
+  )
+
   /** Every tool, in the order `tools/list` gives them. */
-  val All: Seq[Tool] = Seq(ProjectStatus, FindSymbol)
+  val All: Seq[Tool] = Seq(
+    ProjectStatus, FindSymbol, Definition, References, Implementations, Callers, Callees, Supertypes, Subtypes, TypeOf,
+    Describe, Outline,
+  )
 
   /** Parses the JSON Schema of a tool's arguments. */
   private def schema(json: String): JsonObject = JsonParser.parseString(json).getAsJsonObject
+
+  /** The JSON Schema of a tool that takes a target, and a `limit` when it lists what it found. */
+  private def targetSchema(limited: Boolean): JsonObject = {
+    val properties = if (limited) s"$TargetProperties,$LimitProperty" else TargetProperties
+
+    schema(s"""{"type": "object", "properties": {$properties}, "additionalProperties": false}""")
+  }
 
   /**
    * Reads a string member of a JSON object.
@@ -97,42 +250,146 @@ private[mcp] object McpTools {
     Option(from.get(name)).collect { case value: JsonObject => value }.getOrElse(new JsonObject)
 
   /**
-   * Lists the project symbols that match a name, one per line.
+   * Reads an integer member of a JSON object that must be at least 1.
    *
-   * Reads the session's symbol index, so the caller must have brought the session up to date with the disk.
-   *
-   * @param session the open project
-   * @param root workspace root, which the listed paths are relative to when they are under it
-   * @param arguments the call's arguments: `query` (required) and `limit` (optional, at least 1)
-   * @return the matches in the session's order, best first, cut to the limit with a note saying so; a sentence
-   *         saying that nothing matches when the query finds nothing
-   * @throws ToolFailure when `query` is missing or blank, or `limit` is not an integer of at least 1
+   * @param from the object
+   * @param name member name
+   * @return the member; `None` when it is absent
+   * @throws ToolFailure when the member is not an integer of at least 1
    */
-  def findSymbol(session: ProjectSession, root: Path, arguments: JsonObject): String = {
+  def positiveInteger(from: JsonObject, name: String): Option[Int] =
+    Option(from.get(name)).map { value =>
+      Try(value.getAsBigDecimal.intValueExact).filter(_ >= 1)
+        .getOrElse(throw new ToolFailure(s"`$name` must be an integer of at least 1, not $value."))
+    }
+
+  /**
+   * Runs a tool that reads the project.
+   *
+   * Reads the session's indexes and sources, so the caller must have brought the session up to date with the disk.
+   *
+   * @param tool the tool called, not `project_status`
+   * @param session the open project
+   * @param root workspace root, which the shown paths are relative to when they are under it
+   * @param arguments the call's arguments
+   * @return the answer as text: what the tool found, or a sentence saying that it found nothing
+   * @throws ToolFailure when the arguments do not name what the tool needs
+   * @throws IllegalStateException when the tool is not one that reads the project
+   */
+  def call(tool: Tool, session: ProjectSession, root: Path, arguments: JsonObject): String = tool match {
+    case FindSymbol => findSymbol(session, root, arguments)
+    case Definition => definition(session, root, arguments)
+    case References => references(session, root, arguments)
+    case Implementations => implementations(session, root, arguments)
+    case Callers => calls(session, root, arguments, "callers", incoming = true)
+    case Callees => calls(session, root, arguments, "callees", incoming = false)
+    case Supertypes => types(session, root, arguments, "supertypes", subtypes = false)
+    case Subtypes => types(session, root, arguments, "subtypes", subtypes = true)
+    case TypeOf => typeOf(session, root, arguments)
+    case Describe => describe(session, root, arguments)
+    case Outline => outline(session, root, arguments)
+    case other => throw new IllegalStateException(s"${other.name} is not a tool of the project")
+  }
+
+  /** Lists the symbols that match `query`, best first, cut to `limit` (at least 1, default 50) with a note saying so. */
+  private def findSymbol(session: ProjectSession, root: Path, arguments: JsonObject): String = {
     val query = stringMember(arguments, "query").map(_.trim).filter(_.nonEmpty)
       .getOrElse(throw new ToolFailure("`query` is required: give a symbol name such as `Greeting` or `core.Greeting`."))
-    val limit = Option(arguments.get("limit")).fold(DefaultSymbolLimit) { value =>
-      Try(value.getAsBigDecimal.intValueExact).filter(_ >= 1)
-        .getOrElse(throw new ToolFailure(s"`limit` must be an integer of at least 1, not $value."))
-    }
+    val limit = positiveInteger(arguments, "limit").getOrElse(DefaultSymbolLimit)
 
     val matches = session.workspaceSymbols(query)
     if (matches.isEmpty) s"No symbol matches $query."
-    else {
-      val shown = matches.take(limit)
-      val note = Option.when(shown.size < matches.size)(s"(showing ${shown.size} of ${matches.size} matches)")
+    else Listings.list(matches, limit, "matches")(Listings.symbol(root, _))
+  }
 
-      (shown.map(listing(root, _)) ++ note).mkString("\n")
+  /** Locates the declarations of the symbol at the target. */
+  private def definition(session: ProjectSession, root: Path, arguments: JsonObject): String = {
+    val target = ToolTarget.resolve(session, root, arguments)
+    val found = session.definition(target.path, target.at)
+
+    answer(target, arguments, "declarations", found)((path, at) => Listings.location(session, root, path, at))
+  }
+
+  /** Lists the usages of the symbol at the target, without its declaration. */
+  private def references(session: ProjectSession, root: Path, arguments: JsonObject): String = {
+    val target = ToolTarget.resolve(session, root, arguments)
+    val found = session.references(target.path, target.at, includeDeclaration = false)
+
+    answer(target, arguments, "references", found)(Listings.span(session, root, _))
+  }
+
+  /** Lists the implementations and overriders of the symbol at the target. */
+  private def implementations(session: ProjectSession, root: Path, arguments: JsonObject): String = {
+    val target = ToolTarget.resolve(session, root, arguments)
+    val found = session.implementations(target.path, target.at)
+
+    answer(target, arguments, "implementations", found)(Listings.span(session, root, _))
+  }
+
+  /** Lists, one level, the callers or the callees of the method at the target. */
+  private def calls(session: ProjectSession, root: Path, arguments: JsonObject, noun: String, incoming: Boolean): String = {
+    val target = ToolTarget.resolve(session, root, arguments)
+    val prepared = session.prepareHierarchy(target.path, target.at, types = false)
+    if (prepared.isEmpty) throw new ToolFailure(s"${target.description} is not a method, so it has no $noun.")
+
+    val found = prepared.flatMap(item => session.hierarchyCalls(target.path, item.target, incoming)).map(_.item).distinct
+
+    answer(target, arguments, noun, found)(Listings.item(session, root, _))
+  }
+
+  /** Lists, one level, the supertypes or the subtypes of the class, trait or object at the target. */
+  private def types(session: ProjectSession, root: Path, arguments: JsonObject, noun: String, subtypes: Boolean): String = {
+    val target = ToolTarget.resolve(session, root, arguments)
+    // The type hierarchy of a position inside a class is the class's; only the class a name declares or refers to counts.
+    val declared = session.definition(target.path, target.at).toSet
+    val prepared = session.prepareHierarchy(target.path, target.at, types = true)
+      .filter(item => declared.contains((item.location.path, item.selectionRange.start)))
+    if (prepared.isEmpty) {
+      throw new ToolFailure(s"${target.description} is not a class, trait or object, so it has no $noun.")
     }
+
+    val found = prepared.flatMap(item => session.hierarchyTypes(target.path, item.target, subtypes)).distinct
+
+    answer(target, arguments, noun, found)(Listings.item(session, root, _))
   }
 
-  /** One match as a line: its kind, name and container, then where its name is declared. */
-  private def listing(root: Path, found: WorkspaceSymbolMatch): String = {
-    val container = found.container.filter(_.nonEmpty).fold("")(name => s" in $name")
-    val path = found.location.path
-    val shownPath = if (path.startsWith(root)) root.relativize(path) else path
-    val start = found.location.range.start
+  /** Tells the type of the target: the name of a symbol, or the whole `text` of a line. */
+  private def typeOf(session: ProjectSession, root: Path, arguments: JsonObject): String = {
+    val target = ToolTarget.resolve(session, root, arguments)
 
-    s"${found.kind.toString.toLowerCase} ${found.name}$container — $shownPath:${start.line + 1}:${start.column + 1}"
+    session.typeInfo(target.path, target.range).getOrElse(s"No type is known for ${target.description}.")
   }
+
+  /** Shows the signature and documentation of the symbol at the target. */
+  private def describe(session: ProjectSession, root: Path, arguments: JsonObject): String = {
+    val target = ToolTarget.resolve(session, root, arguments)
+
+    session.hover(target.path, target.at).getOrElse(s"No signature or documentation found for ${target.description}.")
+  }
+
+  /** Draws the declarations of the `file` as a tree, two spaces per level. */
+  private def outline(session: ProjectSession, root: Path, arguments: JsonObject): String = {
+    val path = ToolTarget.sourceFile(session, root, arguments)
+    val symbols = session.outline(path)
+
+    if (symbols.isEmpty) s"No declarations found in ${Listings.shownPath(root, path)}."
+    else outlineLines(symbols, depth = 0).mkString("\n")
+  }
+
+  /** The lines of the symbols and, indented under each, of its children: kind, name, signature and line of the name. */
+  private def outlineLines(symbols: Seq[OutlineSymbol], depth: Int): Seq[String] =
+    symbols.flatMap { symbol =>
+      val detail = if (symbol.detail.isEmpty) "" else s" ${symbol.detail}"
+      val kind = symbol.kind.toString.toLowerCase
+      val line = s"${"  " * depth}$kind ${symbol.name}$detail :${symbol.nameRange.start.line + 1}"
+
+      line +: outlineLines(symbol.children, depth + 1)
+    }
+
+  /** The answer of a tool that lists its findings: the entries cut to `limit`, or a sentence saying that none was found. */
+  private def answer[A](target: ToolTarget, arguments: JsonObject, noun: String, found: Seq[A])(
+    format: A => String,
+  ): String =
+    if (found.isEmpty) s"No $noun found for ${target.description}."
+    else Listings.list(found, positiveInteger(arguments, "limit").getOrElse(DefaultLimit), noun)(format)
 }

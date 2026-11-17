@@ -120,7 +120,12 @@ class McpServerTest extends munit.FunSuite {
     sendLine("""{"jsonrpc": "2.0", "method": "notifications/initialized"}""")
 
     val tools = request("tools/list").getAsJsonObject("result").getAsJsonArray("tools")
-    assertEquals(tools.asScala.map(_.getAsJsonObject.get("name").getAsString).toSeq, Seq("project_status", "find_symbol"))
+    assertEquals(
+      tools.asScala.map(_.getAsJsonObject.get("name").getAsString).toSeq,
+      Seq(
+        "project_status", "find_symbol", "definition", "references", "implementations", "callers", "callees",
+        "supertypes", "subtypes", "type_of", "describe", "outline",
+      ))
 
     val ping = requestWithId("\"abc\"", "ping")
     assertEquals(ping.get("id").getAsString, "abc")
@@ -150,6 +155,62 @@ class McpServerTest extends munit.FunSuite {
     assertEquals(call("find_symbol", """{"query": "Greeting", "limit": 1}""").text.linesIterator.size, 2)
     assertEquals(call("find_symbol", """{"query": "NoSuchSymbolAnywhere"}"""), ToolAnswer("No symbol matches NoSuchSymbolAnywhere.", false))
     assert(call("find_symbol", """{"limit": 1}""").isError)
+  }
+
+  /**
+   * A navigation tool call and what its answer must contain.
+   *
+   * @param tool the tool called
+   * @param arguments the call's arguments, as JSON
+   * @param isError whether the call must fail
+   * @param pattern a regular expression that the answer must contain a match of
+   */
+  private final case class Navigation(tool: String, arguments: String, isError: Boolean, pattern: String)
+
+  private val mainText = """"file": "app/src/main/scala/app/Main.scala", "line": 7"""
+
+  private val navigations = Seq(
+    // Both forms of naming the target.
+    Navigation("definition", s"""{$mainText, "text": "Greeting"}""", false, """Greeting\.scala:3:18  final case class Greeting"""),
+    Navigation("definition", """{"symbol": "Greeting"}""", false, """Greeting\.scala:3:18  final case class Greeting"""),
+    Navigation("definition", """{"symbol": "Greeting#text"}""", false, """Greeting\.scala:4:7  def text"""),
+    Navigation("references", """{"symbol": "core.Greeting"}""", false, """app/src/main/scala/app/Main\.scala:7:\d+  val text"""),
+    Navigation("implementations", """{"symbol": "Shape"}""", false, """(?s)(?=.*Shape\.scala:7:13  final class Square)(?=.*Shape\.scala:11:13  final class Circle)"""),
+    Navigation("implementations", """{"symbol": "Shape", "limit": 1}""", false, """\(showing 1 of 2 implementations\)"""),
+    Navigation("callers", """{"symbol": "Greeting.text"}""", false, """method main — app/src/main/scala/app/Main\.scala:6:7  def main"""),
+    Navigation("callees", """{"symbol": "Main.main"}""", false, """method text — core/src/main/scala/core/Greeting\.scala:4:7  def text"""),
+    Navigation("supertypes", """{"symbol": "Square"}""", false, """ Shape — core/src/main/scala/core/Shape\.scala:3:7  trait Shape"""),
+    Navigation("subtypes", """{"symbol": "core.Shape"}""", false, """(?s)(?=.*class Square — .*Shape\.scala:7:13)(?=.*class Circle — .*Shape\.scala:11:13)"""),
+    Navigation("supertypes", """{"file": "core/src/main/scala/core/Shape.scala", "line": 7, "text": "Square"}""", false, "interface Shape"),
+    Navigation("type_of", s"""{$mainText, "text": "Greeting(\\"world\\").text"}""", false, "String"),
+    Navigation("type_of", """{"symbol": "Counter.count"}""", false, "Int"),
+    Navigation("describe", """{"symbol": "Greet3.hello"}""", false, """def hello\(name: String\): String(?s).*warmly"""),
+    Navigation("outline", """{"file": "core/src/main/scala/core/Shape.scala"}""", false, """(?m)^interface Shape :3\n  method area : Double :4$"""),
+    // Failures the model can correct.
+    Navigation("references", """{"symbol": "Counter"}""", true, """(?s)names several symbols:(?=.*Counter\.scala:9:7)(?=.*Counter\.scala:20:8).*Qualify the name"""),
+    Navigation("references", """{"symbol": "NoSuchSymbolAnywhere"}""", true, "No project symbol is named NoSuchSymbolAnywhere"),
+    Navigation("definition", s"""{$mainText, "text": "Missing"}""", true, """`Missing` is not on line 7 of app/src/main/scala/app/Main\.scala, which reads:\s+val text: String"""),
+    Navigation("definition", s"""{$mainText, "text": "Greeting", "symbol": "Greeting"}""", true, "exactly one of two ways"),
+    Navigation("definition", """{}""", true, "exactly one of two ways"),
+    Navigation("definition", """{"file": "app/src/main/scala/app/Main.scala", "text": "Greeting"}""", true, "`line` is required"),
+    Navigation("definition", """{"file": "app/src/main/scala/app/Main.scala", "line": 99, "text": "Greeting"}""", true, "has fewer than 99 lines"),
+    Navigation("definition", """{"file": "build.sbt", "line": 1, "text": "x"}""", true, "not a source file of the project"),
+    Navigation("callers", """{"symbol": "core.Shape"}""", true, "is not a method"),
+    Navigation("supertypes", """{"symbol": "Greeting.text"}""", true, "is not a class, trait or object"),
+    Navigation("references", """{"symbol": "core.Greeting", "limit": 0}""", true, "`limit` must be an integer of at least 1"),
+    Navigation("outline", """{}""", true, "`file` is required"),
+  )
+
+  test("answers the navigation tools by symbol and by position") {
+    ready
+
+    for (navigation <- navigations) {
+      val answered = call(navigation.tool, navigation.arguments)
+      val clue = s"${navigation.tool} ${navigation.arguments}: ${answered.text}"
+
+      assertEquals(answered.isError, navigation.isError, clue)
+      assert(navigation.pattern.r.findFirstIn(answered.text).isDefined, clue)
+    }
   }
 
   test("follows the files edited on disk") {

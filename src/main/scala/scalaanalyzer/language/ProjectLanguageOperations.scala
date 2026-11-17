@@ -1060,7 +1060,8 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
    */
   def workspaceSymbols(query: String): Seq[WorkspaceSymbolMatch] = host.read {
     ProjectSearch.symbols(host.project, query).flatMap { found =>
-      nameSpan(found.element).map { span =>
+      // A synthetic declaration, such as a case class's companion, has its name in the declaration it comes from.
+      nameSpan(found.element.getNavigationElement).map { span =>
         WorkspaceSymbolMatch(found.element.name, workspaceSymbolKind(found.element), found.container, span)
       }
     }

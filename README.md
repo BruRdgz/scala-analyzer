@@ -115,6 +115,20 @@ importing until it is ready.
 | --- | --- |
 | `project_status` | The import state, module and source counts, the workspace root and the log file. Answers while the project imports. |
 | `find_symbol` | Declarations by name, optionally qualified by package or enclosing type (`core.Greeting`, `Greeting.hello`), with file, line and column (counting from 1). |
+| `definition` | Where the symbol at the target is declared, in the project or a library. |
+| `references` | The usages of the symbol at the target, without its declaration. |
+| `implementations` | The implementations and overriders of a trait, class or method. |
+| `callers`, `callees` | The methods that call a method, and the methods it calls; one level. |
+| `supertypes`, `subtypes` | The direct supertypes and subtypes of a class, trait or object; one level. |
+| `type_of` | The type of a symbol or of an expression, as the IDE's Type Info. |
+| `describe` | The signature and documentation the IDE shows on hover, in Markdown. |
+| `outline` | The declarations of a file as an indented tree, with the line of each name. Takes `file` only. |
+
+Every tool but `project_status`, `find_symbol` and `outline` names its target in one of two ways: `symbol`, a name
+qualified as far as needed to be unambiguous (`core.Greeting`, `Greeting.text`; the answer lists the candidates when
+it is not), or `file`, `line` and `text`, the identifier (for `type_of`, the expression) as written on that line of a
+project source, where its first occurrence on the line is the target. The tools that list their findings take an
+optional `limit` (default 100), and show each location as `path:line:column` and its source line.
 
 The tools only read. The server follows the files edited on disk, checked before each call: it takes the new text of
 changed sources, and imports the build again when sources are created or deleted or the build definition changes.
