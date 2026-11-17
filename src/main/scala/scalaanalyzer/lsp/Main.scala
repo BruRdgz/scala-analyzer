@@ -3,6 +3,7 @@ package scalaanalyzer.lsp
 import org.eclipse.lsp4j.launch.LSPLauncher
 
 import scalaanalyzer.{HostConfig, ScalaPsiHost}
+import scalaanalyzer.mcp.McpServer
 import scalaanalyzer.platform.HostLog
 
 import java.io.{File, InputStream, OutputStream}
@@ -10,18 +11,20 @@ import java.nio.file.{Files, Path, StandardOpenOption}
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 
+import scala.annotation.tailrec
 import scala.jdk.CollectionConverters.*
 import scala.util.control.NonFatal
 
 /**
- * Runs the language server over stdin and stdout.
+ * Runs the language server over stdin and stdout, or with `--mcp [--root DIR]` an MCP server (see
+ * [[scalaanalyzer.mcp.McpServer]]) that serves the project in `DIR`, by default the working directory.
  *
  * System properties: `scalaanalyzer.stateDir` (where the platform keeps its state) and `scalaanalyzer.scalaPluginJars`
  * (the Scala plugin's jars, which must also be on the classpath). Environment: `SCALA_ANALYZER_LOG=debug` logs every
  * request.
  *
- * The log is written to `<stateDir>/logs/scala-analyzer-<start time>.log` (the latest logs are kept) and sent to the
- * client.
+ * The log is written to `<stateDir>/logs/scala-analyzer-<start time>.log` (the latest logs are kept) and, by the
+ * language server, sent to the client.
  */
 object Main {
   /**
@@ -39,26 +42,28 @@ object Main {
   private val HaltDelayMs = 1000L
 
   /**
-   * Starts the PSI host and serves LSP on standard input and output.
+   * Starts the PSI host and serves LSP, or MCP with `--mcp`, on standard input and output.
    *
    * Configuration comes from the system properties and environment described on [[Main]]. Standard output is
    * reserved for protocol traffic; other process output is redirected to standard error. A missing required system
-   * property fails with `IllegalArgumentException` before the host starts.
+   * property, or an argument that is not understood, fails with `IllegalArgumentException` before the host starts.
    *
-   * @param args launcher arguments, currently unused
+   * @param args launcher arguments: none for the language server; `--mcp` for the MCP server, with `--root <dir>` to
+   *             serve another directory than the working directory
    */
   def main(args: Array[String]): Unit = {
     /** Reads required launcher configuration, failing before the host is started when it is absent. */
     def property(name: String): String =
       sys.props.getOrElse(name, throw new IllegalArgumentException(s"system property $name is not set"))
 
+    val mcpRoot = parseArguments(args.toList, mcp = false, root = None)
     // Stdout carries the protocol: anything else printed there would corrupt it, so it goes to stderr.
     val protocolOut = System.out
     System.setOut(System.err)
     val stateDir = Path.of(property("scalaanalyzer.stateDir"))
     if (sys.env.get("SCALA_ANALYZER_LOG").exists(_.equalsIgnoreCase("debug"))) HostLog.threshold = HostLog.Level.Debug
     val logFile = openLogFile(stateDir.resolve("logs"))
-    // What is logged before the client connects (the host's startup) is sent to it when it connects.
+    // What is logged before the client connects (the host's startup) is sent to a language client when it connects.
     val startup = new java.util.concurrent.ConcurrentLinkedQueue[HostLog.Entry]()
     val buffering = HostLog.addSink(entry => startup.add(entry))
     val heap = Runtime.getRuntime.maxMemory / (1024 * 1024)
@@ -69,17 +74,37 @@ object Main {
       scalaPluginJars = property("scalaanalyzer.scalaPluginJars").split(File.pathSeparator).toSeq.map(Path.of(_)),
     )))
     finally buffering.close()
-    val server = new ScalaLanguageServer(host, code => {
-      val watchdog = new Thread(() => {
-        Thread.sleep(HaltDelayMs)
-        Runtime.getRuntime.halt(code)
-      }, "scala-analyzer-halt")
-      watchdog.setDaemon(true)
-      watchdog.start()
-      sys.exit(code)
-    }, Some(logFile), startup.asScala.toSeq)
 
-    listen(server, System.in, protocolOut)
+    mcpRoot match {
+      case Some(root) => new McpServer(host, root, System.in, protocolOut, exitProcess, Some(logFile)).serve()
+      case None =>
+        val server = new ScalaLanguageServer(host, exitProcess, Some(logFile), startup.asScala.toSeq)
+
+        listen(server, System.in, protocolOut)
+    }
+  }
+
+  /** Reads the launcher arguments in any order: the directory an MCP server serves, or `None` for the language server. */
+  @tailrec
+  private def parseArguments(args: List[String], mcp: Boolean, root: Option[Path]): Option[Path] = args match {
+    case Nil if mcp => Some(root.getOrElse(Path.of("").toAbsolutePath))
+    case Nil if root.isEmpty => None
+    case Nil => throw new IllegalArgumentException("--root needs --mcp")
+    case "--mcp" :: rest => parseArguments(rest, mcp = true, root)
+    case "--root" :: directory :: rest => parseArguments(rest, mcp, Some(Path.of(directory).toAbsolutePath.normalize))
+    case "--root" :: Nil => throw new IllegalArgumentException("--root needs a directory")
+    case unknown :: _ => throw new IllegalArgumentException(s"unknown argument: $unknown")
+  }
+
+  /** Ends the process with `code`, halting it if platform hooks keep the JVM from exiting in time. */
+  private def exitProcess(code: Int): Unit = {
+    val watchdog = new Thread(() => {
+      Thread.sleep(HaltDelayMs)
+      Runtime.getRuntime.halt(code)
+    }, "scala-analyzer-halt")
+    watchdog.setDaemon(true)
+    watchdog.start()
+    sys.exit(code)
   }
 
   /**

@@ -16,10 +16,10 @@ import scalaanalyzer.language.{
   WorkspaceSymbolKind,
 }
 import scalaanalyzer.platform.{CallLog, HostLock, HostLog}
-import scalaanalyzer.workspace.ProjectSession
+import scalaanalyzer.workspace.{BuildDefinition, ProjectSession}
 
 import java.net.URI
-import java.nio.file.{Files, Path}
+import java.nio.file.Path
 import java.util.{List as JavaList}
 import java.util.concurrent.*
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger, AtomicLong}
@@ -908,17 +908,6 @@ final class ScalaLanguageServer(
     }
   }
 
-  /** Replaces a source's buffer with its file on disk when they differ, then schedules its diagnostics. */
-  private def followDisk(s: ProjectSession, path: Path): Unit =
-    if (Files.isRegularFile(path)) {
-      val onDisk = Files.readString(path)
-
-      if (s.text(path) != onDisk) {
-        s.change(path, None, onDisk)
-        scheduleDiagnostics(path)
-      }
-    }
-
   /** Resolves only a URI currently tracked as a project source; other open documents are outside the session. */
   private def sourcePath(s: ProjectSession, uri: String): Option[Path] =
     Option.when(uri.startsWith("file:"))(pathOf(uri)).filter(s.isSource)
@@ -1034,7 +1023,7 @@ final class ScalaLanguageServer(
     override def didClose(params: DidCloseTextDocumentParams): Unit = onDocuments("didClose") { s =>
       sourcePath(s, params.getTextDocument.getUri).foreach { path =>
         openDocuments.remove(path)
-        followDisk(s, path)
+        if (s.followDisk(path)) scheduleDiagnostics(path)
       }
     }
 
@@ -2075,24 +2064,25 @@ final class ScalaLanguageServer(
     override def didChangeWatchedFiles(params: DidChangeWatchedFilesParams): Unit = onDocuments("watched files") { s =>
       val changes = params.getChanges.asScala.toSeq
         .filter(_.getUri.startsWith("file:"))
-        .map(change => pathOf(change.getUri) -> change.getType)
+        .map(change => ProjectSession.DiskChange(pathOf(change.getUri), diskChangeKind(change.getType)))
       val root = workspace.getOrElse(throw new IllegalStateException("watched files before initialize"))
-      def isBuildPart(path: Path) = BuildDefinition.isPart(root, s.isModuleBase, path)
-      val buildChanged = changes.exists((path, _) => isBuildPart(path))
-      // A file outside the build's sources and definition, such as another checkout under the workspace, changes
-      // nothing the server imports.
-      val sourcesAddedOrRemoved = changes.exists { (path, kind) =>
-        kind != FileChangeType.Changed && !isBuildPart(path) && s.affectsSources(path)
-      }
 
-      if (buildChanged || sourcesAddedOrRemoved) {
-        val reason = if (buildChanged) "build definition changed" else "source files created or deleted"
-        HostLog.info(s"$reason: ${changes.map(_._1).mkString(", ")}")
-        importAndScheduleDiagnostics(s, reload = buildChanged)
+      s.importNeeded(root, changes).foreach { reason =>
+        HostLog.info(s"${reason.description}: ${changes.map(_.path).mkString(", ")}")
+        importAndScheduleDiagnostics(s, reload = reason.reload)
       }
       changes
-        .collect { case (path, FileChangeType.Changed) if s.isSource(path) && !openDocuments.contains(path) => path }
-        .foreach(followDisk(s, _))
+        .filter(_.kind == ProjectSession.DiskChange.Kind.Changed)
+        .map(_.path)
+        .filter(path => s.isSource(path) && !openDocuments.contains(path))
+        .foreach(path => if (s.followDisk(path)) scheduleDiagnostics(path))
+    }
+
+    /** Maps the client's kind of file change to the session's. */
+    private def diskChangeKind(kind: FileChangeType): ProjectSession.DiskChange.Kind = kind match {
+      case FileChangeType.Created => ProjectSession.DiskChange.Kind.Created
+      case FileChangeType.Changed => ProjectSession.DiskChange.Kind.Changed
+      case FileChangeType.Deleted => ProjectSession.DiskChange.Kind.Deleted
     }
   }
 }
@@ -2114,40 +2104,6 @@ private val CompleteInsertion = "scalaAnalyzer.completeInsertion"
 
 /** The client's settings section that selects the kinds of inlay hints (see `InlayHints.Toggles`). */
 private val InlayHintSettings = "scalaAnalyzer.inlayHints"
-
-/** Which files define an sbt build: the client watches them, and a change to one reloads the build. */
-private object BuildDefinition {
-  /** Watcher glob for sbt build files at any depth. */
-  val SbtFiles = "**/*.sbt"
-
-  /** Watcher glob for the Scala sources of a build's `project` directory. */
-  val ProjectFiles = "**/project/*.scala"
-
-  /** Watcher glob for the `build.properties` file of a build's `project` directory. */
-  val BuildProperties = "**/project/build.properties"
-
-  /**
-   * Whether `path` can change the workspace's sbt build definition and therefore requires a BSP workspace reload.
-   *
-   * Only the build at the workspace root counts: the build files of other builds under it, such as test fixtures or
-   * other checkouts, are not part of it. sbt loads the `.sbt` files in the base directory of each of the build's
-   * projects, so a subproject's `.sbt` file is part of it as well.
-   *
-   * @param root workspace root
-   * @param isModuleBase whether a directory is the base directory of one of the build's imported modules
-   * @param path changed file; must have a file name, so not a filesystem root
-   * @return `true` for a `.sbt` file in the root, its `project` directory or a module's base directory, and for a
-   *         `.scala` file or `build.properties` in that `project` directory; `false` otherwise
-   */
-  def isPart(root: Path, isModuleBase: Path => Boolean, path: Path): Boolean = {
-    val name = path.getFileName.toString
-    val parent = path.getParent
-    val inProject = parent == root.resolve("project")
-
-    (name.endsWith(".sbt") && (parent == root || inProject || isModuleBase(parent))) ||
-      (inProject && (name.endsWith(".scala") || name == "build.properties"))
-  }
-}
 
 /** Latencies by request kind: counts and maxima since the server started, percentiles over the latest requests. */
 private final class RequestStats {

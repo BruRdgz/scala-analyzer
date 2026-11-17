@@ -2,6 +2,9 @@
 # The scala-analyzer language server, speaking LSP on stdin and stdout. Run it from an editor in a project that
 # has a BSP connection file (.bsp/, e.g. from `sbt bspConfig`).
 #
+# With --mcp [--root DIR] it speaks MCP on stdin and stdout instead, for an AI agent, serving the project in DIR
+# (default: the current directory).
+#
 # Needs JDK 25: JAVA_HOME, or java on the PATH.
 # SCALA_ANALYZER_STATE: where the platform keeps its state (default: $XDG_CACHE_HOME/scala-analyzer)
 # SCALA_ANALYZER_HEAP:  maximum heap (default: 2g)
@@ -19,4 +22,4 @@ mkdir -p "$state"
 exec "$java" -Xmx"${SCALA_ANALYZER_HEAP:-2g}" -XX:MinHeapFreeRatio=20 -XX:MaxHeapFreeRatio=50 \
   -XX:G1PeriodicGCInterval=300000 -Djava.awt.headless=true --add-opens=java.base/java.lang=ALL-UNNAMED \
   -Dscalaanalyzer.stateDir="$state" -Dscalaanalyzer.scalaPluginJars="$plugin" \
-  -cp "$classpath" scalaanalyzer.lsp.Main
+  -cp "$classpath" scalaanalyzer.lsp.Main "$@"

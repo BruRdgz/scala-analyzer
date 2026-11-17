@@ -186,11 +186,16 @@ source whose stubs do not pair with its PSI stays out of the symbol index instea
   `=>`, and the clauses after it parse as loose statements. Nothing to change in the host; bump the pin once it is fixed.
 - Each to decide: extract/introduce refactorings as code actions, Change Signature, debugging (DAP), worksheets.
 - AI agents over MCP: a `--mcp` mode of the same binary, a second transport over `ProjectSession` beside `lsp`
-  (MCP is JSON-RPC 2.0 over stdio, which lsp4j's jsonrpc already speaks). Tools addressed by qualified name rather
-  than line and column (references, implementers, callers, type of an expression, diagnostics and inspections of a
-  file or the project); read-only first, since rename and quick fixes would write to files the agent also edits. The
-  session reads the disk, and a tool answers "still importing" rather than an empty result during the BSP import.
-  First check what Claude Code already gets from registering the server as a plugin's LSP.
+  (MCP is JSON-RPC 2.0 over stdio, but one message per line, not the `Content-Length` framing of lsp4j's jsonrpc, so
+  the transport is its own). Tools are addressed by qualified name rather than line and column; read-only first,
+  since rename and quick fixes would write to files the agent also edits. A tool answers "still importing" rather
+  than an empty result during the BSP import.
+  - Wave A is done: the transport and lifecycle (`mcp/McpServer`), following the disk before each tool call
+    (`mcp/DiskScan`, with the change rules shared with the LSP through `ProjectSession.importNeeded` and
+    `followDisk`), and the tools `project_status` and `find_symbol`.
+  - Remaining: navigation tools by qualified name (definition, references, implementations, callers and callees,
+    supertypes and subtypes, type of an expression, outline), then diagnostics and inspections of a file or the
+    project.
 - Left by the 0.3.1 audit, none fixed (read from the code or reported by reviewers; check before acting):
   - A document opened before it became a source is tracked by halves: its `didChange`s are dropped until an import
     registers it from disk, the next incremental change then lands on the disk text, and since only `didOpen` adds it

@@ -102,6 +102,23 @@ See the [VS Code client documentation](editors/vscode/README.md) for more detail
 to JDK 25. Completion follow-up edits require `workspace/applyEdit`; caret placement also requires
 `window/showDocument`.
 
+### Use with AI agents (MCP)
+
+With `--mcp`, the same binary speaks the [Model Context Protocol](https://modelcontextprotocol.io) over stdio instead
+of LSP, so that an AI agent can ask about the project by symbol name. Register it with your MCP client as a stdio
+server whose command is `bin/scala-analyzer` and whose arguments are `--mcp --root /absolute/path/to/your/project`
+(`--root` defaults to the working directory), with `JAVA_HOME` pointing to JDK 25. The project needs the BSP
+connection described in step 2. The server starts importing at once; the tools answer that the project is still
+importing until it is ready.
+
+| Tool | Purpose |
+| --- | --- |
+| `project_status` | The import state, module and source counts, the workspace root and the log file. Answers while the project imports. |
+| `find_symbol` | Declarations by name, optionally qualified by package or enclosing type (`core.Greeting`, `Greeting.hello`), with file, line and column (counting from 1). |
+
+The tools only read. The server follows the files edited on disk, checked before each call: it takes the new text of
+changed sources, and imports the build again when sources are created or deleted or the build definition changes.
+
 ## Configuration
 
 ### Server environment

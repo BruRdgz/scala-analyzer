@@ -216,10 +216,10 @@ lazy val root = (project in file("."))
       (out / "bin" / "scala-analyzer").setExecutable(true)
       out
     },
-    // The language server's fixture modules and the measured adapter ledger each need their own host JVM:
+    // The language and MCP servers' fixture modules and the measured adapter ledger each need their own host JVM:
     // other suites may open the same modules or record calls outside the surface scenario.
     Test / testGrouping := {
-      val isolated = Set("scalaanalyzer.lsp.LanguageServerTest", "scalaanalyzer.AdapterSurfaceTest")
+      val isolated = Set("scalaanalyzer.lsp.LanguageServerTest", "scalaanalyzer.mcp.McpServerTest", "scalaanalyzer.AdapterSurfaceTest")
       val (own, shared) = (Test / definedTests).value.partition(test => isolated(test.name))
       val fork = Tests.SubProcess((Test / forkOptions).value)
       Seq(Tests.Group("shared", shared, fork)) ++ own.map(test => Tests.Group(test.name, Seq(test), fork))

@@ -133,6 +133,48 @@ final class ProjectSession private (
   def isModuleBase(directory: Path): Boolean = imported.exists(_.baseDirectory.contains(directory))
 
   /**
+   * Lists the directories the build lists as source entries, as the last completed import left them.
+   *
+   * Takes no lock: during an import it describes the previous one.
+   *
+   * @return the source directories of every imported module, distinct, in module order; a directory may not exist
+   *         on disk yet
+   */
+  def sourceDirectories: Seq[Path] = imported.flatMap(_.sourceDirectories).distinct
+
+  /**
+   * Lists the base directories of the imported modules, where sbt loads `.sbt` files.
+   *
+   * Takes no lock: it reads the modules as last imported.
+   *
+   * @return the base directory of every imported module that the build gives one for, distinct, in module order
+   */
+  def moduleBaseDirectories: Seq[Path] = imported.flatMap(_.baseDirectory).distinct
+
+  /**
+   * Decides whether file changes on disk require importing the build again, and how.
+   *
+   * Takes the import guard's read lock, as `isSource` does. A file outside the build's sources and definition, such
+   * as another checkout under the workspace, changes nothing the session imports.
+   *
+   * @param root workspace root, which bounds the build definition (see `BuildDefinition.isPart`)
+   * @param changes the files created, changed or deleted since the session last looked; may be empty
+   * @return the reason for importing, with `reload` set when a change is to the build definition; `None` when no
+   *         change affects the build, as when sources only changed (see `followDisk`)
+   */
+  def importNeeded(root: Path, changes: Seq[ProjectSession.DiskChange]): Option[ProjectSession.ImportReason] = {
+    def isBuildPart(path: Path) = BuildDefinition.isPart(root, isModuleBase, path)
+    val buildChanged = changes.exists(change => isBuildPart(change.path))
+    val sourcesAddedOrRemoved = changes.exists { change =>
+      change.kind != ProjectSession.DiskChange.Kind.Changed && !isBuildPart(change.path) && affectsSources(change.path)
+    }
+
+    if (buildChanged) Some(ProjectSession.ImportReason(reload = true, "build definition changed"))
+    else if (sourcesAddedOrRemoved) Some(ProjectSession.ImportReason(reload = false, "source files created or deleted"))
+    else None
+  }
+
+  /**
    * Reports whether source requests remain permitted by the import-failure guard.
    *
    * Takes no lock. Only the partial-import failure is consulted: closing the session does not change the result.
@@ -345,6 +387,24 @@ final class ProjectSession private (
    */
   def change(path: Path, range: Option[LineRange], replacement: String): Unit =
     language.change(path, range, replacement)
+
+  /**
+   * Replaces a source's buffer with its file on disk when they differ.
+   *
+   * This is for a source that no editor holds open: it drops unsaved text. Like `change`, it updates in-memory state
+   * and can cancel running host queries.
+   *
+   * @param path registered project-source path
+   * @return `true` when the buffer took the text on disk; `false` when the file is missing or the texts are equal
+   */
+  def followDisk(path: Path): Boolean =
+    Files.isRegularFile(path) && {
+      val onDisk = Files.readString(path)
+      val differs = text(path) != onDisk
+
+      if (differs) change(path, None, onDisk)
+      differs
+    }
 
   /**
    * Collects diagnostics for the current source.
@@ -976,6 +1036,35 @@ object ProjectSession {
    * @param sourceFileCount number of registered project sources when the import completed
    */
   private[scalaanalyzer] final case class Snapshot(moduleCount: Int, sourceFileCount: Int)
+
+  /**
+   * A file of the workspace that was created, changed or deleted on disk, whoever noticed it.
+   *
+   * @param path the file
+   * @param kind what happened to it
+   */
+  final case class DiskChange(path: Path, kind: DiskChange.Kind)
+
+  /** Defines what can happen to a file on disk. */
+  object DiskChange {
+    /** The change of a file on disk. */
+    enum Kind {
+      /** The file did not exist before. */
+      case Created
+      /** The file existed before and has other content now. */
+      case Changed
+      /** The file does not exist any more. */
+      case Deleted
+    }
+  }
+
+  /**
+   * Says that the build must be imported again, as `importNeeded` decides.
+   *
+   * @param reload whether to reload the build definition first, as `importBuild` takes it
+   * @param description what changed, in words for a log
+   */
+  final case class ImportReason(reload: Boolean, description: String)
 
   /**
    * Describes one build target: the imported module's identity, compiler and dependencies, without host internals.
