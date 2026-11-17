@@ -126,6 +126,9 @@ class McpServerTest extends munit.FunSuite {
         "project_status", "find_symbol", "definition", "references", "implementations", "callers", "callees",
         "supertypes", "subtypes", "type_of", "describe", "outline", "diagnostics", "inspect",
       ))
+    assert(
+      tools.asScala.forall(_.getAsJsonObject.getAsJsonObject("annotations").get("readOnlyHint").getAsBoolean),
+      tools.toString)
 
     val ping = requestWithId("\"abc\"", "ping")
     assertEquals(ping.get("id").getAsString, "abc")
@@ -177,8 +180,9 @@ class McpServerTest extends munit.FunSuite {
     Navigation("references", """{"symbol": "core.Greeting"}""", false, """app/src/main/scala/app/Main\.scala:7:\d+  val text"""),
     Navigation("implementations", """{"symbol": "Shape"}""", false, """(?s)(?=.*Shape\.scala:7:13  final class Square)(?=.*Shape\.scala:11:13  final class Circle)"""),
     Navigation("implementations", """{"symbol": "Shape", "limit": 1}""", false, """\(showing 1 of 2 implementations\)"""),
-    Navigation("callers", """{"symbol": "Greeting.text"}""", false, """method main — app/src/main/scala/app/Main\.scala:6:7  def main"""),
-    Navigation("callees", """{"symbol": "Main.main"}""", false, """method text — core/src/main/scala/core/Greeting\.scala:4:7  def text"""),
+    // A caller is listed at its call site; a library callee by its qualified name, after the project's.
+    Navigation("callers", """{"symbol": "Greeting.text"}""", false, """method main — app/src/main/scala/app/Main\.scala:7:53  val text"""),
+    Navigation("callees", """{"symbol": "Main.main"}""", false, """(?s)method text — core/src/main/scala/core/Greeting\.scala:4:7  def text.*\nmethod println — scala\.Predef\$?\.println \(library\)"""),
     Navigation("supertypes", """{"symbol": "Square"}""", false, """ Shape — core/src/main/scala/core/Shape\.scala:3:7  trait Shape"""),
     Navigation("subtypes", """{"symbol": "core.Shape"}""", false, """(?s)(?=.*class Square — .*Shape\.scala:7:13)(?=.*class Circle — .*Shape\.scala:11:13)"""),
     Navigation("supertypes", """{"file": "core/src/main/scala/core/Shape.scala", "line": 7, "text": "Square"}""", false, "interface Shape"),
@@ -191,6 +195,8 @@ class McpServerTest extends munit.FunSuite {
     Navigation("definition", """{"symbol": "Counter"}""", false, """Counter\.scala:9:7  class Counter"""),
     Navigation("references", """{"symbol": "area"}""", true, """(?s)names several symbols:.*Shape\.scala:4:.*Qualify the name"""),
     Navigation("references", """{"symbol": "NoSuchSymbolAnywhere"}""", true, "No project symbol is named NoSuchSymbolAnywhere"),
+    // Not inside a longer identifier: `Greet` is not taken for the start of `Greeting`.
+    Navigation("definition", s"""{$mainText, "text": "Greet"}""", true, "`Greet` is not on line 7"),
     Navigation("definition", s"""{$mainText, "text": "Missing"}""", true, """`Missing` is not on line 7 of app/src/main/scala/app/Main\.scala, which reads:\s+val text: String"""),
     Navigation("definition", s"""{$mainText, "text": "Greeting", "symbol": "Greeting"}""", true, "exactly one of two ways"),
     Navigation("definition", """{}""", true, "exactly one of two ways"),
@@ -222,12 +228,16 @@ class McpServerTest extends munit.FunSuite {
 
     val original = Files.readString(counter)
     val created = coreSources.resolve("McpCreated.scala")
-    val withMethod = original.replace("def zero: Counter = new Counter(0)", "def zero: Counter = new Counter(0)\n  def followedFromDisk: Counter = zero")
+    val withMethod = original.replace(
+      "def zero: Counter = new Counter(0)", "def zero: Counter = new Counter(0)\n  def followedFromDisk = Counter.zero")
     assertNotEquals(withMethod, original)
 
     try {
       Files.writeString(counter, withMethod)
       assert(call("find_symbol", """{"query": "followedFromDisk"}""").text.contains("Counter.scala"))
+      // The class's name stands for its companion too: the object's usage is among the references.
+      val references = call("references", """{"symbol": "core.Counter"}""").text
+      assert(references.contains("Counter.scala:22:26  def followedFromDisk = Counter.zero"), references)
 
       // A new source needs the build to be imported again.
       Files.writeString(created, "package core\n\nclass McpCreated\n")

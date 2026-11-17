@@ -3,7 +3,7 @@ package scalaanalyzer.mcp
 import com.google.gson.{JsonObject, JsonParser, JsonPrimitive}
 import com.intellij.openapi.progress.ProcessCanceledException
 
-import scalaanalyzer.language.{FileProblem, OutlineSymbol, ProblemSeverity}
+import scalaanalyzer.language.{FileProblem, HierarchyCall, OutlineSymbol, ProblemSeverity, SourceSpan}
 import scalaanalyzer.platform.HostLock
 import scalaanalyzer.workspace.ProjectSession
 
@@ -54,7 +54,7 @@ private[mcp] object McpTools {
   private val TargetProperties = """
     "symbol": {
       "type": "string",
-      "description": "Symbol name, optionally qualified by package and enclosing types, e.g. core.Greeting or Greeting.text. A '#' separates like a '.'. The name of a type that has a companion object means the type; give the object by file, line and text."
+      "description": "Symbol name, optionally qualified by package and enclosing types, e.g. core.Greeting or Greeting.text. A '#' separates like a '.'. The name of a type that has a companion object means the type (references lists the usages of both); give the object alone by file, line and text."
     },
     "file": {
       "type": "string",
@@ -67,7 +67,7 @@ private[mcp] object McpTools {
     },
     "text": {
       "type": "string",
-      "description": "The identifier (for type_of, the expression) as written on that line. Its first occurrence on the line is the target. Goes with file and line."
+      "description": "The identifier (for type_of, the expression) as written on that line. Its first occurrence on the line, not inside a longer identifier, is the target. Goes with file and line."
     }"""
 
   /** The property of the arguments that cuts a list, as a member of a JSON Schema's `properties`. */
@@ -132,7 +132,7 @@ private[mcp] object McpTools {
     title = "Go to definition",
     description = "Finds where the symbol at the target is declared, in the project or in a library: its " +
       s"file:line:column and source line. Most useful on a use of the symbol, with file, line and text; with symbol it " +
-      s"answers the symbol's own declaration. $TargetForms Example: {\"file\": \"app/src/main/scala/app/Main.scala\", " +
+      s"answers the symbol's own declaration. $TargetForms Example: {\"file\": \"src/main/scala/example/Main.scala\", " +
       "\"line\": 7, \"text\": \"loud\"}.",
     inputSchema = targetSchema(limited = false),
   )
@@ -142,7 +142,8 @@ private[mcp] object McpTools {
     name = "references",
     title = "Find references",
     description = "Lists the usages of the symbol at the target across the project sources, each with its " +
-      s"file:line:column and source line; the declaration itself is not listed. $TargetForms " +
+      s"file:line:column and source line, in the order of the files; the declaration itself is not listed. For a " +
+      s"type named by `symbol` that has a companion object, the usages of both. $TargetForms " +
       "Example: {\"symbol\": \"core.Greeting\"}.",
     inputSchema = targetSchema(limited = true),
   )
@@ -160,8 +161,9 @@ private[mcp] object McpTools {
   val Callers: Tool = Tool(
     name = "callers",
     title = "Find callers",
-    description = "Lists the methods that call the method at the target, one level: the kind, name and " +
-      s"file:line:column of each caller. $TargetForms Example: {\"symbol\": \"Greeting.text\"}.",
+    description = "Lists the calls of the method at the target, one level: for each call, the kind and name of the " +
+      s"declaration that makes it, then the file:line:column and source line of the call. $TargetForms " +
+      "Example: {\"symbol\": \"Greeting.text\"}.",
     inputSchema = targetSchema(limited = true),
   )
 
@@ -169,8 +171,9 @@ private[mcp] object McpTools {
   val Callees: Tool = Tool(
     name = "callees",
     title = "Find callees",
-    description = "Lists the methods that the method at the target calls, one level: the kind, name and " +
-      s"file:line:column of each callee. $TargetForms Example: {\"symbol\": \"Main.main\"}.",
+    description = "Lists the methods that the method at the target calls, one level, in the order of their first " +
+      "call: the project's with the file:line:column and source line of their declaration, then the libraries' with " +
+      s"the class that declares them. $TargetForms Example: {\"symbol\": \"Main.main\"}.",
     inputSchema = targetSchema(limited = true),
   )
 
@@ -198,7 +201,7 @@ private[mcp] object McpTools {
     title = "Type of",
     description = "Tells the type of the symbol or expression at the target, as the IDE's Type Info does. With " +
       s"file, line and text, the text may be any expression on the line. $TargetForms " +
-      "Example: {\"file\": \"app/src/main/scala/app/Main.scala\", \"line\": 7, \"text\": \"Greeting(\\\"world\\\").text\"}.",
+      "Example: {\"file\": \"src/main/scala/example/Main.scala\", \"line\": 7, \"text\": \"Greeting(\\\"world\\\").text\"}.",
     inputSchema = targetSchema(limited = false),
   )
 
@@ -217,7 +220,7 @@ private[mcp] object McpTools {
     title = "File outline",
     description = "Lists the declarations of a project source as an indented tree, as the IDE's structure view: each " +
       "line has the kind, the name, the signature and the line of the name. Example: " +
-      "{\"file\": \"core/src/main/scala/core/Shape.scala\"}.",
+      "{\"file\": \"src/main/scala/example/Shape.scala\"}.",
     inputSchema = schema("""{
       "type": "object",
       "properties": {
@@ -241,7 +244,7 @@ private[mcp] object McpTools {
       "compile, which this server does not run, so Scala 2 and Java sources are reported by the plugin's own " +
       "analysis (for Java, without javac). Each problem is a line `path:line:column  severity: message [source, " +
       "inspection name]`. Without `file`, every source is read, which can take minutes on a large project: prefer " +
-      "`file` after editing one. Example: {\"file\": \"core/src/main/scala/core/Counter.scala\", \"severity\": \"error\"}.",
+      "`file` after editing one. Example: {\"file\": \"src/main/scala/example/Counter.scala\", \"severity\": \"error\"}.",
     inputSchema = schema(s"""{
       "type": "object",
       "properties": {
@@ -263,7 +266,7 @@ private[mcp] object McpTools {
       "simplifications. It does not run the annotator or the compiler, and does not cover Java: `diagnostics` " +
       "reports those. Each problem is a line `path:line:column  severity: message [inspection name]`. Without " +
       "`file`, every source is read, which can take minutes on a large project: prefer `file` after editing one. " +
-      "Example: {\"file\": \"core/src/main/scala/core/Counter.scala\"}.",
+      "Example: {\"file\": \"src/main/scala/example/Counter.scala\"}.",
     inputSchema = schema(s"""{
       "type": "object",
       "properties": {
@@ -344,8 +347,8 @@ private[mcp] object McpTools {
     case Definition => definition(session, root, arguments)
     case References => references(session, root, arguments)
     case Implementations => implementations(session, root, arguments)
-    case Callers => calls(session, root, arguments, "callers", incoming = true)
-    case Callees => calls(session, root, arguments, "callees", incoming = false)
+    case Callers => callers(session, root, arguments)
+    case Callees => callees(session, root, arguments)
     case Supertypes => types(session, root, arguments, "supertypes", subtypes = false)
     case Subtypes => types(session, root, arguments, "subtypes", subtypes = true)
     case TypeOf => typeOf(session, root, arguments)
@@ -362,7 +365,8 @@ private[mcp] object McpTools {
       .getOrElse(throw new ToolFailure("`query` is required: give a symbol name such as `Greeting` or `core.Greeting`."))
     val limit = positiveInteger(arguments, "limit").getOrElse(DefaultSymbolLimit)
 
-    val matches = session.workspaceSymbols(query)
+    // An enum case is found as a value and as a class, at the same name.
+    val matches = session.workspaceSymbols(query).distinctBy(_.location)
     if (matches.isEmpty) s"No symbol matches $query."
     else Listings.list(matches, limit, "matches")(Listings.symbol(root, _))
   }
@@ -375,10 +379,17 @@ private[mcp] object McpTools {
     answer(target, arguments, "declarations", found)((path, at) => Listings.location(session, root, path, at))
   }
 
-  /** Lists the usages of the symbol at the target, without its declaration. */
+  /**
+   * Lists the usages of the symbol at the target, and of its companion object when it has one, without their
+   * declarations, in the order of the files and of the positions in them.
+   */
   private def references(session: ProjectSession, root: Path, arguments: JsonObject): String = {
     val target = ToolTarget.resolve(session, root, arguments)
-    val found = session.references(target.path, target.at, includeDeclaration = false)
+    val declarations = SourceSpan(target.path, target.range) +: target.companion.toSeq
+    val found = declarations
+      .flatMap(declared => session.references(declared.path, declared.range.start, includeDeclaration = false))
+      .distinct
+      .sortBy(found => (found.path.toString, found.range.start.line, found.range.start.column))
 
     answer(target, arguments, "references", found)(Listings.span(session, root, _))
   }
@@ -391,15 +402,58 @@ private[mcp] object McpTools {
     answer(target, arguments, "implementations", found)(Listings.span(session, root, _))
   }
 
-  /** Lists, one level, the callers or the callees of the method at the target. */
-  private def calls(session: ProjectSession, root: Path, arguments: JsonObject, noun: String, incoming: Boolean): String = {
+  /**
+   * Lists the calls of the method at the target, one level: each call site with the declaration that makes it, in the
+   * order of the files and of the positions in them.
+   */
+  private def callers(session: ProjectSession, root: Path, arguments: JsonObject): String = {
+    val (target, found) = calls(session, root, arguments, "callers", incoming = true)
+    val sites = found.flatMap { call =>
+      // An override edge has no call site: the overriding declaration's name stands for it.
+      val positions = if (call.ranges.isEmpty) Seq(call.item.selectionRange.start) else call.ranges.map(_.start)
+
+      positions.map(call.item -> _)
+    }.distinct.sortBy((caller, at) => (caller.location.path.toString, at.line, at.column))
+
+    answer(target, arguments, "calls", sites)((caller, at) => Listings.item(session, root, caller, Some(at)))
+  }
+
+  /**
+   * Lists the methods that the method at the target calls, one level, in the order of their first call: the project's
+   * first, then the libraries'.
+   */
+  private def callees(session: ProjectSession, root: Path, arguments: JsonObject): String = {
+    val (target, found) = calls(session, root, arguments, "callees", incoming = false)
+    // A callee without a call site, an override edge, goes after those called.
+    val inCallOrder = found
+      .sortBy(_.ranges.map(range => (range.start.line, range.start.column)).minOption.getOrElse((Int.MaxValue, 0)))
+      .map(_.item)
+      .distinct
+    val (inProject, inLibraries) = inCallOrder.partition(callee => session.isSource(callee.location.path))
+
+    answer(target, arguments, "callees", inProject ++ inLibraries)(Listings.item(session, root, _))
+  }
+
+  /**
+   * Resolves the method at the target and finds its calls, one level.
+   *
+   * @param noun what the calls are, for the failure that says the target is not a method
+   * @param incoming `true` for the calls of the method, `false` for the calls it makes
+   * @return the target and the calls, with their call sites
+   * @throws ToolFailure when the target is not a method
+   */
+  private def calls(
+    session: ProjectSession,
+    root: Path,
+    arguments: JsonObject,
+    noun: String,
+    incoming: Boolean,
+  ): (ToolTarget, Seq[HierarchyCall]) = {
     val target = ToolTarget.resolve(session, root, arguments)
     val prepared = session.prepareHierarchy(target.path, target.at, types = false)
     if (prepared.isEmpty) throw new ToolFailure(s"${target.description} is not a method, so it has no $noun.")
 
-    val found = prepared.flatMap(item => session.hierarchyCalls(target.path, item.target, incoming)).map(_.item).distinct
-
-    answer(target, arguments, noun, found)(Listings.item(session, root, _))
+    (target, prepared.flatMap(item => session.hierarchyCalls(target.path, item.target, incoming)))
   }
 
   /** Lists, one level, the supertypes or the subtypes of the class, trait or object at the target. */
@@ -422,7 +476,8 @@ private[mcp] object McpTools {
   private def typeOf(session: ProjectSession, root: Path, arguments: JsonObject): String = {
     val target = ToolTarget.resolve(session, root, arguments)
 
-    session.typeInfo(target.path, target.range).getOrElse(s"No type is known for ${target.description}.")
+    session.typeInfo(target.path, target.range)
+      .getOrElse(s"No type is known for ${target.description}; for a method, describe shows its signature.")
   }
 
   /** Shows the signature and documentation of the symbol at the target. */
@@ -445,8 +500,7 @@ private[mcp] object McpTools {
   private def outlineLines(symbols: Seq[OutlineSymbol], depth: Int): Seq[String] =
     symbols.flatMap { symbol =>
       val detail = if (symbol.detail.isEmpty) "" else s" ${symbol.detail}"
-      val kind = symbol.kind.toString.toLowerCase
-      val line = s"${"  " * depth}$kind ${symbol.name}$detail :${symbol.nameRange.start.line + 1}"
+      val line = s"${"  " * depth}${Listings.kindName(symbol.kind)} ${symbol.name}$detail :${symbol.nameRange.start.line + 1}"
 
       line +: outlineLines(symbol.children, depth + 1)
     }

@@ -1,7 +1,7 @@
 package scalaanalyzer.mcp
 
 import scalaanalyzer.LineColumn
-import scalaanalyzer.language.{FileProblem, HierarchyItem, SourceSpan, WorkspaceSymbolMatch}
+import scalaanalyzer.language.{FileProblem, HierarchyItem, SourceSpan, WorkspaceSymbolKind, WorkspaceSymbolMatch}
 import scalaanalyzer.workspace.ProjectSession
 
 import java.nio.file.Path
@@ -30,6 +30,24 @@ private[mcp] object Listings {
    */
   def shownPath(root: Path, path: Path): Path = if (path.startsWith(root)) root.relativize(path) else path
 
+  /** The kinds of declaration whose library items are named by their class and their own name. */
+  private val MemberKinds = Set(WorkspaceSymbolKind.Constructor, WorkspaceSymbolKind.Function, WorkspaceSymbolKind.Method)
+
+  /**
+   * The kind of a declaration as the tools name it: in Scala's words where the session's kind, which follows LSP's,
+   * stands for one Scala declaration only.
+   *
+   * @param kind the session's kind
+   * @return the word, in lower case
+   */
+  def kindName(kind: WorkspaceSymbolKind): String = kind match {
+    case WorkspaceSymbolKind.Module => "object"
+    case WorkspaceSymbolKind.EnumMember => "enum case"
+    case WorkspaceSymbolKind.Constant => "val"
+    case WorkspaceSymbolKind.Variable => "var"
+    case other => other.toString.toLowerCase
+  }
+
   /** A position as `path:line:column`. */
   private def place(root: Path, path: Path, at: LineColumn): String =
     s"${shownPath(root, path)}:${at.line + 1}:${at.column + 1}"
@@ -45,7 +63,7 @@ private[mcp] object Listings {
     val container = found.container.filter(_.nonEmpty).fold("")(name => s" in $name")
     val where = place(root, found.location.path, found.location.range.start)
 
-    s"${found.kind.toString.toLowerCase} ${found.name}$container — $where"
+    s"${kindName(found.kind)} ${found.name}$container — $where"
   }
 
   /**
@@ -76,17 +94,26 @@ private[mcp] object Listings {
     location(session, root, found.path, found.range.start)
 
   /**
-   * A call or type hierarchy item as a line: its kind and name, then the location line of its name.
+   * A call or type hierarchy item as a line: its kind and name, then the location line of a position in a project
+   * source, or the qualified name of a library declaration.
    *
    * @param session the open project
    * @param root workspace root
    * @param found the item
+   * @param at the position to show, in the item's file: by default its name, or the call site that a caller makes
    * @return the line
    */
-  def item(session: ProjectSession, root: Path, found: HierarchyItem): String = {
-    val where = location(session, root, found.location.path, found.selectionRange.start)
+  def item(session: ProjectSession, root: Path, found: HierarchyItem, at: Option[LineColumn] = None): String = {
+    val path = found.location.path
+    val where = found.target.libraryClass.filterNot(_ => session.isSource(path)) match {
+      case Some(owner) =>
+        val qualified = if (MemberKinds(found.kind)) s"$owner.${found.name}" else owner
 
-    s"${found.kind.toString.toLowerCase} ${found.name} — $where"
+        s"$qualified (library)"
+      case None => location(session, root, path, at.getOrElse(found.selectionRange.start))
+    }
+
+    s"${kindName(found.kind)} ${found.name} — $where"
   }
 
   /**

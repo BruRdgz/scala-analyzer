@@ -200,13 +200,20 @@ source whose stubs do not pair with its PSI stays out of the symbol index instea
     (`mcp/McpTools`, `mcp/Listings`). The read-only toolset is complete. Writes (rename, quick fixes) are a later
     decision: they would edit files that the agent edits too.
   - Found by an agent's test drive on this repository (2026-11-17). Fixed: a `symbol` that names a type and its
-    companion object means the type, where it used to be ambiguous. Not fixed, both in the host's analysis, so the LSP
-    shows them too:
+    companion object means the type, where it used to be ambiguous. A second drive fixed: `text` matched inside a longer
+    identifier (`open` in `opened`); `references` of a type left out the usages of its companion object; `callers` gave
+    the calling declaration without the call site; `callees` mixed library methods, with their cache paths, among the
+    project's; no tool was annotated as read-only; `find_symbol` listed an enum case twice and named kinds in LSP's
+    words (`module`, `enummember`). Not fixed, in the host's analysis, so the LSP shows them too:
+    - `references` of a Java class is empty, even asked from a Scala use (`LspServices.Server`,
+      `HostProtocol.Client`), though `definition` from there finds the class.
     - `subtypes` and `implementations` of a Java interface miss its Java inheritors (`HostProtocol.Client` misses the
       tests' `ClientBase`); Scala inheritors of a Scala type are found.
     - The Java analysis reports errors in sources that compile: "Package not found: com.intellij.psi" and Scala's
       mangled names, in `HostImplicitHintsPass.java`, `HostAsyncExecutionService.java` and `HostPsiManager.java`.
     - `diagnostics` of every source took 144 s on this repository (133 sources), near the timeout of some clients.
+    - Over MCP only: a library symbol cannot be named by `symbol` (`scala.collection.immutable.List`); the search
+      covers the project sources only, so an agent reaches a library API through a use of it in the project.
 - Left by the 0.3.1 audit, none fixed (read from the code or reported by reviewers; check before acting):
   - A document opened before it became a source is tracked by halves: its `didChange`s are dropped until an import
     registers it from disk, the next incremental change then lands on the disk text, and since only `didOpen` adds it

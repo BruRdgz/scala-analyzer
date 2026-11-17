@@ -222,7 +222,10 @@ final class McpServer(
     )
   }
 
-  /** Describes every tool, as `tools/list` answers. */
+  /**
+   * Describes every tool, as `tools/list` answers. Every tool only reads the project, which the annotations tell a
+   * client, so that it may run them without asking.
+   */
   private def toolList: JsonObject = {
     val described = new JsonArray
     McpTools.All.foreach { tool =>
@@ -231,6 +234,7 @@ final class McpServer(
         "title" -> new JsonPrimitive(tool.title),
         "description" -> new JsonPrimitive(tool.description),
         "inputSchema" -> tool.inputSchema,
+        "annotations" -> objectOf("readOnlyHint" -> new JsonPrimitive(true), "openWorldHint" -> new JsonPrimitive(false)),
       ))
     }
 

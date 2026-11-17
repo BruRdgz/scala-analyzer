@@ -3,7 +3,7 @@ package scalaanalyzer.mcp
 import com.google.gson.JsonObject
 
 import scalaanalyzer.{LineColumn, LineRange}
-import scalaanalyzer.language.{WorkspaceSymbolKind, WorkspaceSymbolMatch}
+import scalaanalyzer.language.{SourceSpan, WorkspaceSymbolKind, WorkspaceSymbolMatch}
 import scalaanalyzer.mcp.McpTools.ToolFailure
 import scalaanalyzer.workspace.ProjectSession
 
@@ -16,8 +16,15 @@ import java.nio.file.Path
  * @param range the name of a symbol given by `symbol`, or the first occurrence of `text` on the line given with
  *              `file` and `line`; the caret is its start
  * @param description the target as the call named it, for the answers that talk about it
+ * @param companion the name of the companion object, when `symbol` names a type that has one: the name stands for
+ *                  both, and `references` lists the usages of both
  */
-private[mcp] final case class ToolTarget(path: Path, range: LineRange, description: String) {
+private[mcp] final case class ToolTarget(
+  path: Path,
+  range: LineRange,
+  description: String,
+  companion: Option[SourceSpan] = None,
+) {
   /** The caret: where the target starts. */
   def at: LineColumn = range.start
 }
@@ -34,9 +41,10 @@ private[mcp] object ToolTarget {
    * Resolves the target the arguments name, in one of two ways.
    *
    * With `symbol`, a project symbol found by name, qualified by its package and enclosing types as far as needed to be
-   * the only one; a name that both a type and its companion object have means the type. With `file`, `line` (from 1) and `text`, the first occurrence of `text` on that line of that source.
-   * Reads the session's symbol index and the sources' text, so the caller must have brought the session up to date with
-   * the disk.
+   * the only one; a name that both a type and its companion object have means the type, with the object as its
+   * companion. With `file`, `line` (from 1) and `text`, the first occurrence of `text` on that line of that source, as
+   * a whole word when its ends are identifier characters. Reads the session's symbol index and the sources' text, so
+   * the caller must have brought the session up to date with the disk.
    *
    * @param session the open project
    * @param root workspace root, which a relative `file` is relative to
@@ -88,9 +96,11 @@ private[mcp] object ToolTarget {
       // A case class and its synthetic companion share the span of the name.
       .distinctBy(_.location)
 
-    companionType(candidates).fold(candidates)(Seq(_)) match {
+    candidates match {
       case Seq() => throw new ToolFailure(s"No project symbol is named $symbol; find_symbol searches by partial name.")
       case Seq(only) => ToolTarget(only.location.path, only.location.range, symbol)
+      case Companions(theType, theObject) =>
+        ToolTarget(theType.location.path, theType.location.range, symbol, Some(theObject.location))
       case several =>
         val listed = several.map(Listings.symbol(root, _)).mkString("\n")
 
@@ -111,18 +121,21 @@ private[mcp] object ToolTarget {
     found.container.filter(_.nonEmpty).fold(found.name)(container => s"$container.${found.name}")
 
   /**
-   * The type, when the candidates are a type and its companion object: the same qualified name in the same file, where
-   * the name of a type is meant more often than that of its object. The object stays reachable by `file`, `line` and
-   * `text`.
+   * Candidates that are a type and its companion object: the same qualified name in the same file. The name is taken
+   * for the type, as it is meant more often than the object, with the object as its companion.
    */
-  private def companionType(candidates: Seq[WorkspaceSymbolMatch]): Option[WorkspaceSymbolMatch] = candidates match {
-    case Seq(first, second)
-        if qualifiedName(first) == qualifiedName(second) && first.location.path == second.location.path =>
-      Seq(first, second).partition(_.kind == WorkspaceSymbolKind.Module) match {
-        case (Seq(_), Seq(theType)) if CompanionTypeKinds(theType.kind) => Some(theType)
+  private object Companions {
+    /** The type and the object, when the candidates are those two. */
+    def unapply(candidates: Seq[WorkspaceSymbolMatch]): Option[(WorkspaceSymbolMatch, WorkspaceSymbolMatch)] =
+      candidates match {
+        case Seq(first, second)
+            if qualifiedName(first) == qualifiedName(second) && first.location.path == second.location.path =>
+          Seq(first, second).partition(_.kind == WorkspaceSymbolKind.Module) match {
+            case (Seq(theObject), Seq(theType)) if CompanionTypeKinds(theType.kind) => Some((theType, theObject))
+            case _ => None
+          }
         case _ => None
       }
-    case _ => None
   }
 
   /** The first occurrence of `text` on the `line` of the `file` the call gives. */
@@ -138,13 +151,26 @@ private[mcp] object ToolTarget {
     val lines = Listings.sourceLines(session, path)
     val line = lines.lift(lineNumber - 1)
       .getOrElse(throw new ToolFailure(s"$shown has fewer than $lineNumber lines."))
-    // The first occurrence is the tie-break when the text is on the line more than once.
-    val column = line.indexOf(text)
-
-    if (column < 0) throw new ToolFailure(s"`$text` is not on line $lineNumber of $shown, which reads: $line")
-
+    // The first whole occurrence is the tie-break when the text is on the line more than once.
+    val column = line.indices.find(isWholeWordAt(line, text, _))
+      .getOrElse(throw new ToolFailure(s"`$text` is not on line $lineNumber of $shown, which reads: $line"))
     val start = LineColumn(lineNumber - 1, column)
 
     ToolTarget(path, LineRange(start, LineColumn(start.line, column + text.length)), s"`$text` at $shown:$lineNumber")
+  }
+
+  /**
+   * Whether `text` is on the line at `column`, not as part of a longer identifier: an end of `text` that is an
+   * identifier character must not be next to another one, so that `open` is not found in `opened`.
+   */
+  private def isWholeWordAt(line: String, text: String, column: Int): Boolean = {
+    val end = column + text.length
+
+    def joins(inText: Char, outside: Option[Char]): Boolean =
+      Character.isJavaIdentifierPart(inText) && outside.exists(Character.isJavaIdentifierPart)
+
+    line.startsWith(text, column) &&
+      !joins(text.head, line.lift(column - 1)) &&
+      !joins(text.last, line.lift(end))
   }
 }
