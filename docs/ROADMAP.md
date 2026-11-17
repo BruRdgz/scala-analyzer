@@ -172,6 +172,11 @@ detaches a problem once.
 Memory: the plugin pin moves to the upstream fix of its per-instance cache labels (SCL-26384), and the launcher sets
 G1 free ratios of 20-50% with a periodic collection after 5 idle minutes.
 
+## 0.3.3 — release (2026-11-17)
+
+Fixes left by the 0.3.1 audit: a writer waiting for write intent leaves the intent owner's queries alone, and a
+source whose stubs do not pair with its PSI stays out of the symbol index instead of failing its edit or import.
+
 ## Next — 0.4
 
 - Move a class or file from the editor's file explorer (`workspace/willRenameFiles` over the plugin's move handler).

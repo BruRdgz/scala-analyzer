@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.3 — 2026-11-17
+
+Two fixes for rare failures that a restart used to be the only way out of.
+
+- A rename no longer fails when the host invalidates its caches while the rename prepares its plan. A write waiting
+  for its turn cancelled the queries of the rename that held the turn, although it could not write before the
+  rename ended.
+- A source whose declarations the index cannot match to its syntax tree is left out of the declaration index, with a
+  warning in the log. Before, the edit stopped halfway, leaving the word and import indexes on the old text, and
+  during a build import it made the session unusable until the server restarted. In Scala sources this cannot
+  happen while typing; in Java sources it takes a platform bug.
+
 ## 0.3.2 — 2026-11-12
 
 Less memory for the server.
