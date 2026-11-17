@@ -276,8 +276,8 @@ private[scalaanalyzer] object HostLock {
   /**
    * Runs a cancellable read, reusing an outer read or write and its cancellation scope.
    *
-   * Outside a read or write, `body` runs through [[readLocked]] with a progress indicator that [[write]] cancels,
-   * and that the current thread's [[RequestCancellation]] cancels. A cancelled indicator makes the query fail
+   * Outside a read or write, `body` runs through [[readLocked]] with a progress indicator that [[write]] cancels
+   * (unless the current thread holds write intent), and that the current thread's [[RequestCancellation]] cancels. A cancelled indicator makes the query fail
    * with the platform's cancellation exception from `checkCanceled`.
    *
    * @param body action that reads PSI
@@ -291,12 +291,14 @@ private[scalaanalyzer] object HostLock {
       readLocked {
         ProgressManager.getInstance.runProcess((() => {
           // runProcess starts the indicator, resetting cancellation; only register it after that reset.
-          queries.add(indicator)
+          // An intent owner queries PSI while preparing its own write, without taking a read lock: no other writer
+          // can write before the owner releases intent, so writes leave its queries alone.
+          val cancelledByWrites = !hasWriteIntent
+          if (cancelledByWrites) queries.add(indicator)
           val cancellation = Option(requestCancellation.get())
           cancellation.foreach(_.track(indicator))
           try {
-            // An intent owner may query PSI while preparing its own write, without taking a read lock.
-            if (!hasWriteIntent && pendingWrites.get() > 0) indicator.cancel()
+            if (cancelledByWrites && pendingWrites.get() > 0) indicator.cancel()
             indicator.checkCanceled()
             body
           } finally {

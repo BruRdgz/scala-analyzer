@@ -190,7 +190,7 @@ class EditingTest extends munit.FunSuite {
     }
   }
 
-  test("queries arriving while a writer waits for intent are cancelled too") {
+  test("queries arriving while a writer waits for intent are cancelled, but not the intent owner's own query") {
     host.project
     val executor = Executors.newFixedThreadPool(2)
     val writerThread = new AtomicReference[Thread]()
@@ -201,7 +201,8 @@ class EditingTest extends munit.FunSuite {
         if (Thread.currentThread() eq writerThread.get()) writing.countDown()
     }, listeners)
     try {
-      val writer = HostLock.writeIntent {
+      // The owner's query runs when the writer cancels the running queries, as a rename's plan does.
+      val writer = HostLock.writeIntent(HostLock.query {
         val pending = CompletableFuture.runAsync(() => {
           writerThread.set(Thread.currentThread())
           HostLock.write(())
@@ -210,8 +211,9 @@ class EditingTest extends munit.FunSuite {
         val query = CompletableFuture.supplyAsync(() => HostLock.query(42), executor)
         val error = intercept[java.util.concurrent.ExecutionException](query.get(30, TimeUnit.SECONDS))
         assert(error.getCause.isInstanceOf[com.intellij.openapi.progress.ProcessCanceledException])
+        com.intellij.openapi.progress.ProgressManager.checkCanceled()
         pending
-      }
+      })
       writer.get(30, TimeUnit.SECONDS)
       assertEquals(HostLock.query(42), 42)
     } finally {

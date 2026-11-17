@@ -176,8 +176,9 @@ G1 free ratios of 20-50% with a periodic collection after 5 idle minutes.
 
 - Move a class or file from the editor's file explorer (`workspace/willRenameFiles` over the plugin's move handler).
 - Inspect Code reports "Unused expression without side effects" on the patterns of `case` clauses that follow a guard
-  whose `if` ends its line (`HostBootstrap`, the application table proxy): check whether the plugin in the IDE does the
-  same before treating it as a host problem.
+  whose `if` ends its line (`HostBootstrap`, the application table proxy). A plugin parser bug, reported to the
+  maintainers on 2026-11-17: in Scala 3 the guard's indentation region (`ExprInIndentationRegion`) takes the clause's
+  `=>`, and the clauses after it parse as loose statements. Nothing to change in the host; bump the pin once it is fixed.
 - Each to decide: extract/introduce refactorings as code actions, Change Signature, debugging (DAP), worksheets.
 - AI agents over MCP: a `--mcp` mode of the same binary, a second transport over `ProjectSession` beside `lsp`
   (MCP is JSON-RPC 2.0 over stdio, which lsp4j's jsonrpc already speaks). Tools addressed by qualified name rather
@@ -186,8 +187,6 @@ G1 free ratios of 20-50% with a periodic collection after 5 idle minutes.
   session reads the disk, and a tool answers "still importing" rather than an empty result during the BSP import.
   First check what Claude Code already gets from registering the server as a plugin's LSP.
 - Left by the 0.3.1 audit, none fixed (read from the code or reported by reviewers; check before acting):
-  - A pending writer cancels every query before it owns write intent, including the queries of the thread that holds
-    the intent (`HostLock.write`): a dispatch-thread `psiChanged` fails a rename that nothing changed.
   - A document opened before it became a source is tracked by halves: its `didChange`s are dropped until an import
     registers it from disk, the next incremental change then lands on the disk text, and since only `didOpen` adds it
     to `openDocuments`, its edits are unversioned and a watched-file change overwrites it.
