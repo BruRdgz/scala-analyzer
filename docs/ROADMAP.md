@@ -190,10 +190,6 @@ G1 free ratios of 20-50% with a periodic collection after 5 idle minutes.
   - A document opened before it became a source is tracked by halves: its `didChange`s are dropped until an import
     registers it from disk, the next incremental change then lands on the disk text, and since only `didOpen` adds it
     to `openDocuments`, its edits are unversioned and a watched-file change overwrites it.
-  - `ScalaPsiHost.replaceText` changes and commits the document before it reindexes, with no rollback: when the stubs
-    do not pair with the PSI, the symbol index loses the file, the word and import indexes keep the old text, the rest of
-    the `didChange` is dropped, and the next import makes the session unavailable. `rename`'s restore loop has the same
-    shape. First find out whether ordinary typing can produce unpairable stubs.
   - Build problems of non-Scala-3 sources are published at the positions of the last build, against the current buffer
     (only with `compilerErrorsScala2`); `DiagnosticsClient.published` keeps the entries of removed targets.
   - Lifecycle spread over fields: `ScalaLanguageServer` (`session`, `projectRequested`, `shutdownRequested`, `ending`,

@@ -19,7 +19,7 @@ import scalaanalyzer.language.{
   ChangeEngine, CodeActions, Completion, InlayHints, InspectionDescription, Inspections, MemberOverrides, ParameterInfo,
   Rename, SelectionRanges,
 }
-import scalaanalyzer.platform.{Descriptors, ExtensionBean, HostBootstrap, HostDispatchThread, HostLock, HostPsiDocumentManager, Host_ModuleRootManager, Host_OrderEnumerator, ImportIndex, LibraryFileSystem, SourceFile, SymbolIndex, WordIndex, dispatch, tableProxy}
+import scalaanalyzer.platform.{Descriptors, ExtensionBean, HostBootstrap, HostDispatchThread, HostLock, HostLog, HostPsiDocumentManager, Host_ModuleRootManager, Host_OrderEnumerator, ImportIndex, LibraryFileSystem, SourceFile, SymbolIndex, WordIndex, dispatch, tableProxy}
 
 import java.nio.file.Path
 import java.util.concurrent.ConcurrentHashMap
@@ -234,30 +234,40 @@ final class ScalaPsiHost private[scalaanalyzer] (
 
   /**
    * A project source file: its declarations are indexed, so other files and the file itself find them by name,
-   * as for a file under an IDE source root. Fails when its stubs cannot be paired with its PSI.
+   * as for a file under an IDE source root (see [[index]]).
    *
    * Takes the write lock itself.
    *
    * @param text complete Scala source text
    * @param features language features to parse the text with
    * @return the parsed and indexed file
-   * @throws IllegalStateException when the file's stubs cannot be paired with its PSI
    */
   def openSource(text: String, features: ScalaFeatures = ScalaFeatures.default): ScalaFile =
     HostLock.write(index(parse(text, features)))
 
-  /** Indexes a source's stubs, words and imports and notifies PSI listeners; a file with unpairable stubs is rejected. */
+  /** Indexes a new source (see [[reindex]]) and invalidates the PSI caches. */
   private def index[F <: PsiFile](file: F): F = {
-    if (!symbolIndex.indexSourceFile(file)) {
-      modules.removeSource(file.getViewProvider.getVirtualFile)
-      throw new IllegalStateException("source file stubs could not be paired with its PSI")
-    }
-
-    wordIndex.indexFile(file)
-    importIndex.indexFile(file)
-
+    reindex(file)
     psiChanged()
     file
+  }
+
+  /**
+   * Replaces a source's entries in the word, import and symbol indexes with those of its current PSI.
+   *
+   * Stubs that cannot be paired with the PSI leave the file out of the symbol index until a later change pairs them,
+   * with a warning, rather than failing: the file's text has already changed, in the host as in the editor, so
+   * failing would only leave the other indexes behind it. Pairing depends on the PSI tree alone, so it fails only
+   * where the platform's own stub building disagrees with its PSI.
+   */
+  private def reindex(file: PsiFile): Unit = {
+    wordIndex.removeFile(file)
+    importIndex.removeFile(file)
+    symbolIndex.removeFile(file)
+    wordIndex.indexFile(file)
+    importIndex.indexFile(file)
+    if (!symbolIndex.indexSourceFile(file))
+      HostLog.warn(s"the stubs of $file could not be paired with its PSI; its declarations are left out of the index")
   }
 
   /**
@@ -269,8 +279,7 @@ final class ScalaPsiHost private[scalaanalyzer] (
    * @param path location that names the file and picks its file type by extension
    * @param text complete source text
    * @param module host module that owns the file
-   * @return the file's PSI, indexed and ready for [[edit]]
-   * @throws IllegalStateException when the file's stubs cannot be paired with its PSI
+   * @return the file's PSI, indexed (see [[reindex]]) and ready for [[edit]]
    */
   def openFile(path: Path, text: String, module: HostModule): PsiFile = HostLock.write {
     val fileType = FileTypeRegistry.getInstance.getFileTypeByFileName(path.getFileName.toString)
@@ -292,7 +301,8 @@ final class ScalaPsiHost private[scalaanalyzer] (
   /**
    * Replaces `file`'s text between `start` and `end` (offsets) with `replacement`, as an editor change: the document
    * changes and is committed, the platform reparses the changed range, and the resulting tree changes reach the
-   * plugin's caches. The file's index entries are then rebuilt. Queries running meanwhile are cancelled.
+   * plugin's caches. The file's index entries are then rebuilt (see [[reindex]]). Queries running meanwhile are
+   * cancelled.
    *
    * Takes the write lock itself, then lets the commit's work for the dispatch thread run before returning.
    *
@@ -301,7 +311,6 @@ final class ScalaPsiHost private[scalaanalyzer] (
    * @param end UTF-16 offset where the replaced range ends, exclusive
    * @param replacement the text that takes the place of the range
    * @throws IllegalArgumentException when `file` has no document
-   * @throws IllegalStateException when the edited file's stubs cannot be paired with its PSI
    */
   def edit(file: PsiFile, start: Int, end: Int, replacement: String): Unit = {
     HostLock.write(replaceText(file, start, end, replacement))
@@ -317,13 +326,7 @@ final class ScalaPsiHost private[scalaanalyzer] (
 
     document.replaceString(start, end, replacement)
     documents.commitDocument(document)
-
-    symbolIndex.removeFile(file)
-    if (!symbolIndex.indexSourceFile(file)) throw new IllegalStateException(s"stubs of the edited $file could not be paired with its PSI")
-    wordIndex.removeFile(file)
-    importIndex.removeFile(file)
-    wordIndex.indexFile(file)
-    importIndex.indexFile(file)
+    reindex(file)
 
     ScalaPsiHost.notifyPsiChanged(project)
   }
