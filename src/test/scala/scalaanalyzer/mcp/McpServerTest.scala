@@ -187,7 +187,9 @@ class McpServerTest extends munit.FunSuite {
     Navigation("describe", """{"symbol": "Greet3.hello"}""", false, """def hello\(name: String\): String(?s).*warmly"""),
     Navigation("outline", """{"file": "core/src/main/scala/core/Shape.scala"}""", false, """(?m)^interface Shape :3\n  method area : Double :4$"""),
     // Failures the model can correct.
-    Navigation("references", """{"symbol": "Counter"}""", true, """(?s)names several symbols:(?=.*Counter\.scala:9:7)(?=.*Counter\.scala:20:8).*Qualify the name"""),
+    // A class and its companion share the name, which means the class.
+    Navigation("definition", """{"symbol": "Counter"}""", false, """Counter\.scala:9:7  class Counter"""),
+    Navigation("references", """{"symbol": "area"}""", true, """(?s)names several symbols:.*Shape\.scala:4:.*Qualify the name"""),
     Navigation("references", """{"symbol": "NoSuchSymbolAnywhere"}""", true, "No project symbol is named NoSuchSymbolAnywhere"),
     Navigation("definition", s"""{$mainText, "text": "Missing"}""", true, """`Missing` is not on line 7 of app/src/main/scala/app/Main\.scala, which reads:\s+val text: String"""),
     Navigation("definition", s"""{$mainText, "text": "Greeting", "symbol": "Greeting"}""", true, "exactly one of two ways"),

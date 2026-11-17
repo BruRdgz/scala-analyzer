@@ -54,7 +54,7 @@ private[mcp] object McpTools {
   private val TargetProperties = """
     "symbol": {
       "type": "string",
-      "description": "Symbol name, optionally qualified by package and enclosing types, e.g. core.Greeting or Greeting.text. A '#' separates like a '.'."
+      "description": "Symbol name, optionally qualified by package and enclosing types, e.g. core.Greeting or Greeting.text. A '#' separates like a '.'. The name of a type that has a companion object means the type; give the object by file, line and text."
     },
     "file": {
       "type": "string",

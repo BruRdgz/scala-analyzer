@@ -128,7 +128,7 @@ importing until it is ready.
 
 Every tool but `project_status`, `find_symbol`, `outline`, `diagnostics` and `inspect` names its target in one of two
 ways: `symbol`, a name qualified as far as needed to be unambiguous (`core.Greeting`, `Greeting.text`; the answer lists
-the candidates when it is not), or `file`, `line` and `text`, the identifier (for `type_of`, the expression) as written
+the candidates when it is not, and the name of a type that has a companion object means the type), or `file`, `line` and `text`, the identifier (for `type_of`, the expression) as written
 on that line of a project source, where its first occurrence on the line is the target. The tools that list their
 findings take an optional `limit` (default 100; 200 for `diagnostics` and `inspect`, which also take `severity`, the
 least severe level reported: `error`, `warning` (default) or `information`), and show each location as

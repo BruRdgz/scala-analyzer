@@ -3,7 +3,7 @@ package scalaanalyzer.mcp
 import com.google.gson.JsonObject
 
 import scalaanalyzer.{LineColumn, LineRange}
-import scalaanalyzer.language.WorkspaceSymbolMatch
+import scalaanalyzer.language.{WorkspaceSymbolKind, WorkspaceSymbolMatch}
 import scalaanalyzer.mcp.McpTools.ToolFailure
 import scalaanalyzer.workspace.ProjectSession
 
@@ -27,11 +27,14 @@ private[mcp] object ToolTarget {
   /** The separator that `symbol` accepts for `.`, as in `Greeting#text`. */
   private val AlternativeSeparator = '#'
 
+  /** The kinds of a type that can have a companion object. */
+  private val CompanionTypeKinds = Set(WorkspaceSymbolKind.Class, WorkspaceSymbolKind.Interface, WorkspaceSymbolKind.Enum)
+
   /**
    * Resolves the target the arguments name, in one of two ways.
    *
    * With `symbol`, a project symbol found by name, qualified by its package and enclosing types as far as needed to be
-   * the only one. With `file`, `line` (from 1) and `text`, the first occurrence of `text` on that line of that source.
+   * the only one; a name that both a type and its companion object have means the type. With `file`, `line` (from 1) and `text`, the first occurrence of `text` on that line of that source.
    * Reads the session's symbol index and the sources' text, so the caller must have brought the session up to date with
    * the disk.
    *
@@ -85,7 +88,7 @@ private[mcp] object ToolTarget {
       // A case class and its synthetic companion share the span of the name.
       .distinctBy(_.location)
 
-    candidates match {
+    companionType(candidates).fold(candidates)(Seq(_)) match {
       case Seq() => throw new ToolFailure(s"No project symbol is named $symbol; find_symbol searches by partial name.")
       case Seq(only) => ToolTarget(only.location.path, only.location.range, symbol)
       case several =>
@@ -98,9 +101,28 @@ private[mcp] object ToolTarget {
 
   /** Whether the symbol's qualified name is `wanted`, or ends with it after a `.`. */
   private def isNamed(found: WorkspaceSymbolMatch, wanted: String): Boolean = {
-    val qualified = found.container.filter(_.nonEmpty).fold(found.name)(container => s"$container.${found.name}")
+    val qualified = qualifiedName(found)
 
     qualified == wanted || qualified.endsWith("." + wanted)
+  }
+
+  /** The symbol's name, qualified by its container when it has one. */
+  private def qualifiedName(found: WorkspaceSymbolMatch): String =
+    found.container.filter(_.nonEmpty).fold(found.name)(container => s"$container.${found.name}")
+
+  /**
+   * The type, when the candidates are a type and its companion object: the same qualified name in the same file, where
+   * the name of a type is meant more often than that of its object. The object stays reachable by `file`, `line` and
+   * `text`.
+   */
+  private def companionType(candidates: Seq[WorkspaceSymbolMatch]): Option[WorkspaceSymbolMatch] = candidates match {
+    case Seq(first, second)
+        if qualifiedName(first) == qualifiedName(second) && first.location.path == second.location.path =>
+      Seq(first, second).partition(_.kind == WorkspaceSymbolKind.Module) match {
+        case (Seq(_), Seq(theType)) if CompanionTypeKinds(theType.kind) => Some(theType)
+        case _ => None
+      }
+    case _ => None
   }
 
   /** The first occurrence of `text` on the `line` of the `file` the call gives. */
