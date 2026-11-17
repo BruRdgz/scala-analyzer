@@ -1,8 +1,10 @@
 package scalaanalyzer.mcp
 
 import com.google.gson.{JsonObject, JsonParser, JsonPrimitive}
+import com.intellij.openapi.progress.ProcessCanceledException
 
-import scalaanalyzer.language.OutlineSymbol
+import scalaanalyzer.language.{FileProblem, OutlineSymbol, ProblemSeverity}
+import scalaanalyzer.platform.HostLock
 import scalaanalyzer.workspace.ProjectSession
 
 import java.nio.file.Path
@@ -39,6 +41,9 @@ private[mcp] object McpTools {
   /** The number of entries the other tools list when the call gives no limit. */
   private val DefaultLimit = 100
 
+  /** The number of problems `diagnostics` and `inspect` list when the call gives no limit: more than a model reads at once. */
+  private val DefaultProblemLimit = 200
+
   /** What the descriptions of the tools that take a target say about how to name it. */
   private val TargetForms =
     "The target is named in exactly one of two ways: `symbol`, a name optionally qualified by package and enclosing " +
@@ -71,6 +76,19 @@ private[mcp] object McpTools {
       "type": "integer",
       "minimum": 1,
       "description": "Most entries to list (default 100)."
+    }"""
+
+  /** The properties of the arguments that cut the problems a tool reports, as members of a JSON Schema's properties. */
+  private val ProblemOptions = """
+    "severity": {
+      "type": "string",
+      "enum": ["error", "warning", "information"],
+      "description": "The least severe level to report (default warning): error, warning or information."
+    },
+    "limit": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Most problems to list across all files (default 200)."
     }"""
 
   /** Reports the state of the project; answers while it is still opening. */
@@ -213,10 +231,55 @@ private[mcp] object McpTools {
     }"""),
   )
 
+  /** Lists the problems the editor shows for a source or for the whole project. */
+  val Diagnostics: Tool = Tool(
+    name = "diagnostics",
+    title = "Diagnostics",
+    description = "Lists the problems the editor shows for a project source, or for every source: the Scala plugin's " +
+      "annotator and inspections (type mismatches, unresolved names, unused code and the like) and, for Scala 3 " +
+      "sources, the compiler's diagnostics of the current text. Scala 2 compiler errors come only from a build " +
+      "compile, which this server does not run, so Scala 2 and Java sources are reported by the plugin's own " +
+      "analysis (for Java, without javac). Each problem is a line `path:line:column  severity: message [source, " +
+      "inspection name]`. Without `file`, every source is read, which can take minutes on a large project: prefer " +
+      "`file` after editing one. Example: {\"file\": \"core/src/main/scala/core/Counter.scala\", \"severity\": \"error\"}.",
+    inputSchema = schema(s"""{
+      "type": "object",
+      "properties": {
+        "file": {
+          "type": "string",
+          "description": "Project source, relative to the workspace root or absolute. Without it, every source of the project."
+        },$ProblemOptions
+      },
+      "additionalProperties": false
+    }"""),
+  )
+
+  /** Runs the IDE's Inspect Code over a source or the whole project. */
+  val Inspect: Tool = Tool(
+    name = "inspect",
+    title = "Inspect code",
+    description = "Runs the IDE's Inspect Code over a Scala source, or over every Scala source of the project except " +
+      "the generated ones: the selected inspections only, such as unused symbols, redundant code and possible " +
+      "simplifications. It does not run the annotator or the compiler, and does not cover Java: `diagnostics` " +
+      "reports those. Each problem is a line `path:line:column  severity: message [inspection name]`. Without " +
+      "`file`, every source is read, which can take minutes on a large project: prefer `file` after editing one. " +
+      "Example: {\"file\": \"core/src/main/scala/core/Counter.scala\"}.",
+    inputSchema = schema(s"""{
+      "type": "object",
+      "properties": {
+        "file": {
+          "type": "string",
+          "description": "Scala source, relative to the workspace root or absolute. Without it, every Scala source of the project."
+        },$ProblemOptions
+      },
+      "additionalProperties": false
+    }"""),
+  )
+
   /** Every tool, in the order `tools/list` gives them. */
   val All: Seq[Tool] = Seq(
     ProjectStatus, FindSymbol, Definition, References, Implementations, Callers, Callees, Supertypes, Subtypes, TypeOf,
-    Describe, Outline,
+    Describe, Outline, Diagnostics, Inspect,
   )
 
   /** Parses the JSON Schema of a tool's arguments. */
@@ -288,6 +351,8 @@ private[mcp] object McpTools {
     case TypeOf => typeOf(session, root, arguments)
     case Describe => describe(session, root, arguments)
     case Outline => outline(session, root, arguments)
+    case Diagnostics => diagnostics(session, root, arguments)
+    case Inspect => inspect(session, root, arguments)
     case other => throw new IllegalStateException(s"${other.name} is not a tool of the project")
   }
 
@@ -384,6 +449,86 @@ private[mcp] object McpTools {
       val line = s"${"  " * depth}$kind ${symbol.name}$detail :${symbol.nameRange.start.line + 1}"
 
       line +: outlineLines(symbol.children, depth + 1)
+    }
+
+  /** Lists the problems the editor shows for the `file`, or for every source of the project. */
+  private def diagnostics(session: ProjectSession, root: Path, arguments: JsonObject): String = {
+    val names = inspectionNames(session)
+
+    problemReport(session, root, arguments, session.sourceFiles.sorted, "checked")(path => session.problems(path)) {
+      problem => (Seq(problem.source) ++ problem.inspectionId.map(id => names.getOrElse(id, id))).mkString(", ")
+    }
+  }
+
+  /** Lists the problems of the selected inspections for the `file`, or for every inspectable source of the project. */
+  private def inspect(session: ProjectSession, root: Path, arguments: JsonObject): String = {
+    val names = inspectionNames(session)
+
+    problemReport(session, root, arguments, session.inspectableSources, "inspected")(path => session.inspect(path)) {
+      problem => problem.inspectionId.fold(problem.source)(id => names.getOrElse(id, id))
+    }
+  }
+
+  /** The display name of each inspection, by the id that its problems carry. */
+  private def inspectionNames(session: ProjectSession): Map[String, String] =
+    session.inspectionDescriptions.map(description => description.id -> description.displayName).toMap
+
+  /**
+   * The answer of a tool that reports problems: those of the `file`, or of every source, at the `severity` argument or
+   * above, cut to `limit` with a note saying so. A run over every source starts with a line that counts what it read.
+   * Checks, before each source, that the call is still wanted.
+   */
+  private def problemReport(
+    session: ProjectSession,
+    root: Path,
+    arguments: JsonObject,
+    everySource: Seq[Path],
+    verb: String,
+  )(problemsOf: Path => Seq[FileProblem])(label: FileProblem => String): String = {
+    val least = severityMember(arguments)
+    val limit = positiveInteger(arguments, "limit").getOrElse(DefaultProblemLimit)
+    val file = Option.when(arguments.has("file"))(ToolTarget.sourceFile(session, root, arguments))
+    val sources = file.fold(everySource)(Seq(_))
+
+    val byFile = sources.map { path =>
+      if (HostLock.isRequestCancelled) throw new ProcessCanceledException
+
+      // A write that cancels the query is not retried, as the language server does: tool calls run one at a time and
+      // the disk is followed only before a call starts, so nothing edits the session while one runs.
+      val problems = problemsOf(path)
+        // ProblemSeverity declares the most severe level first.
+        .filter(_.severity.ordinal <= least.ordinal)
+        .sortBy(problem => (problem.start.line, problem.start.column))
+
+      path -> problems
+    }
+    val found = byFile.flatMap((path, problems) => problems.map(path -> _))
+
+    val scope = file.fold(Listings.counted(sources.size, "source"))(path => Listings.shownPath(root, path).toString)
+    if (found.isEmpty) s"No problems at ${least.toString.toLowerCase} level or above in $scope."
+    else {
+      val filesWithProblems = byFile.count((_, problems) => problems.nonEmpty)
+      val summary = Option.when(file.isEmpty)(
+        s"${Listings.counted(sources.size, "source")} $verb: ${Listings.counted(found.size, "problem")} in " +
+          s"${Listings.counted(filesWithProblems, "file")}.")
+      val lines = Listings.list(found, limit, "problems") { (path, problem) =>
+        Listings.problem(root, path, problem, label(problem))
+      }
+
+      (summary.toSeq :+ lines).mkString("\n")
+    }
+  }
+
+  /** The `severity` argument: the least severe level a problem may have to be reported, warning when it is absent. */
+  private def severityMember(arguments: JsonObject): ProblemSeverity =
+    if (!arguments.has("severity")) ProblemSeverity.Warning
+    else {
+      val named = stringMember(arguments, "severity")
+
+      ProblemSeverity.values
+        .find(severity => named.contains(severity.toString.toLowerCase))
+        .getOrElse(throw new ToolFailure(
+          s"`severity` must be \"error\", \"warning\" or \"information\", not ${arguments.get("severity")}."))
     }
 
   /** The answer of a tool that lists its findings: the entries cut to `limit`, or a sentence saying that none was found. */

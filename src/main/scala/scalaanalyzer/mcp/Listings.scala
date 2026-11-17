@@ -1,7 +1,7 @@
 package scalaanalyzer.mcp
 
 import scalaanalyzer.LineColumn
-import scalaanalyzer.language.{HierarchyItem, SourceSpan, WorkspaceSymbolMatch}
+import scalaanalyzer.language.{FileProblem, HierarchyItem, SourceSpan, WorkspaceSymbolMatch}
 import scalaanalyzer.workspace.ProjectSession
 
 import java.nio.file.Path
@@ -88,6 +88,30 @@ private[mcp] object Listings {
 
     s"${found.kind.toString.toLowerCase} ${found.name} — $where"
   }
+
+  /**
+   * A problem as a line: where it starts, its severity and message, then the label that says what reported it.
+   *
+   * @param root workspace root
+   * @param path the source that has the problem
+   * @param found the problem
+   * @param label what reported it: the inspection's name, or the producer
+   * @return the line; a message of several lines, as the Scala 3 compiler writes some, goes on in indented lines
+   */
+  def problem(root: Path, path: Path, found: FileProblem, label: String): String = {
+    val message = found.message.linesIterator.mkString("\n    ")
+
+    s"${place(root, path, found.start)}  ${found.severity.toString.toLowerCase}: $message [$label]"
+  }
+
+  /**
+   * A count and its noun, singular for one.
+   *
+   * @param count how many
+   * @param noun the noun in the singular; its plural adds an `s`
+   * @return the count followed by the noun
+   */
+  def counted(count: Int, noun: String): String = if (count == 1) s"1 $noun" else s"$count ${noun}s"
 
   /**
    * Shows the first entries of a list, one per line.

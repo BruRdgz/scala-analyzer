@@ -196,7 +196,9 @@ source whose stubs do not pair with its PSI stays out of the symbol index instea
   - Wave B is done: the navigation tools `definition`, `references`, `implementations`, `callers`, `callees`,
     `supertypes`, `subtypes`, `type_of`, `describe` and `outline`, addressed by `symbol` or by `file`, `line` and
     `text` (`mcp/McpTools`, `mcp/ToolTarget`, `mcp/Listings`).
-  - Remaining: diagnostics and inspections of a file or the project.
+  - Wave C is done: `diagnostics` and `inspect`, of one `file` or of every source, cut by `severity` and `limit`
+    (`mcp/McpTools`, `mcp/Listings`). The read-only toolset is complete. Writes (rename, quick fixes) are a later
+    decision: they would edit files that the agent edits too.
 - Left by the 0.3.1 audit, none fixed (read from the code or reported by reviewers; check before acting):
   - A document opened before it became a source is tracked by halves: its `didChange`s are dropped until an import
     registers it from disk, the next incremental change then lands on the disk text, and since only `didOpen` adds it

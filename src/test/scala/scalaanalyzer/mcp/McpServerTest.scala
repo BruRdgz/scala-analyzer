@@ -124,7 +124,7 @@ class McpServerTest extends munit.FunSuite {
       tools.asScala.map(_.getAsJsonObject.get("name").getAsString).toSeq,
       Seq(
         "project_status", "find_symbol", "definition", "references", "implementations", "callers", "callees",
-        "supertypes", "subtypes", "type_of", "describe", "outline",
+        "supertypes", "subtypes", "type_of", "describe", "outline", "diagnostics", "inspect",
       ))
 
     val ping = requestWithId("\"abc\"", "ping")
@@ -199,6 +199,8 @@ class McpServerTest extends munit.FunSuite {
     Navigation("supertypes", """{"symbol": "Greeting.text"}""", true, "is not a class, trait or object"),
     Navigation("references", """{"symbol": "core.Greeting", "limit": 0}""", true, "`limit` must be an integer of at least 1"),
     Navigation("outline", """{}""", true, "`file` is required"),
+    Navigation("diagnostics", """{"severity": "fatal"}""", true, """`severity` must be "error", "warning" or "information", not "fatal""""),
+    Navigation("inspect", """{"file": "build.sbt"}""", true, "not a source file of the project"),
   )
 
   test("answers the navigation tools by symbol and by position") {
@@ -236,5 +238,60 @@ class McpServerTest extends munit.FunSuite {
     // The restoration and the deletion are followed too, so that nothing outlives the test.
     assertEquals(call("find_symbol", """{"query": "followedFromDisk"}""").text, "No symbol matches followedFromDisk.")
     assertEquals(call("find_symbol", """{"query": "McpCreated"}""").text, "No symbol matches McpCreated.")
+  }
+
+  test("reports the problems and inspections of a source edited on disk") {
+    ready
+
+    val original = Files.readString(counter)
+    val anchor = "def zero: Counter = new Counter(0)"
+    val edited = original.replace(
+      anchor,
+      s"$anchor\n  val broken: Int = \"text\"\n  private val unused = 2\n  def simple(b: Boolean): Boolean = b == true")
+    assertNotEquals(edited, original)
+
+    val file = """"file": "core/src/main/scala/core/Counter.scala""""
+    val shown = "core/src/main/scala/core/Counter.scala"
+
+    try {
+      Files.writeString(counter, edited)
+
+      // In the order of the positions, whatever the order the plugin found them in.
+      assertEquals(
+        call("diagnostics", s"""{$file}""").text,
+        Seq(
+          s"$shown:3:8  warning: Unused import statement [scala-plugin, Unused declaration]",
+          s"$shown:4:8  warning: Unused import statement [scala-plugin, Unused declaration]",
+          s"$shown:22:21  error: Type mismatch. Required: Int, found: String [scala-plugin]",
+          s"$shown:23:15  warning: Private value 'unused' is never used [scala-plugin, Unused declaration]",
+          s"$shown:24:37  warning: Simplify boolean expression [scala-plugin, Simplify boolean expression]",
+        ).mkString("\n"))
+
+      assertEquals(
+        call("diagnostics", s"""{$file, "severity": "error"}""").text,
+        s"$shown:22:21  error: Type mismatch. Required: Int, found: String [scala-plugin]")
+      assert(call("diagnostics", s"""{$file, "limit": 1}""").text.endsWith("(showing 1 of 5 problems)"))
+
+      val errors = call("diagnostics", """{"severity": "error"}""")
+      assert(errors.text.startsWith(s"22 sources checked: 1 problem in 1 file.\n$shown:22:21  error:"), errors.text)
+      assert(call("diagnostics").text.startsWith("22 sources checked: 6 problems in 2 files.\n"))
+
+      // The inspections only: the annotator's type mismatch is not among them.
+      assertEquals(
+        call("inspect", s"""{$file}""").text,
+        Seq(
+          s"$shown:3:8  warning: Unused import statement [Unused declaration]",
+          s"$shown:4:8  warning: Unused import statement [Unused declaration]",
+          s"$shown:23:15  warning: Private value 'unused' is never used [Unused declaration]",
+          s"$shown:24:37  warning: Simplify boolean expression [Simplify boolean expression]",
+        ).mkString("\n"))
+      // The Java source is not inspected.
+      assert(call("inspect").text.startsWith("21 sources inspected: 5 problems in 2 files.\n"))
+    } finally Files.writeString(counter, original)
+
+    // The restoration is followed too: the error is gone, and what the fixture has itself remains.
+    assertEquals(call("diagnostics", s"""{$file, "severity": "error"}"""),
+      ToolAnswer(s"No problems at error level or above in $shown.", false))
+    assert(call("diagnostics").text.startsWith("22 sources checked: 3 problems in 2 files.\n"))
   }
 }

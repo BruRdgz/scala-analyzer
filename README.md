@@ -123,12 +123,16 @@ importing until it is ready.
 | `type_of` | The type of a symbol or of an expression, as the IDE's Type Info. |
 | `describe` | The signature and documentation the IDE shows on hover, in Markdown. |
 | `outline` | The declarations of a file as an indented tree, with the line of each name. Takes `file` only. |
+| `diagnostics` | The problems the editor shows, for a `file` or for every source, as `path:line:column  severity: message [source]`: the Scala plugin's annotator and inspections, plus the compiler's diagnostics of the current text for Scala 3 sources. Scala 2 compiler errors come only from a build compile, which the server does not run, so Scala 2 and Java sources have the plugin's own analysis only. |
+| `inspect` | The IDE's Inspect Code over a Scala `file` or every Scala source (generated ones excluded): the selected inspections only, each labelled with its name. |
 
-Every tool but `project_status`, `find_symbol` and `outline` names its target in one of two ways: `symbol`, a name
-qualified as far as needed to be unambiguous (`core.Greeting`, `Greeting.text`; the answer lists the candidates when
-it is not), or `file`, `line` and `text`, the identifier (for `type_of`, the expression) as written on that line of a
-project source, where its first occurrence on the line is the target. The tools that list their findings take an
-optional `limit` (default 100), and show each location as `path:line:column` and its source line.
+Every tool but `project_status`, `find_symbol`, `outline`, `diagnostics` and `inspect` names its target in one of two
+ways: `symbol`, a name qualified as far as needed to be unambiguous (`core.Greeting`, `Greeting.text`; the answer lists
+the candidates when it is not), or `file`, `line` and `text`, the identifier (for `type_of`, the expression) as written
+on that line of a project source, where its first occurrence on the line is the target. The tools that list their
+findings take an optional `limit` (default 100; 200 for `diagnostics` and `inspect`, which also take `severity`, the
+least severe level reported: `error`, `warning` (default) or `information`), and show each location as
+`path:line:column` and its source line.
 
 The tools only read. The server follows the files edited on disk, checked before each call: it takes the new text of
 changed sources, and imports the build again when sources are created or deleted or the build definition changes.
