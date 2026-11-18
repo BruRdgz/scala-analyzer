@@ -177,43 +177,44 @@ G1 free ratios of 20-50% with a periodic collection after 5 idle minutes.
 Fixes left by the 0.3.1 audit: a writer waiting for write intent leaves the intent owner's queries alone, and a
 source whose stubs do not pair with its PSI stays out of the symbol index instead of failing its edit or import.
 
-## Next — 0.4
+## 0.4 — release (2026-11-18)
 
-- Move a class or file from the editor's file explorer (`workspace/willRenameFiles` over the plugin's move handler).
+- AI agents over MCP: `scala-analyzer --mcp`, the same host and `ProjectSession` behind a second transport, with
+  read-only tools for project status, symbol search, navigation, types, outlines, diagnostics and inspections,
+  following the disk before each call.
+- Extract to val and Extract method as code actions, through the plugin's Introduce Variable and Extract Method with
+  the IDE's defaults, followed in VS Code by a rename of the new name.
+- Decided not to do now, each for its own reason: Change Signature (a multi-file processor that needs a parameter
+  table as its UI, a webview in VS Code; the plugin's suggested refactoring, which would offer it after an edit of the
+  signature, supports rename only, SCL-17973), debugging (the plugin's debugger is IntelliJ's JDI UI; DAP would go
+  through BSP's `debugSession/start`, which depends on the build server), worksheets (a REPL and an editor UI, none of
+  which the host can reuse). Introduce Parameter changes the callers, so it waits for a multi-file extraction.
+
+## Next — 0.4.1
+
+- Move a class or file from the editor's file explorer (`workspace/willRenameFiles`). The plugin's move processors move
+  the file in the VFS to a `PsiDirectory`, and the host's sources have no directories: the plan is the rename's
+  perform-and-restore with the plugin's own steps (`collectAssociations`, `setPackageName` in place, `collectUsages`
+  and `bindToElement`, `restoreAssociations`, the import optimizer).
+- Extract method from the last member of a Scala 3 class body without braces fails in the plugin
+  (`ScalaExtractMethodHandler.insertMethod` inserts before a next sibling there is none of; probably since SCL-25158
+  made the class-body member the default scope). The host withholds the action there
+  (`Extract.targetsLastIndentedMember`); `EditingTest` expects the plugin's failure, so it fails once the pin carries a fix, and the guard can go.
 - Inspect Code reports "Unused expression without side effects" on the patterns of `case` clauses that follow a guard
   whose `if` ends its line (`HostBootstrap`, the application table proxy). A plugin parser bug, reported to the
   maintainers on 2026-11-17: in Scala 3 the guard's indentation region (`ExprInIndentationRegion`) takes the clause's
   `=>`, and the clauses after it parse as loose statements. Nothing to change in the host; bump the pin once it is fixed.
-- Each to decide: extract/introduce refactorings as code actions, Change Signature, debugging (DAP), worksheets.
-- AI agents over MCP: a `--mcp` mode of the same binary, a second transport over `ProjectSession` beside `lsp`
-  (MCP is JSON-RPC 2.0 over stdio, but one message per line, not the `Content-Length` framing of lsp4j's jsonrpc, so
-  the transport is its own). Tools are addressed by qualified name rather than line and column; read-only first,
-  since rename and quick fixes would write to files the agent also edits. A tool answers "still importing" rather
-  than an empty result during the BSP import.
-  - Wave A is done: the transport and lifecycle (`mcp/McpServer`), following the disk before each tool call
-    (`mcp/DiskScan`, with the change rules shared with the LSP through `ProjectSession.importNeeded` and
-    `followDisk`), and the tools `project_status` and `find_symbol`.
-  - Wave B is done: the navigation tools `definition`, `references`, `implementations`, `callers`, `callees`,
-    `supertypes`, `subtypes`, `type_of`, `describe` and `outline`, addressed by `symbol` or by `file`, `line` and
-    `text` (`mcp/McpTools`, `mcp/ToolTarget`, `mcp/Listings`).
-  - Wave C is done: `diagnostics` and `inspect`, of one `file` or of every source, cut by `severity` and `limit`
-    (`mcp/McpTools`, `mcp/Listings`). The read-only toolset is complete. Writes (rename, quick fixes) are a later
-    decision: they would edit files that the agent edits too.
-  - Found by an agent's test drive on this repository (2026-11-17). Fixed: a `symbol` that names a type and its
-    companion object means the type, where it used to be ambiguous. A second drive fixed: `text` matched inside a longer
-    identifier (`open` in `opened`); `references` of a type left out the usages of its companion object; `callers` gave
-    the calling declaration without the call site; `callees` mixed library methods, with their cache paths, among the
-    project's; no tool was annotated as read-only; `find_symbol` listed an enum case twice and named kinds in LSP's
-    words (`module`, `enummember`). Not fixed, in the host's analysis, so the LSP shows them too:
-    - `references` of a Java class is empty, even asked from a Scala use (`LspServices.Server`,
-      `HostProtocol.Client`), though `definition` from there finds the class.
-    - `subtypes` and `implementations` of a Java interface miss its Java inheritors (`HostProtocol.Client` misses the
-      tests' `ClientBase`); Scala inheritors of a Scala type are found.
-    - The Java analysis reports errors in sources that compile: "Package not found: com.intellij.psi" and Scala's
-      mangled names, in `HostImplicitHintsPass.java`, `HostAsyncExecutionService.java` and `HostPsiManager.java`.
-    - `diagnostics` of every source took 144 s on this repository (133 sources), near the timeout of some clients.
-    - Over MCP only: a library symbol cannot be named by `symbol` (`scala.collection.immutable.List`); the search
-      covers the project sources only, so an agent reaches a library API through a use of it in the project.
+- Left by the MCP test drives on this repository (2026-11-17), in the host's analysis, so the LSP shows them too.
+  MCP writes (rename, quick fixes) are a later decision: they would edit files that the agent edits too.
+  - `references` of a Java class is empty, even asked from a Scala use (`LspServices.Server`,
+    `HostProtocol.Client`), though `definition` from there finds the class.
+  - `subtypes` and `implementations` of a Java interface miss its Java inheritors (`HostProtocol.Client` misses the
+    tests' `ClientBase`); Scala inheritors of a Scala type are found.
+  - The Java analysis reports errors in sources that compile: "Package not found: com.intellij.psi" and Scala's
+    mangled names, in `HostImplicitHintsPass.java`, `HostAsyncExecutionService.java` and `HostPsiManager.java`.
+  - `diagnostics` of every source took 144 s on this repository (133 sources), near the timeout of some clients.
+  - Over MCP only: a library symbol cannot be named by `symbol` (`scala.collection.immutable.List`); the search
+    covers the project sources only, so an agent reaches a library API through a use of it in the project.
 - Left by the 0.3.1 audit, none fixed (read from the code or reported by reviewers; check before acting):
   - A document opened before it became a source is tracked by halves: its `didChange`s are dropped until an import
     registers it from disk, the next incremental change then lands on the disk text, and since only `didOpen` adds it
@@ -232,8 +233,7 @@ source whose stubs do not pair with its PSI stays out of the symbol index instea
 - A persistent index, for fast startup.
 - `.sbt` files (sbt's meta-build is a build target over BSP).
 - Test discovery and code lenses over BSP.
-- Refactorings with dialogs in the IDE: extract, inline, change signature.
-- Worksheets; debugging (DAP).
+- Change Signature, Introduce Parameter; worksheets; debugging (DAP). See the 0.4 decisions.
 
 ## Code quality — standardization pass (2026-11-06/07)
 

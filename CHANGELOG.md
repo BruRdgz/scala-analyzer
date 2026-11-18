@@ -1,7 +1,14 @@
 # Changelog
 
-## Unreleased
+## 0.4.0 — 2026-11-18
 
+AI agents can ask the project questions over MCP, and the editor gains Extract to val and Extract method.
+
+- `scala-analyzer --mcp [--root DIR]` serves the Model Context Protocol over stdio, for any MCP client: project status,
+  symbol search, definitions, references, implementations, callers and callees, supertypes and subtypes, types,
+  hover documentation, outlines, and diagnostics and inspections of a file or of the whole project. The tools are
+  read-only, take a symbol name or a file, line and identifier, and follow the files on disk before each call. See the
+  README, "Use with AI agents (MCP)".
 - Extract to val and Extract method are code actions (`refactor.extract`) on a selection, as in the IDE's Introduce
   Variable and Extract Method, with their defaults. Extract to val replaces every occurrence of the expression, or only
   the selected one when there are others.
