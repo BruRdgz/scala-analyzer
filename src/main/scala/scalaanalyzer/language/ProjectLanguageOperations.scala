@@ -806,7 +806,8 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
    *                      members, whose preview occupies the host's dispatch thread, is offered without them
    * @return each accepted action paired with its edits, and the problems it fixes or suppresses in its result; the
    *         edits of Implement members are absent when `resolvesEdits`, and [[implementMembers]] at `start` computes
-   *         them. Empty for a file that is not Scala
+   *         them. The extractions have none: [[extract]] computes them once the user chooses one, and the result
+   *         says which. Empty for a file that is not Scala
    * @throws com.intellij.openapi.progress.ProcessCanceledException when the buffer is edited meanwhile
    */
   def codeActions(path: Path, start: LineColumn, end: LineColumn, only: Seq[String] = Seq.empty,
@@ -822,9 +823,9 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
       val (range, stamp) = host.read(
         (new TextRange(offset(sourceDocument, start), offset(sourceDocument, end)), sourceDocument.getModificationStamp))
       val offered =
-        if (accepts("quickfix") || accepts("refactor.rewrite") || accepts("refactor.inline"))
+        if (accepts("quickfix") || accepts("refactor.rewrite") || accepts("refactor.inline") || accepts("refactor.extract"))
           host.codeActions(sourceFile, range, withInspections)
-        else CodeActions.Offered(Seq.empty, None)
+        else CodeActions.Offered(Seq.empty, None, Seq.empty)
       val implementing = offered.implementMembers.filter(action => accepts(action.kind))
       val (previewed, deferred) =
         if (resolvesEdits) (None, implementing)
@@ -833,6 +834,7 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
         if (only.nonEmpty && accepts("source.organizeImports")) Seq(host.organizeImports(sourceFile))
         else Seq.empty
       val choices = offered.choices.filter(choice => accepts(choice.kind)) ++ previewed ++ source
+      val extractions = if (accepts("refactor.extract")) offered.extractions else Seq.empty
 
       host.read {
         // The reads above are separate, and an edit between them would mix two versions of the text in the result.
@@ -842,9 +844,37 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
             Some(choice.edits.map(textChange(sourceDocument, _)))
         } ++ deferred.map { action =>
           CodeActionResult(action.title, action.kind, None, pluginProblems(sourceDocument, action.problems)) -> None
+        } ++ extractions.map { offer =>
+          CodeActionResult(offer.title, "refactor.extract", None, Seq.empty, Some(offer.refactoring)) -> None
         }
       }
     case _ => Seq.empty
+  }
+
+  /**
+   * Computes the changes of an extraction that [[codeActions]] offered for a selection (see [[Extract]]). Only Scala
+   * files have them. The buffer is unchanged: the host restores the file's text before this returns, and queries
+   * running meanwhile are cancelled.
+   *
+   * @param path registered project-source path
+   * @param start selection start
+   * @param end selection end, after `start`
+   * @param refactoring the extraction to perform
+   * @return the changes against the current buffer and the position of the name the extraction introduced, in the text
+   *         they produce; none when the plugin's handler refuses the selection, and for a file that is not Scala
+   * @throws com.intellij.openapi.progress.ProcessCanceledException when the buffer is edited meanwhile
+   */
+  def extract(path: Path, start: LineColumn, end: LineColumn, refactoring: Extract.Refactoring)
+      : Option[(Seq[TextChange], LineColumn)] = file(path) match {
+    case sourceFile: ScalaFile =>
+      val sourceDocument = document(sourceFile)
+      val (range, stamp) = host.read(
+        (new TextRange(offset(sourceDocument, start), offset(sourceDocument, end)), sourceDocument.getModificationStamp))
+
+      host.extract(sourceFile, range, stamp, refactoring).map { result =>
+        host.read(result.edits.map(textChange(sourceDocument, _))) -> result.name
+      }
+    case _ => None
   }
 
   /**

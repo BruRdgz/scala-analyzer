@@ -9,7 +9,7 @@ import scalaanalyzer.build.{
   TestRun,
 }
 import scalaanalyzer.language.{
-  CodeActionResult, CompletionChoices, CompletionFollowUp, FileChanges, FileProblem, Fold, HierarchyCall,
+  CodeActionResult, CompletionChoices, CompletionFollowUp, Extract, FileChanges, FileProblem, Fold, HierarchyCall,
   HierarchyItem, HierarchyTarget, HintPartTarget, InlineHint, InspectionDescription, MainLens, MemberOverrides,
   Occurrence, OutlineSymbol,
   ProjectLanguageOperations, SemanticToken, SignatureChoices, SourceSpan, TestLens, TextChange, WorkspaceSymbolMatch,
@@ -581,6 +581,23 @@ final class ProjectSession private (
       withInspections: Boolean = false, resolvesEdits: Boolean = false)
       : Seq[(CodeActionResult, Option[Seq[TextChange]])] =
     language.codeActions(path, start, end, only, withInspections, resolvesEdits)
+
+  /**
+   * Computes the changes of an extraction that `codeActions` offered for a selection.
+   *
+   * The buffer is unchanged; the caller applies the changes and reports the resulting buffer through `change`.
+   *
+   * @param path registered project-source path
+   * @param start selection start in zero-based lines and UTF-16 columns
+   * @param end selection end in the same coordinates
+   * @param refactoring the extraction to perform
+   * @return the changes against the current buffer and the position of the name the extraction introduced, in the
+   *         text they produce; none when the plugin's handler refuses the selection, and for a source that is not
+   *         Scala
+   */
+  def extract(path: Path, start: LineColumn, end: LineColumn, refactoring: Extract.Refactoring)
+      : Option[(Seq[TextChange], LineColumn)] =
+    language.extract(path, start, end, refactoring)
 
   /**
    * Validates a rename target and locates its name range.

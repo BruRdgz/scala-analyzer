@@ -11,7 +11,7 @@ import org.eclipse.lsp4j.services.*
 import scalaanalyzer.{LineColumn, LineRange, ScalaPsiHost}
 import scalaanalyzer.build.{BspImport, ScalafmtFormatting, TestRun}
 import scalaanalyzer.language.{
-  Completion, CompletionChoice, CompletionFollowUp, FileProblem, Fold, HierarchyItem, HierarchyTarget, InlayHints,
+  Completion, CompletionChoice, CompletionFollowUp, Extract, FileProblem, Fold, HierarchyItem, HierarchyTarget, InlayHints,
   InlineHint, MemberOverrides, OutlineSymbol, ProblemSeverity, Rename, SignatureChoices, SourceSpan, TextChange,
   WorkspaceSymbolKind,
 }
@@ -423,7 +423,7 @@ final class ScalaLanguageServer(
     capabilities.setTextDocumentSync(TextDocumentSyncKind.Incremental)
     capabilities.setHoverProvider(true)
     capabilities.setExecuteCommandProvider(
-      new ExecuteCommandOptions(java.util.List.of(CompleteInsertion, RunTest, RunMain, OverrideMembers)))
+      new ExecuteCommandOptions(java.util.List.of(CompleteInsertion, RunTest, RunMain, OverrideMembers, ExtractRefactoring)))
     capabilities.setDefinitionProvider(true)
     capabilities.setTypeDefinitionProvider(true)
     capabilities.setWorkspaceSymbolProvider(true)
@@ -440,7 +440,7 @@ final class ScalaLanguageServer(
     val signatureTriggers = java.util.List.of("(", "[", ",")
     val signatureRetriggers = java.util.List.of(",")
     val actionKinds = java.util.List.of(CodeActionKind.QuickFix, CodeActionKind.RefactorRewrite,
-      CodeActionKind.RefactorInline, CodeActionKind.SourceOrganizeImports)
+      CodeActionKind.RefactorInline, CodeActionKind.RefactorExtract, CodeActionKind.SourceOrganizeImports)
     capabilities.setCompletionProvider(new CompletionOptions(/* resolveProvider = */ false, completionTriggers))
 
     if (scopesScalaFeatures) {
@@ -1391,7 +1391,9 @@ final class ScalaLanguageServer(
      * Runs on a read thread. An action the session marks as disabled carries its reason and no edit. An action that
      * fixes or suppresses a problem lists, as its diagnostics, the context's diagnostics that report that problem.
      * For a client that resolves edits, Implement members has no edit but the `data` that `resolveCodeAction` computes
-     * it from: the document, the range's start and the document's version.
+     * it from: the document, the range's start and the document's version. An extraction has no edit either, but the
+     * command `ExtractRefactoring` that computes it, with the document, the range, the version and the refactoring; it
+     * is offered only for a document the client has open, which is where its edit goes.
      *
      * @param params the document, the range to act on, the kinds the client asked for and the diagnostics it shows
      *               there; the session gets the range and the kinds as they are
@@ -1405,7 +1407,10 @@ final class ScalaLanguageServer(
         val showsInspections = shown.exists(problem => Option(problem.getCode).exists(code => inspectionIds(code.getLeft)))
         val start = lineColumn(params.getRange.getStart)
 
-        s.codeActions(path, start, lineColumn(params.getRange.getEnd), requested, showsInspections, resolvesActionEdits)
+        val end = lineColumn(params.getRange.getEnd)
+
+        s.codeActions(path, start, end, requested, showsInspections, resolvesActionEdits)
+          .filter((choice, _) => choice.extraction.isEmpty || openVersion(path) != null)
           .map { (choice, changes) =>
             val action = new CodeAction(choice.title)
             action.setKind(choice.kind)
@@ -1416,6 +1421,11 @@ final class ScalaLanguageServer(
               case (Some(reason), _) => action.setDisabled(new CodeActionDisabled(reason))
               case (None, Some(edits)) =>
                 action.setEdit(versionedEdit(path.toUri.toString, openVersion(path), edits))
+              case (None, None) if choice.extraction.isDefined =>
+                choice.extraction.foreach { refactoring =>
+                  action.setCommand(new Command(choice.title, ExtractRefactoring, JavaList.of[Object](
+                    path.toUri.toString, position(start), position(end), openVersion(path), refactoring.id)))
+                }
               case (None, None) =>
                 val data = new JsonObject
                 data.addProperty("uri", path.toUri.toString)
@@ -1896,6 +1906,48 @@ final class ScalaLanguageServer(
       case _ => None
     }
 
+  /**
+   * Performs the extraction the client chose, by an edit to the document version it was offered for, and completes with
+   * the position of the name the extraction introduced in the edited document, for the client to rename.
+   */
+  private def executeExtract(params: ExecuteCommandParams): CompletableFuture[AnyRef] = extractRequest(params) match {
+    case None => CompletableFuture.failedFuture(requestError(ResponseErrorCode.InvalidParams,
+      s"$ExtractRefactoring: expected the document, the range, the document version and one of " +
+        Extract.Refactoring.values.map(_.id).mkString(", ")))
+    case Some(request) =>
+      onSource("extract", new TextDocumentIdentifier(request.uri), None) { (s, path) =>
+        if (versions.get(path) != request.version) throw new ProcessCanceledException
+        s.extract(path, request.start, request.end, request.refactoring)
+      }.thenCompose { extracted =>
+        extracted.fold(CompletableFuture.completedFuture[AnyRef](null)) { (changes, name) =>
+          // The client has the edit applied when the answer arrives, so that it can put the cursor on the name.
+          applyEdit(request.uri, request.version, changes, "extract").thenApply { response =>
+            if (response.isApplied) position(name) else null
+          }
+        }
+      }
+  }
+
+  /** What the extraction command asks: the refactoring for the range of `uri`, as offered for `version`. */
+  private final case class ExtractRequest(
+    uri: String, start: LineColumn, end: LineColumn, version: Int, refactoring: Extract.Refactoring)
+
+  /** Reads the extraction command's arguments, which lsp4j hands over as JSON; absent when they are malformed. */
+  private def extractRequest(params: ExecuteCommandParams): Option[ExtractRequest] =
+    Option(params.getArguments).map(_.asScala.toSeq) match {
+      case Some(Seq(uri: JsonPrimitive, start: JsonObject, end: JsonObject, version: JsonPrimitive, id: JsonPrimitive))
+          if uri.isString && version.isNumber && id.isString =>
+        for {
+          startLine <- intMember(start, "line")
+          startColumn <- intMember(start, "character")
+          endLine <- intMember(end, "line")
+          endColumn <- intMember(end, "character")
+          refactoring <- Extract.Refactoring.withId(id.getAsString)
+        } yield ExtractRequest(uri.getAsString, LineColumn(startLine, startColumn), LineColumn(endLine, endColumn),
+          version.getAsInt, refactoring)
+      case _ => None
+    }
+
   /** Starts the run of a lens's selection; the request completes when the run ends. */
   private def executeTest(params: ExecuteCommandParams): CompletableFuture[AnyRef] = testSelection(params) match {
     case None => CompletableFuture.failedFuture(requestError(ResponseErrorCode.InvalidParams,
@@ -1990,16 +2042,20 @@ final class ScalaLanguageServer(
       if (readsConfiguration) readInlayHintSettings()
 
     /**
-     * Executes a test selection, a main class, a completion insert handler or an override of members; unknown commands
-     * are invalid parameters.
+     * Executes a test selection, a main class, a completion insert handler, an override of members or an extraction;
+     * unknown commands are invalid parameters.
      *
      * A test selection or main class runs on the run thread and the request completes when the run ends; starting
      * one while another is in progress fails with `RequestFailed`. A completion insertion or an override runs on the
      * documents thread and completes with `null`; the override's edit goes to the client as `workspace/applyEdit`, and
-     * is cancelled when the document is no longer in the version the members were listed for. A malformed test
+     * is cancelled when the document is no longer in the version the members were listed for. An extraction runs on
+     * the documents thread too, sends its edit as `workspace/applyEdit`, and completes once the client has answered,
+     * with the position of the name it introduced in the edited document, or `null` when the plugin's handler refuses
+     * or the client does not apply the edit; it is cancelled as the override is. A malformed test
      * selection or main class, a completion insertion without six primitive arguments (the second and the third
      * numbers), an override without the document, the position, the identifiers and the version, an override of a
-     * member the class does not offer and an unknown command fail with `InvalidParams`.
+     * member the class does not offer, an extraction without the document, the range, the version and a refactoring
+     * the server knows, and an unknown command fail with `InvalidParams`.
      *
      * @param params the command name and its JSON arguments, as `completionItem` or the code lens gave them
      * @return a future completing with `null` once the command has run, or failing with the protocol error
@@ -2028,6 +2084,7 @@ final class ScalaLanguageServer(
           }
         }
       case OverrideMembers => executeOverride(params)
+      case ExtractRefactoring => executeExtract(params)
       case other => CompletableFuture.failedFuture(requestError(ResponseErrorCode.InvalidParams, s"unknown command: $other"))
     }
 
@@ -2098,6 +2155,13 @@ private val RunMain = "scalaAnalyzer.runMain"
  * are the document's URI, the position of the caret, the identifiers of the members and the document's version.
  */
 private val OverrideMembers = "scalaAnalyzer.overrideMembers"
+
+/**
+ * The command that performs an extraction. Its arguments are the document's URI, the selection's start and end
+ * positions, the document's version and the identifier of the refactoring ([[Extract.Refactoring.id]]); it completes
+ * with the position of the name the extraction introduced, in the document as the edit leaves it, or `null`.
+ */
+private val ExtractRefactoring = "scalaAnalyzer.extract"
 
 /** The command that replays insertion after the client has inserted a completion item's lookup text. */
 private val CompleteInsertion = "scalaAnalyzer.completeInsertion"

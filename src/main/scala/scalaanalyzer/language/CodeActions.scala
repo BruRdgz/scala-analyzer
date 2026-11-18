@@ -68,12 +68,15 @@ object CodeActions {
   final case class ImplementMembers(title: String, kind: String, problems: Seq[Diagnostic])
 
   /**
-   * The actions of a range: the previewed ones, and Implement members apart, since it is previewed on its own.
+   * The actions of a range: the previewed ones, with Implement members and the extractions apart, since those are not
+   * previewed with the rest: the first on its own, the others performed only when the user chooses them.
    *
    * @param choices the previewed actions
    * @param implementMembers Implement members when the range offers it, not previewed yet
+   * @param extractions the extractions the range offers, not performed
    */
-  final case class Offered(choices: Seq[Choice], implementMembers: Option[ImplementMembers])
+  final case class Offered(choices: Seq[Choice], implementMembers: Option[ImplementMembers],
+      extractions: Seq[Extract.Offer])
 }
 
 /**
@@ -108,7 +111,8 @@ final class CodeActions(intentionClasses: Seq[String], descriptorClasses: Seq[St
    * failures inside an action's availability or preview check are logged before continuing with other choices.
    *
    * Implement members is not among them: its insertion needs the dispatch thread, which a caller holding the read lock
-   * must not wait for. See [[implementMembersOffer]] and [[implementMembers]].
+   * must not wait for. See [[implementMembersOffer]] and [[implementMembers]]. Nor are the extractions
+   * ([[extractionOffers]]).
    *
    * @param file Scala file being queried
    * @param range selected UTF-16 range, empty for a caret request
@@ -276,6 +280,27 @@ final class CodeActions(intentionClasses: Seq[String], descriptorClasses: Seq[St
       }
     }
   }
+
+  /**
+   * The extractions that a non-empty range offers (see [[Extract.offers]]); an extraction is performed only once the
+   * user chooses it, for it changes the physical file.
+   *
+   * A failure while looking for them leaves them out.
+   *
+   * @param file Scala source being queried
+   * @param range UTF-16 range the actions apply to
+   * @return the offers; empty for an empty range
+   */
+  def extractionOffers(file: ScalaFile, range: TextRange): Seq[Extract.Offer] =
+    if (range.isEmpty) Seq.empty
+    else
+      try Extract.offers(file, range)
+      catch {
+        case e: ProcessCanceledException => throw e
+        case e @ (NonFatal(_) | _: LinkageError) =>
+          HostLog.warn("extractions could not be looked up", e)
+          Seq.empty
+      }
 
   /**
    * Whether Implement members is offered at the range's start: as the annotator's fix when it is available, and

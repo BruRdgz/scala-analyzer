@@ -101,8 +101,16 @@ final case class FileChanges(path: Path, changes: Seq[TextChange])
  * @param disabled reason the action cannot be applied, or none when available
  * @param problems the problems this action fixes or suppresses, as the diagnostics report them; empty for an action
  *                 that is not about a problem
+ * @param extraction the extraction the action performs once the user chooses it, for an action that has no edit to
+ *                   preview; none for every other action
  */
-final case class CodeActionResult(title: String, kind: String, disabled: Option[String], problems: Seq[FileProblem] = Seq.empty)
+final case class CodeActionResult(
+  title: String,
+  kind: String,
+  disabled: Option[String],
+  problems: Seq[FileProblem] = Seq.empty,
+  extraction: Option[Extract.Refactoring] = None,
+)
 
 /**
  * A completion candidate detached from plugin lookup objects.

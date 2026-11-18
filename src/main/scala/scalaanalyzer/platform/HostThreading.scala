@@ -145,6 +145,24 @@ private[scalaanalyzer] object HostLock {
     HostDispatchThread.call(cancellation.fold(query(body))(cancelledBy(_)(query(body))), cancellation)
   }
 
+  /**
+   * Runs an edit on the host's dispatch thread, for the platform code that changes PSI and insists on the event thread.
+   *
+   * The dispatch thread takes the write lock itself through [[write]], which cancels the running queries. The caller
+   * waits for the dispatch thread and must hold neither the read lock, the write lock nor write intent, for the same
+   * reason as in [[queryOnDispatchThread]].
+   *
+   * @param body action that changes PSI
+   * @return the result of `body`
+   * @throws IllegalStateException when the thread holds the read lock, the write lock or write intent
+   */
+  def writeOnDispatchThread[T](body: => T): T = {
+    if (isReading || isWriting || hasWriteIntent)
+      throw new IllegalStateException("the dispatch thread cannot be awaited inside a read, an edit or write intent")
+
+    HostDispatchThread.call(write(body))
+  }
+
   /** Cancels every query currently running through [[query]]. */
   def cancelQueries(): Unit = queries.forEach(_.cancel())
 

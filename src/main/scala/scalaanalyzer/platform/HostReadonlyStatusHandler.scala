@@ -6,10 +6,12 @@ import com.intellij.openapi.vfs.{ReadonlyStatusHandler, VirtualFile}
 import scala.jdk.CollectionConverters.*
 
 /**
- * Answers the platform's "may these files be edited?" question for a host that edits only copies.
+ * Answers the platform's "may these files be edited?" question for a host that keeps no change to the user's files.
  *
  * Refactorings ask before they change a file. Inside a preview session the file is the preview's copy, which the host
- * discards, so it may be edited; anywhere else it is a file of the user's project, which the host never writes.
+ * discards, so it may be edited. While the host holds the write lock, it changes a file of the project only to learn
+ * the edits of a refactoring and restores its text before it lets go (see `ScalaPsiHost.extract`), so it may be edited
+ * too. Anywhere else it is a file of the user's project, which the host never writes.
  */
 private[scalaanalyzer] final class HostReadonlyStatusHandler extends ReadonlyStatusHandler {
   private object Writable extends ReadonlyStatusHandler.OperationStatus {
@@ -26,7 +28,7 @@ private[scalaanalyzer] final class HostReadonlyStatusHandler extends ReadonlySta
 
   override def ensureFilesWritable(
       files: java.util.Collection[? <: VirtualFile]): ReadonlyStatusHandler.OperationStatus =
-    if (IntentionPreviewUtils.isIntentionPreviewActive) Writable
+    if (IntentionPreviewUtils.isIntentionPreviewActive || HostLock.isWriting) Writable
     // A caller may pass the null virtual file of a non-physical PSI file; it names no file to report.
     else new Refused(files.asScala.filter(_ != null).toArray)
 }

@@ -37,7 +37,7 @@ It exposes editor features through the **Language Server Protocol (LSP)** and im
 | Inlay hints | Inferred types, parameter names, implicit arguments and conversions, method chains. Type names are links to their declarations, an inferred definition type can be written into the source, and `scalaAnalyzer.inlayHints.*` selects the kinds shown. |
 | Navigation | Definitions (through the plugin's Go to Declaration), type definitions, references, implementations, go to super, go to test (from a class to its tests and back), call/type hierarchies and workspace symbols; library sources and decompiled classes. |
 | Documentation | Markdown hover with declaration context, parameters, return values and linked references. |
-| Editing | Rename, organize imports, previewable quick fixes, intentions, surround and unwrap actions; implement and override members; split/join lists and flip comma; Inline for `val`s, `def`s and type aliases. |
+| Editing | Rename, organize imports, previewable quick fixes, intentions, surround and unwrap actions; implement and override members; split/join lists and flip comma; Inline for `val`s, `def`s and type aliases; Extract to val and Extract method. |
 | Formatting | Whole-file scalafmt or IntelliJ formatting; range formatting through IntelliJ. |
 | Tests | Run ScalaTest, specs2 and MUnit suites/tests, and uTest suites, from code lenses; readable output and a result summary. |
 | Run | Run objects with a `main` method, `App` objects and Scala 3 `@main` methods from code lenses; output and an exit summary. |
@@ -220,6 +220,19 @@ is partial, indexes are kept in memory, and each process serves one workspace.
   public or `protected` member, a `private[pkg]` one and a Scala 3 top-level private one are left out even when no
   other file uses them: Inline of a member used in several files is unavailable. The IDE's choice to keep the declaration after
   inlining every usage is not offered.
+- Extract to val and Extract method (`refactor.extract`) are offered for a selection. They are the plugin's Introduce
+  Variable and Extract Method with the IDE's defaults, without their dialogs. Extract to val takes the first name the
+  plugin suggests and the explicit type its setting asks for (as the IDE's dialog does and its in-place editor does
+  not), and replaces all the occurrences of the expression or, when it has others, this one only. Extract method takes
+  the scope the plugin picks, replaces the duplicates of the selection (the plugin's unit-test path does, where the
+  IDE asks) and is named `extracted`, which the plugin's dialog leaves for the user to type. Neither action carries an
+  edit: choosing one runs the server command `scalaAnalyzer.extract`, which computes the edit when it is chosen, sends it with `workspace/applyEdit` and answers
+  with the position of the new name (or `null`); the VS Code extension then starts a rename there, and other clients
+  just get the edit. Nothing is offered where the plugin's checks refuse the selection, but Extract method may still
+  find no scope to extract to when it runs, and then changes nothing. Extract method is not offered in a file that
+  uses the plugin's unit-test name `testMethodName`, or starts with the comments `//case class` or `//inner class`,
+  nor from the last member of a Scala 3 class body without braces, where the plugin fails to insert the method.
+  Introduce Type Alias for a selected type is not offered.
 - Some completion contributors require IDE services that are unavailable. Live templates, postfix templates among
   them, have no snippet tab stops: the caret goes where their end is; completion followed by handler edits takes two
   undo steps.

@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Extract to val and Extract method are code actions (`refactor.extract`) on a selection, as in the IDE's Introduce
+  Variable and Extract Method, with their defaults. Extract to val replaces every occurrence of the expression, or only
+  the selected one when there are others.
+- The VS Code extension starts a rename of the new name after an extraction, as the IDE's in-place rename does.
+
 ## 0.3.3 — 2026-11-17
 
 Two fixes for rare failures that a restart used to be the only way out of.

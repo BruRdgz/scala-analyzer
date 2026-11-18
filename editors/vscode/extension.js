@@ -187,12 +187,36 @@ async function compile() {
 // The commands of the run lenses: the server ends the run when its request is cancelled.
 const runCommands = new Set(['scalaAnalyzer.runTest', 'scalaAnalyzer.runMain']);
 
+// The command of the extractions (Extract to val, Extract method): the server sends the edit and answers with the
+// position of the name it introduced, once the edit is applied.
+const extractCommand = 'scalaAnalyzer.extract';
+
+/**
+ * Starts a rename of the name an extraction introduced, as IntelliJ's in-place rename does after it.
+ * @param {string} uri the document the extraction was made in
+ * @param {import('vscode-languageclient/node').Position | null} position where the name is in the edited document, or
+ *   null when nothing was extracted
+ */
+async function renameExtracted(uri, position) {
+  const editor = vscode.window.activeTextEditor;
+  if (!position || !editor || client.code2ProtocolConverter.asUri(editor.document.uri) !== uri) return;
+
+  const at = client.protocol2CodeConverter.asPosition(position);
+  editor.selection = new vscode.Selection(at, at);
+  await vscode.commands.executeCommand('editor.action.rename');
+}
+
 /**
  * Sends a run command under a progress notification whose cancel button cancels the request, which the language client
- * does not offer for commands. The other commands go the client's way.
+ * does not offer for commands, and renames what an extraction introduced. The other commands go the client's way.
  * @type {NonNullable<import('vscode-languageclient/node').Middleware['executeCommand']>}
  */
-function executeCommand(command, args, next) {
+async function executeCommand(command, args, next) {
+  if (command === extractCommand) {
+    const position = await next(command, args);
+    await renameExtracted(args[0], position);
+    return position;
+  }
   if (!runCommands.has(command)) return next(command, args);
   const subject = args[0]?.mainClass ?? args[0]?.suite ?? command;
   const options = { location: vscode.ProgressLocation.Notification, title: `scala-analyzer: running ${subject}`, cancellable: true };

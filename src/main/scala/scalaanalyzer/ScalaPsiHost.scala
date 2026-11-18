@@ -5,8 +5,10 @@ import com.intellij.lang.annotation.{Annotation, Annotator, HighlightSeverity}
 import com.intellij.openapi.editor.RangeMarker
 import com.intellij.openapi.fileTypes.FileTypeRegistry
 import com.intellij.openapi.module.Module
+import com.intellij.openapi.progress.ProcessCanceledException
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.util.{Key, TextRange, UserDataHolderBase}
+import com.intellij.openapi.util.text.StringUtil
 import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.psi.{PsiDocumentManager, PsiElement, PsiErrorElement, PsiFile, PsiJavaFile, PsiManager, SyntaxTraverser}
 import com.intellij.psi.impl.PsiManagerEx
@@ -16,8 +18,8 @@ import org.jetbrains.plugins.scala.lang.psi.impl.ScalaPsiElementFactory
 import org.jetbrains.plugins.scala.project.{ProjectContext, ScalaFeatures}
 
 import scalaanalyzer.language.{
-  ChangeEngine, CodeActions, Completion, InlayHints, InspectionDescription, Inspections, MemberOverrides, ParameterInfo,
-  Rename, SelectionRanges,
+  ChangeEngine, CodeActions, Completion, Extract, InlayHints, InspectionDescription, Inspections, MemberOverrides,
+  ParameterInfo, Rename, SelectionRanges,
 }
 import scalaanalyzer.platform.{Descriptors, ExtensionBean, HostBootstrap, HostDispatchThread, HostLock, HostLog, HostPsiDocumentManager, Host_ModuleRootManager, Host_OrderEnumerator, ImportIndex, LibraryFileSystem, SourceFile, SymbolIndex, WordIndex, dispatch, tableProxy}
 
@@ -332,6 +334,38 @@ final class ScalaPsiHost private[scalaanalyzer] (
   }
 
   /**
+   * Performs a change of the files' text and restores their texts before returning, even when the change fails. The
+   * platform changes physical PSI inside a command or an undo-transparent action; the host has no undo.
+   *
+   * The caller holds the write lock. The restoration is non-cancelable, so that a cancelled query cannot leave a
+   * changed file.
+   *
+   * @param files the files `change` changes
+   * @param change the change, which commits the documents of the files
+   * @return the files' texts before the change, their texts after it in the same order, and what `change` returned
+   */
+  private def performAndRestore[A](files: Seq[PsiFile])(change: => A): (Seq[(PsiFile, String)], Seq[String], A) = {
+    val originals = files.map(f => f -> f.getText)
+    val result = new java.util.concurrent.atomic.AtomicReference[A]
+
+    try {
+      com.intellij.openapi.command.CommandProcessor.getInstance.runUndoTransparentAction(() => result.set(change))
+      (originals, files.map(_.getText), result.get)
+    } finally restore(originals)
+  }
+
+  /** Puts each file's text back and commits it. */
+  private def restore(originals: Seq[(PsiFile, String)]): Unit =
+    com.intellij.openapi.progress.ProgressManager.getInstance.executeNonCancelableSection((() => {
+      val documents = com.intellij.psi.PsiDocumentManager.getInstance(project)
+      originals.foreach { (f, text) =>
+        val document = documents.getDocument(f)
+        documents.doPostponedOperationsAndUnblockDocument(document)
+        replaceText(f, 0, document.getTextLength, text)
+      }
+    }): Runnable)
+
+  /**
    * The edits that rename the symbol at `offset` of `file` to `newName`, by file (see [[Rename]]). The plugin's rename
    * runs on the project's files, so the files change while it does; their texts are restored before this returns, as
    * the editor applies the edits and reports them back. Queries running meanwhile are cancelled.
@@ -348,28 +382,6 @@ final class ScalaPsiHost private[scalaanalyzer] (
    *                        an edit changed the files that decide the target while it was being found
    */
   def rename(file: PsiFile, offset: Int, newName: String): Seq[(PsiFile, Seq[ChangeEngine.Edit])] = {
-    /** Puts each file's text back and commits it; non-cancelable so that a cancelled query cannot leave a renamed file. */
-    def restore(originals: Seq[(PsiFile, String)]): Unit =
-      com.intellij.openapi.progress.ProgressManager.getInstance.executeNonCancelableSection((() => {
-        val documents = com.intellij.psi.PsiDocumentManager.getInstance(project)
-        originals.foreach { (f, text) =>
-          val document = documents.getDocument(f)
-          documents.doPostponedOperationsAndUnblockDocument(document)
-          replaceText(f, 0, document.getTextLength, text)
-        }
-      }): Runnable)
-
-    /** Performs the plan, restoring the files' texts even when it fails; returns the texts before and after. */
-    def performAndRestore(plan: Rename.Plan): (Seq[(PsiFile, String)], Seq[String]) = {
-      val originals = plan.files.map(f => f -> f.getText)
-
-      try {
-        // The platform changes physical PSI inside a command or an undo-transparent action; the host has no undo.
-        com.intellij.openapi.command.CommandProcessor.getInstance.runUndoTransparentAction(() => Rename.perform(plan))
-        (originals, plan.files.map(_.getText))
-      } finally restore(originals)
-    }
-
     /** The modification stamps of the files that decide the target: the one with the symbol and the target's own. */
     def stamps(target: PsiElement): Seq[Long] = Seq(file, target.getContainingFile).map(_.getModificationStamp)
 
@@ -379,7 +391,7 @@ final class ScalaPsiHost private[scalaanalyzer] (
       (target, stamps(target))
     }
 
-    val (originals, changed) = try HostLock.writeIntent {
+    val (originals, changed, _) = try HostLock.writeIntent {
       // Keep the read plan valid until its write: another editor change must not enter between the two, nor between
       // finding the target and taking write intent.
       val plan = read {
@@ -388,7 +400,7 @@ final class ScalaPsiHost private[scalaanalyzer] (
         Rename.plan(target, newName)
       }
 
-      HostLock.write(performAndRestore(plan))
+      HostLock.write(performAndRestore(plan.files)(Rename.perform(plan)))
     } finally HostDispatchThread.drain()
 
     originals.zip(changed)
@@ -647,7 +659,8 @@ final class ScalaPsiHost private[scalaanalyzer] (
    * for their fixes with `withInspections`, since the editor will not ask again.
    *
    * Implement members is offered but not previewed: its preview occupies the host's single dispatch thread, so it runs
-   * only when the caller asks for it ([[previewImplementMembers]] or [[implementMembers]]).
+   * only when the caller asks for it ([[previewImplementMembers]] or [[implementMembers]]). The extractions are offered
+   * and not performed, for they change the file itself ([[extract]]).
    *
    * Takes read access itself.
    *
@@ -662,7 +675,8 @@ final class ScalaPsiHost private[scalaanalyzer] (
       .getOrElse(if (withInspections) inspectionDiagnostics(file) else Seq.empty)
     val problems = general ++ inspected
 
-    CodeActions.Offered(actions.collect(file, range, problems), actions.implementMembersOffer(file, range, problems))
+    CodeActions.Offered(actions.collect(file, range, problems), actions.implementMembersOffer(file, range, problems),
+      actions.extractionOffers(file, range))
   }
 
   /**
@@ -681,6 +695,39 @@ final class ScalaPsiHost private[scalaanalyzer] (
   def previewImplementMembers(file: ScalaFile, range: TextRange, offered: CodeActions.ImplementMembers)
       : CodeActions.Choice =
     actions.implementMembers(file, range, offered)
+
+  /**
+   * Performs an extraction on the file and gives its edits (see [[Extract]]). The plugin's handlers change the file
+   * they are given, and need a physical one, so the file changes while they run; its text is restored before this
+   * returns, as the editor applies the edits and reports them back. Queries running meanwhile are cancelled.
+   *
+   * Runs on the dispatch thread, which the handlers insist on, and takes the write lock there, so the caller must hold
+   * no lock; then lets the work for the dispatch thread run before returning.
+   *
+   * @param file Scala source to extract from
+   * @param selection selected UTF-16 range, not empty
+   * @param stamp the modification stamp of the file's document when `selection` was read from it
+   * @param refactoring the extraction to perform, as [[codeActions]] offered it
+   * @return the edits against the current text of `file` and the position of the new name in the text they produce;
+   *         none when the plugin's handler refuses the selection
+   * @throws com.intellij.openapi.progress.ProcessCanceledException when the document changed since `stamp`, which
+   *                                                                 makes `selection` stale
+   */
+  def extract(file: ScalaFile, selection: TextRange, stamp: Long, refactoring: Extract.Refactoring)
+      : Option[Extract.Result] = {
+    val (originals, changed, name) = try HostLock.writeOnDispatchThread {
+      if (file.getViewProvider.getDocument.getModificationStamp != stamp) throw new ProcessCanceledException()
+
+      performAndRestore(Seq(file))(Extract.perform(file, selection, refactoring))
+    } finally HostDispatchThread.drain()
+    val (before, after) = (originals.head._2, changed.head)
+
+    name.map { offset =>
+      val at = StringUtil.offsetToLineColumn(after, offset)
+
+      Extract.Result(ChangeEngine.diff(before, after), LineColumn(at.line, at.column))
+    }
+  }
 
   /**
    * The edits that implement every member the class at `offset` has to implement (see

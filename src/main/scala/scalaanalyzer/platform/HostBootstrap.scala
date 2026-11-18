@@ -272,7 +272,7 @@ import kotlin.coroutines.EmptyCoroutineContext
 import kotlinx.coroutines.CoroutineScopeKt
 import scalaanalyzer.{HostConfig, ModuleModel, ScalaPsiHost}
 import scalaanalyzer.language.{
-  ChangeEngine, CodeActions, Completion, InlayHints, Inspections, PostfixCompletion, Rename, TestLenses
+  ChangeEngine, CodeActions, Completion, Extract, InlayHints, Inspections, PostfixCompletion, Rename, TestLenses
 }
 import scalaanalyzer.platform.{Descriptors, ExtensionBean, dispatch, tableProxy}
 import scalaanalyzer.ScalaPsiHost.{CompletionWeighers, SemanticExtensionPoints, scalaCompletionContributors}
@@ -468,7 +468,8 @@ private[scalaanalyzer] object HostBootstrap {
       case ("assertIsNonDispatchThread" | "assertReadAccessNotAllowed", _) => null
       case ("isUnitTestMode", _) =>
         java.lang.Boolean.valueOf(
-          config.unitTestMode || Rename.isAnsweringDialogs || PostfixCompletion.isAnsweringDialogs)
+          config.unitTestMode || Rename.isAnsweringDialogs || PostfixCompletion.isAnsweringDialogs ||
+            Extract.isAnsweringDialogs)
       case ("isInternal" | "isEAP" | "isDisposed", _) => java.lang.Boolean.FALSE
       case ("isHeadlessEnvironment" | "isCommandLine", _) => java.lang.Boolean.TRUE
       // The stored value is a reference of unknown type `?`.
@@ -913,10 +914,13 @@ private[scalaanalyzer] object HostBootstrap {
       appServices.register(classOf[TextPresentationTransformers])(new TextPresentationTransformers)
       // PSI writes check command state; the core processor tracks it without UI or undo.
       appServices.register(classOf[CommandProcessor])(new HostCommandProcessor)
-      // Legacy inspection fixes may prepare writable files only inside their isolated preview session.
+      // Legacy inspection fixes may prepare writable files only inside their isolated preview session, or while the
+      // host holds the write lock to learn a refactoring's edits and restore the file (see HostReadonlyStatusHandler).
       appServices.register(classOf[FileModificationService])(new FileModificationService {
         override def prepareFileForWrite(file: PsiFile): Boolean =
-          file != null && IntentionPreviewUtils.isIntentionPreviewActive && IntentionPreviewUtils.isPreviewElement(file)
+          file != null &&
+            (HostLock.isWriting ||
+              IntentionPreviewUtils.isIntentionPreviewActive && IntentionPreviewUtils.isPreviewElement(file))
         override def preparePsiElementsForWrite(elements: java.util.Collection[? <: PsiElement]): Boolean =
           elements.asScala.forall(element => prepareFileForWrite(element.getContainingFile))
         /** Unsupported: recorded and rejected by `CallLog`. */

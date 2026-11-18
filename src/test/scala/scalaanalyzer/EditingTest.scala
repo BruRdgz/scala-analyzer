@@ -13,7 +13,7 @@ import org.jetbrains.plugins.scala.lang.psi.api.statements.ScFunction
 import scalaanalyzer.TestHost.{applyEdits, choose}
 import scalaanalyzer.build.{DocumentCompiler, ScalafmtFormatting}
 import scalaanalyzer.language.{
-  ChangeEngine, CodeActions, Completion, MemberOverrides, ProjectLanguageOperations, ProjectSearch, Rename,
+  ChangeEngine, CodeActions, Completion, Extract, MemberOverrides, ProjectLanguageOperations, ProjectSearch, Rename,
 }
 import scalaanalyzer.platform.{CallLog, HostDispatchThread, HostLock, HostLog, RequestEditor}
 
@@ -985,6 +985,198 @@ class EditingTest extends munit.FunSuite {
       try assertEquals(actions, Seq.empty, name)
       finally host.closeSource(file)
     }
+  }
+
+  // The expected texts are what the plugin's handlers produce in their unit-test path (testdata/refactoring/
+  // introduceVariable and extractMethod), with the name they suggest. `<name>` marks where the new name must be for the
+  // client to rename it.
+  test("extractions change the physical file on request, restore it, and say where the new name is") {
+    final case class ExtractCase(
+      name: String, marked: String, offered: Seq[String], title: String, expected: String)
+
+    val twoOccurrences =
+      """object Two {
+        |  def f(a: Int): Int = {
+        |    val x = <start>a * 2<end>
+        |    x + a * 2
+        |  }
+        |}
+        |""".stripMargin
+    val introduction = Seq("Extract to val", "Extract method")
+    val both = Seq("Extract to val, replacing all 2 occurrences", "Extract to val, this occurrence only", "Extract method")
+    val cases = Seq(
+      ExtractCase("an expression with one occurrence",
+        """object One {
+          |  def f(a: Int): Int = {
+          |    println(<start>a * 2<end>)
+          |    a
+          |  }
+          |}
+          |""".stripMargin,
+        introduction, "Extract to val",
+        """object One {
+          |  def f(a: Int): Int = {
+          |    val <name>i: Int = a * 2
+          |    println(i)
+          |    a
+          |  }
+          |}
+          |""".stripMargin),
+      ExtractCase("every occurrence of an expression", twoOccurrences, both, both.head,
+        """object Two {
+          |  def f(a: Int): Int = {
+          |    val <name>i: Int = a * 2
+          |    val x = i
+          |    x + i
+          |  }
+          |}
+          |""".stripMargin),
+      ExtractCase("one occurrence of an expression", twoOccurrences, both, both(1),
+        """object Two {
+          |  def f(a: Int): Int = {
+          |    val <name>i: Int = a * 2
+          |    val x = i
+          |    x + a * 2
+          |  }
+          |}
+          |""".stripMargin),
+      ExtractCase("a name that another method declares",
+        """object Other {
+          |  def g: Int = { val i = 3; i }
+          |  def f(a: Int): Int = {
+          |    println(<start>a * 2<end>)
+          |    a
+          |  }
+          |}
+          |""".stripMargin,
+        introduction, "Extract to val",
+        """object Other {
+          |  def g: Int = { val i = 3; i }
+          |  def f(a: Int): Int = {
+          |    val <name>i: Int = a * 2
+          |    println(i)
+          |    a
+          |  }
+          |}
+          |""".stripMargin),
+      // The method takes `i`, which only a physical file's elements tell the plugin to pass.
+      ExtractCase("statements that use a parameter",
+        """object Method {
+          |  def f(i: Int): Int = {
+          |    <start>println(i + 1)
+          |    println(i * 2)<end>
+          |    i
+          |  }
+          |}
+          |""".stripMargin,
+        Seq("Extract method"), "Extract method",
+        """object Method {
+          |  def f(i: Int): Int = {
+          |    <name>extracted(i)
+          |    i
+          |  }
+          |
+          |  def extracted(i: Int): Unit = {
+          |    println(i + 1)
+          |    println(i * 2)
+          |  }
+          |}
+          |""".stripMargin),
+      // The plugin's unit-test path replaces the duplicates, where the IDE asks.
+      ExtractCase("statements that occur twice",
+        """object Duplicated {
+          |  def f(i: Int): Int = {
+          |    <start>println(i + 1)<end>
+          |    println(i + 1)
+          |    i
+          |  }
+          |}
+          |""".stripMargin,
+        both, "Extract method",
+        """object Duplicated {
+          |  def f(i: Int): Int = {
+          |    <name>extracted(i)
+          |    extracted(i)
+          |    i
+          |  }
+          |
+          |  def extracted(i: Int): Unit = {
+          |    println(i + 1)
+          |  }
+          |}
+          |""".stripMargin),
+    )
+    val refused = Seq(
+      "the name of a declaration" -> "object Name { def f: Int = { val <start>b<end> = 1; b } }",
+      "a type" -> "object Type { def f(a: <start>Int<end>): Int = a }",
+      "only whitespace" -> "object Blank { def f: Int = {<start> <end>1} }",
+      "a definition used after the selection" -> "class Used { def f: Int = { <start>def g = 1<end>; g } }",
+    )
+    def selected(marked: String): (ScalaFile, String, TextRange) = {
+      val original = marked.replace("<start>", "").replace("<end>", "")
+
+      (scalaFile("Extracted", original), original,
+        new TextRange(marked.indexOf("<start>"), marked.indexOf("<end>") - "<start>".length))
+    }
+    def stampOf(file: ScalaFile): Long = host.read(file.getViewProvider.getDocument.getModificationStamp)
+
+    for (testCase <- cases) {
+      val (file, original, selection) = selected(testCase.marked)
+      try {
+        val offers = host.codeActions(file, selection).extractions
+
+        assertEquals(offers.map(_.title), testCase.offered, testCase.name)
+        val chosen = offers.find(_.title == testCase.title).getOrElse(fail(offers.toString)).refactoring
+        val result = host.extract(file, selection, stampOf(file), chosen).getOrElse(fail(s"refused: ${testCase.name}"))
+        val changed = applyEdits(original, result.edits)
+        val offset = new DocumentImpl(changed, true).getLineStartOffset(result.name.line) + result.name.column
+
+        assertEquals(changed.patch(offset, "<name>", 0), testCase.expected, testCase.name)
+        assertEquals(host.read(file.getText), original, s"restored: ${testCase.name}")
+      } finally host.closeSource(file)
+    }
+    for ((name, marked) <- refused) {
+      val (file, original, selection) = selected(marked)
+      try {
+        assertEquals(host.codeActions(file, selection).extractions, Seq.empty, name)
+        assertEquals(host.read(file.getText), original, name)
+      } finally host.closeSource(file)
+    }
+
+    // The plugin's unit-test name would be taken for the user's: only Extract method is withheld.
+    val (named, _, namedSelection) =
+      selected("object Test { def testMethodName = 1; def f(a: Int) = { <start>println(a)<end>; a } }")
+    try assertEquals(host.codeActions(named, namedSelection).extractions.map(_.title), Seq("Extract to val"))
+    finally host.closeSource(named)
+
+    // The plugin fails to put a method after the last member of a body without braces: only there is it withheld.
+    val scala3 = host.addModule(
+      ModuleSpec("extract3", "3.3.4", Seq.empty, Seq(Path.of(sys.props("scalaanalyzer.fixture.scalaLibrary")))))
+    for ((member, offered) <- Seq(
+        "the last member" -> Seq("Extract to val"),
+        "a member before another" -> Seq("Extract to val", "Extract method"))) {
+      val marked = "object Indented:\n  def f(i: Int): Unit =\n    println(<start>i + 1<end>)\n" +
+        (if (member == "the last member") "" else "\n  def g: Int = 1\n")
+      val text = marked.replace("<start>", "").replace("<end>", "")
+      val file = host.openFile(Path.of("/extract3/Indented.scala"), text, scala3).asInstanceOf[ScalaFile]
+      val selection = new TextRange(marked.indexOf("<start>"), marked.indexOf("<end>") - "<start>".length)
+
+      try {
+        assertEquals(host.codeActions(file, selection).extractions.map(_.title), offered, member)
+        // The plugin's own failure, which the offer avoids: drop `Extract.targetsLastIndentedMember` once this passes.
+        if (member == "the last member") {
+          intercept[NullPointerException](host.extract(file, selection, stampOf(file), Extract.Refactoring.Method))
+          assertEquals(host.read(file.getText), text, "restored after the plugin's failure")
+        }
+      } finally host.closeSource(file)
+    }
+
+    val (file, original, selection) = selected(cases.head.marked)
+    try {
+      intercept[ProcessCanceledException](
+        host.extract(file, selection, stampOf(file) - 1, Extract.Refactoring.IntroduceAll))
+      assertEquals(host.read(file.getText), original)
+    } finally host.closeSource(file)
   }
 
   // The oracle is the plugin's ImplementMembersQuickFixTest (`testProperDefaultValueForVariousMemberTypes`): the quick

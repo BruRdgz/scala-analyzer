@@ -365,7 +365,7 @@ class LanguageServerTest extends munit.FunSuite {
       Seq(","))
     assertEquals(methods("textDocument/codeAction").getAsJsonArray("codeActionKinds").asScala.map(_.getAsString).toSeq,
       Seq(CodeActionKind.QuickFix, CodeActionKind.RefactorRewrite, CodeActionKind.RefactorInline,
-        CodeActionKind.SourceOrganizeImports))
+        CodeActionKind.RefactorExtract, CodeActionKind.SourceOrganizeImports))
     assertEquals(methods("textDocument/codeAction").get("resolveProvider").getAsBoolean, true)
   }
 
@@ -1624,6 +1624,66 @@ class LanguageServerTest extends munit.FunSuite {
       change(crossModule, 301)
       assertEquals(inlinings(main, new Position(2, crossModule.split("\n")(2).indexOf(".text") + 1)), Seq.empty)
     } finally change(original, 302)
+  }
+
+  test("extractions are offered as a command that sends the edit and answers with the new name's position") {
+    val original = Files.readString(main).replace("val text: String", "val text: Int")
+    val local = "package app\nobject Extracting {\n  def f(a: Int): Int = {\n    println(a * 2)\n    a\n  }\n}\n"
+    val selection = new Range(new Position(3, 12), new Position(3, 17))
+    val service = server.getTextDocumentService
+    def change(value: String, version: Int): Unit = service.didChange(new DidChangeTextDocumentParams(
+      new VersionedTextDocumentIdentifier(main.toUri.toString, version),
+      JavaList.of(new TextDocumentContentChangeEvent(value))))
+    def extractions(range: Range): Seq[CodeAction] = {
+      val context = new CodeActionContext(JavaList.of())
+      context.setOnly(JavaList.of(CodeActionKind.RefactorExtract))
+      service.codeAction(new CodeActionParams(document(main), range, context))
+        .get(1, TimeUnit.MINUTES).asScala.map(_.getRight).toSeq
+    }
+    def position(line: Int, character: Int): JsonObject = {
+      val json = new JsonObject
+      json.addProperty("line", Integer.valueOf(line))
+      json.addProperty("character", Integer.valueOf(character))
+      json
+    }
+    def offsetOf(position: Position): Int =
+      local.split("\n", -1).take(position.getLine).map(_.length + 1).sum + position.getCharacter
+    val gson = new com.google.gson.Gson
+
+    try {
+      change(local, 400)
+      val actions = extractions(selection)
+
+      assertEquals(actions.map(_.getTitle), Seq("Extract to val", "Extract method"))
+      assertEquals(actions.map(_.getKind).distinct, Seq(CodeActionKind.RefactorExtract))
+      // The edit is computed when the user chooses the action, so that the actions of a selection do not wait for it.
+      assertEquals(actions.map(_.getEdit), Seq(null, null))
+      val command = actions.head.getCommand
+      assertEquals(command.getCommand, "scalaAnalyzer.extract")
+      assertEquals(gson.toJson(command.getArguments),
+        s"""["${main.toUri}",{"line":3,"character":12},{"line":3,"character":17},400,"introduceVariable.all"]""")
+
+      // A caret is not a selection: nothing is extracted.
+      assertEquals(extractions(new Range(selection.getStart, selection.getStart)), Seq.empty)
+
+      Client.applied.clear()
+      val name = server.getWorkspaceService.executeCommand(new ExecuteCommandParams("scalaAnalyzer.extract",
+        JavaList.of[Object](new JsonPrimitive(main.toUri.toString), position(3, 12), position(3, 17),
+          new JsonPrimitive(Integer.valueOf(400)), new JsonPrimitive("introduceVariable.all")))).get(1, TimeUnit.MINUTES)
+      val edit = Option(Client.applied.poll(1, TimeUnit.MINUTES)).getOrElse(fail("no edit applied")).getEdit
+        .getDocumentChanges.get(0).getLeft
+      assertEquals(edit.getTextDocument.getVersion, Integer.valueOf(400))
+      assertEquals(edit.getTextDocument.getUri, main.toUri.toString)
+      val changes = edit.getEdits.asScala.toSeq.map { change =>
+        val range = change.getRange
+        val span = new com.intellij.openapi.util.TextRange(offsetOf(range.getStart), offsetOf(range.getEnd))
+        ChangeEngine.Edit(span, change.getNewText)
+      }
+      assertEquals(TestHost.applyEdits(local, changes), local.replace("    println(a * 2)", "    val i: Int = a * 2\n    println(i)"))
+      // The name `i` of `    val i: Int = a * 2`.
+      // The answer reaches the client as untyped JSON, whose numbers the local connection reads as doubles.
+      assertEquals(gson.fromJson(gson.toJson(name), classOf[Position]), new Position(3, 8))
+    } finally change(original, 401)
   }
 
   test("inspection diagnostics preserve IDs and tags and fixes return versioned edits") {
