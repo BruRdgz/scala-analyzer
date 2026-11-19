@@ -95,70 +95,97 @@ final class SymbolIndex {
   })
 
   /**
-   * Indexes accepted Scala class and TASTy files beneath a library root.
+   * Reads the accepted Scala class and TASTy files beneath library roots, for [[publishLibraries]].
    *
-   * The caller holds the host write lock and supplies a root whose entries have not already been indexed.
-   * Library PSI comes from the platform's view providers and plugin decompilers. A Scala file without an available
-   * stub tree is reported as refused; Java class files and entries without their own PSI file are counted only.
+   * Decompiling them and building their stub trees is most of a build import, so the files are shared among helper
+   * threads that read for the caller (see [[HostLock.readInParallel]]). The caller holds write intent, possibly the
+   * write lock, so no write comes between this read and the publication. Library PSI comes from the platform's view
+   * providers and plugin decompilers.
    *
    * @param project host project used to resolve library virtual files to PSI
-   * @param root mounted class-library root to traverse recursively
-   * @param includeEntry predicate over root-relative paths such as `scala/Option.class`; applies to class and TASTy files
-   * @return `LibraryIndexReport` with traversal outcomes; its occurrence count covers the entire current index
+   * @param roots mounted class-library roots, whose entries have not already been indexed, each with its predicate
+   *              over root-relative paths such as `scala/Option.class` (it applies to class and TASTy files)
+   * @return one library per root, in the order of `roots`, its files in traversal order
+   * @throws IllegalStateException when the caller lacks write intent
    */
-  def indexLibrary(project: Project, root: VirtualFile, includeEntry: String => Boolean): LibraryIndexReport = {
+  def readLibraries(project: Project, roots: Seq[(VirtualFile, String => Boolean)]): Seq[SymbolIndex.LibraryRead] = {
     val psiManager = PsiManager.getInstance(project)
-    var classFileCount = 0
-    var indexedScalaFileCount = 0
-    var javaClassCount = 0
-    var nonTopLevelCount = 0
-    val refusedEntries = mutable.ArrayBuffer.empty[String]
+    val files = roots.zipWithIndex.flatMap { case ((root, includeEntry), rootIndex) =>
+      classFiles(root, includeEntry).map((rootIndex, _, _))
+    }.toVector
+    val entries = new Array[SymbolIndex.LibraryEntry](files.size)
+    // A helper takes a whole directory: to tell whether `Foo$Bar.class` is top-level, the plugin decompiles
+    // `Foo.class` and caches the result on that file, so helpers sharing a directory would each decompile it again.
+    val directories = files.indices.groupBy(files(_)._3.getParent).values.toVector
 
-    /** Visits a directory and records accepted files using paths relative to the mounted root. */
+    HostLock.readInParallel(directories.size) { directory =>
+      for (i <- directories(directory)) {
+        entries(i) = psiManager.findFile(files(i)._3) match {
+          case scalaFile: ScalaFile => libraryStubs(scalaFile).getOrElse(SymbolIndex.LibraryEntry.Refused)
+          case _: PsiJavaFile => SymbolIndex.LibraryEntry.JavaClass
+          case _ => SymbolIndex.LibraryEntry.NotTopLevel
+        }
+      }
+    }
+
+    val entriesByRoot = files.indices.groupBy(files(_)._1)
+    roots.indices.map { rootIndex =>
+      SymbolIndex.LibraryRead(entriesByRoot.getOrElse(rootIndex, Seq.empty).map(i => files(i)._2 -> entries(i)))
+    }
+  }
+
+  /** The class and TASTy files beneath `root` that `includeEntry` accepts, with their root-relative paths. */
+  private def classFiles(root: VirtualFile, includeEntry: String => Boolean): Seq[(String, VirtualFile)] = {
+    val found = Vector.newBuilder[(String, VirtualFile)]
+
     def visit(directory: VirtualFile, relativeDirectory: String): Unit =
       for (file <- directory.getChildren) {
         val relativePath = relativeDirectory + file.getName
 
         if (file.isDirectory) visit(file, relativePath + "/")
-        else if ((file.getName.endsWith(".class") || file.getName.endsWith(".tasty")) && includeEntry(relativePath)) {
-          classFileCount += 1
-          psiManager.findFile(file) match {
-            case scalaFile: ScalaFile =>
-              if (indexLibraryFile(scalaFile)) indexedScalaFileCount += 1
-              else refusedEntries += relativePath
-            case _: PsiJavaFile => javaClassCount += 1
-            case _ => nonTopLevelCount += 1
-          }
-        }
+        else if ((file.getName.endsWith(".class") || file.getName.endsWith(".tasty")) && includeEntry(relativePath))
+          found += relativePath -> file
       }
 
     visit(root, "")
-
-    val totalOccurrences = entriesByFile.values().asScala.iterator.map(_.size).sum
-
-    LibraryIndexReport(
-      classFiles = classFileCount,
-      scalaIndexed = indexedScalaFileCount,
-      javaClasses = javaClassCount,
-      notTopLevel = nonTopLevelCount,
-      refused = refusedEntries.toSeq,
-      occurrences = totalOccurrences,
-    )
+    found.result()
   }
 
-  /** Publishes entries from an existing library stub tree, refusing files whose stub tree is unavailable. */
-  private def indexLibraryFile(file: ScalaFile): Boolean = file match {
+  /** The stubs of a library file with their PSI; none when its stub tree is unavailable. */
+  private def libraryStubs(file: ScalaFile): Option[SymbolIndex.LibraryEntry.Stubs] = file match {
     case stubbed: PsiFileImpl =>
-      Option(stubbed.getStubTree) match {
-        case Some(tree) =>
-          // The first stub belongs to the file, not to an indexed declaration.
-          val stubsWithElements = tree.getPlainList.asScala.toSeq.drop(1).map(stub => stub -> stub.getPsi)
-
-          record(file, stubsWithElements)
-          true
-        case None => false
+      Option(stubbed.getStubTree).map { tree =>
+        // The first stub belongs to the file, not to an indexed declaration.
+        SymbolIndex.LibraryEntry.Stubs(file, tree.getPlainList.asScala.toSeq.drop(1).map(stub => stub -> stub.getPsi))
       }
-    case _ => false
+    case _ => None
+  }
+
+  /**
+   * Publishes libraries read by [[readLibraries]], in their order.
+   *
+   * The caller holds the host write lock, and has held write intent since the read. A Scala file without an
+   * available stub tree is reported as refused; Java class files and entries without their own PSI file are counted
+   * only.
+   *
+   * @param libraries the libraries to publish
+   * @return one report per library; each occurrence count covers the entire index after that library
+   */
+  def publishLibraries(libraries: Seq[SymbolIndex.LibraryRead]): Seq[LibraryIndexReport] = libraries.map { library =>
+    import SymbolIndex.LibraryEntry
+    library.entries.foreach {
+      case (_, LibraryEntry.Stubs(file, stubsWithElements)) => record(file, stubsWithElements)
+      case _ => ()
+    }
+
+    LibraryIndexReport(
+      classFiles = library.entries.size,
+      scalaIndexed = library.entries.count(_._2.isInstanceOf[LibraryEntry.Stubs]),
+      javaClasses = library.entries.count(_._2 == LibraryEntry.JavaClass),
+      notTopLevel = library.entries.count(_._2 == LibraryEntry.NotTopLevel),
+      refused = library.entries.collect { case (path, LibraryEntry.Refused) => path },
+      occurrences = entriesByFile.values().asScala.iterator.map(_.size).sum,
+    )
   }
 
   /**
@@ -264,5 +291,22 @@ final class SymbolIndex {
 
       tracker.incModificationCount()
     }
+  }
+}
+
+object SymbolIndex {
+  /** A library root's class and TASTy files, read by [[SymbolIndex.readLibraries]] and not yet published. */
+  final class LibraryRead private[SymbolIndex] (private[SymbolIndex] val entries: Seq[(String, LibraryEntry)])
+
+  /** What one library class or TASTy file holds, keyed in [[LibraryRead]] by its root-relative path. */
+  private[SymbolIndex] enum LibraryEntry {
+    /** A top-level Scala class or TASTy file, with its stubs and their PSI. */
+    case Stubs(file: ScalaFile, stubsWithElements: Seq[(StubElement[?], PsiElement)])
+    /** A Scala file whose stub tree was unavailable. */
+    case Refused
+    /** A Java class: not indexed, the class finder reads it by path. */
+    case JavaClass
+    /** A class file without a PSI file of its own (inner and companion classes, classes of TASTy files). */
+    case NotTopLevel
   }
 }

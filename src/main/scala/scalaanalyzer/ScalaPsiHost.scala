@@ -464,16 +464,23 @@ final class ScalaPsiHost private[scalaanalyzer] (
    * @param jar library jar to mount
    * @param includeEntry predicate over root-relative paths such as `scala/Option.class`; it decides which class and
    *                     TASTy files are indexed
-   * @return the traversal outcomes of the jar's indexing (see [[SymbolIndex.indexLibrary]])
+   * @return the traversal outcomes of the jar's indexing (see [[SymbolIndex.publishLibraries]])
    */
-  def addLibrary(jar: Path, includeEntry: String => Boolean = _ => true): LibraryIndexReport = HostLock.write {
-    val root = libraryFiles.mountJar(jar)
+  def addLibrary(jar: Path, includeEntry: String => Boolean = _ => true): LibraryIndexReport =
+    addLibraries(Seq(jar -> includeEntry)).head
 
-    libraryRoots.put(jar.toRealPath(), root)
-    val report = symbolIndex.indexLibrary(project, root, includeEntry)
+  /** Mounts library jars and indexes them together, their files read in parallel (see [[SymbolIndex.readLibraries]]). */
+  private def addLibraries(jars: Seq[(Path, String => Boolean)]): Seq[LibraryIndexReport] = HostLock.write {
+    val roots = jars.map { (jar, includeEntry) =>
+      val root = libraryFiles.mountJar(jar)
+
+      libraryRoots.put(jar.toRealPath(), root)
+      root -> includeEntry
+    }
+    val reports = symbolIndex.publishLibraries(symbolIndex.readLibraries(project, roots))
 
     psiChanged()
-    report
+    reports
   }
 
   /**
@@ -549,9 +556,10 @@ final class ScalaPsiHost private[scalaanalyzer] (
     val notJars = spec.classpath.filterNot(_.getFileName.toString.endsWith(".jar"))
     if (notJars.nonEmpty) throw new IllegalArgumentException(s"module ${spec.name}: classpath entries are not jars: ${notJars.mkString(", ")}")
 
-    val roots = spec.classpath.map { jar =>
-      Option(libraryRoots.get(jar.toRealPath())).getOrElse { addLibrary(jar); libraryRoots.get(jar.toRealPath()) }
-    }
+    val newJars = spec.classpath.distinctBy(_.toRealPath()).filterNot(jar => libraryRoots.containsKey(jar.toRealPath()))
+    if (newJars.nonEmpty) addLibraries(newJars.map(_ -> ((_: String) => true)))
+
+    val roots = spec.classpath.map(jar => libraryRoots.get(jar.toRealPath()))
     val hostModule = new HostModule(spec, roots.toSet)
     hostModule.module = newModule(hostModule)
 

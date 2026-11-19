@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- A build import indexes the library jars of a module in parallel, one thread per processor, so the server is ready
+  sooner: on this repository (226 jars) the import's library indexing went from about 19 s to 8 s, and the time to
+  ready from 25 s to 13 s.
+
 ## 0.4.0 — 2026-11-18
 
 AI agents can ask the project questions over MCP, and the editor gains Extract to val and Extract method.

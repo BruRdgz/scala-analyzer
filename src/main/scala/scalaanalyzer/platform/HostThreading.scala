@@ -34,12 +34,60 @@ private[scalaanalyzer] object HostLock {
   private val readListeners = new CopyOnWriteArrayList[ReadActionListener]()
   private val intentListeners = new CopyOnWriteArrayList[WriteIntentReadActionListener]()
 
+  /** Whether the current thread is a helper of [[readInParallel]], reading for the owner of write intent. */
+  private val helpingIntentOwner = ThreadLocal.withInitial[java.lang.Boolean](() => false)
+
   /**
-   * Whether the current thread holds a host read lock.
+   * Whether the current thread holds a host read lock, or reads for an owner of write intent (see [[readInParallel]]).
    *
    * A thread that only holds write intent or the write lock reads without the read lock and reports false.
    */
-  def isReading: Boolean = lock.getReadHoldCount > 0
+  def isReading: Boolean = lock.getReadHoldCount > 0 || helpingIntentOwner.get
+
+  /**
+   * Runs `body` for each index below `count` on helper threads that read for the current thread.
+   *
+   * The current thread holds write intent, possibly the write lock too, and waits: no write can happen until the
+   * helpers end, so they read without the read lock, which they could not take under the write lock. They cannot
+   * write. One helper per processor, as `body` is meant for CPU-bound work. After a failure the helpers take no
+   * further index, and the first failure is thrown once all of them have stopped.
+   *
+   * @param count the number of indexes
+   * @param body the work for one index; it only reads
+   * @throws IllegalStateException when the current thread lacks write intent
+   */
+  def readInParallel(count: Int)(body: Int => Unit): Unit = {
+    if (!hasWriteIntent) throw new IllegalStateException("helpers read for an owner of write intent")
+    val helperCount = Runtime.getRuntime.availableProcessors
+    val next = new AtomicInteger()
+    val helpers = Executors.newFixedThreadPool(helperCount, runnable => {
+      val thread = new Thread(runnable, "scala-analyzer-read-helper")
+      thread.setDaemon(true)
+      thread
+    })
+
+    try {
+      val running = Vector.fill(helperCount)(helpers.submit((() => {
+        helpingIntentOwner.set(true)
+        try {
+          var i = next.getAndIncrement()
+          while (i < count) {
+            body(i)
+            i = next.getAndIncrement()
+          }
+        } catch {
+          case failure: Throwable =>
+            next.set(count)
+            throw failure
+        } finally helpingIntentOwner.set(false)
+      }): Runnable))
+      val failures = running.flatMap { helper =>
+        try { helper.get(); None }
+        catch { case failure: ExecutionException => Some(failure.getCause) }
+      }
+      failures.headOption.foreach(throw _)
+    } finally helpers.shutdown()
+  }
 
   /** Whether the current thread holds the exclusive edit lock. */
   def isWriting: Boolean = lock.isWriteLockedByCurrentThread
