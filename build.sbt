@@ -21,6 +21,45 @@ val scalaPluginJars = taskKey[Seq[File]]("The Scala plugin's jars that go on the
 
 val dist = taskKey[File]("Builds the language server's distribution: bin/scala-analyzer and lib/ in target/dist")
 
+// The BSP fixture's sbt server: a test's BSP connection starts it when none runs, and sbt keeps it running for its other
+// clients, so without a shutdown it outlives the test run as a JVM of over 1 GB.
+val bspFixture = file("fixtures/bsp-project")
+
+/** The socket of the fixture's sbt server when one listens: project/target/active.json names it while it runs. */
+def fixtureServerSocket(): Option[java.net.UnixDomainSocketAddress] = {
+  val active = bspFixture / "project" / "target" / "active.json"
+  val uri = """"uri"\s*:\s*"([^"]+)"""".r
+  for {
+    json <- Some(active).filter(_.exists).map(IO.read(_))
+    found <- uri.findFirstMatchIn(json)
+    socket = java.net.UnixDomainSocketAddress.of(java.net.URI.create(found.group(1)).getPath)
+    if scala.util.Try(java.nio.channels.SocketChannel.open(socket).close()).isSuccess
+  } yield socket
+}
+
+/** Asks the fixture's sbt server to shut down, as sbt's own client does, and waits until it closes the connection. */
+def stopFixtureServer(socket: java.net.UnixDomainSocketAddress): Unit = {
+  val channel = java.nio.channels.SocketChannel.open(socket)
+  // A server that never closes the connection does not hold the test run: the wait ends after a minute.
+  val watchdog = new Thread(() => try { Thread.sleep(60000); channel.close() } catch { case _: InterruptedException => () })
+  watchdog.setDaemon(true)
+  watchdog.start()
+  try {
+    for (body <- Seq(
+      """{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"initializationOptions":{"skipAnalysis":true}}}""",
+      """{"jsonrpc":"2.0","id":2,"method":"sbt/exec","params":{"commandLine":"shutdown"}}""",
+    )) {
+      val bytes = body.getBytes(java.nio.charset.StandardCharsets.UTF_8)
+      channel.write(java.nio.ByteBuffer.wrap(s"Content-Length: ${bytes.length}\r\n\r\n".getBytes ++ bytes))
+    }
+    val buffer = java.nio.ByteBuffer.allocate(4096)
+    while (scala.util.Try(channel.read(buffer)).getOrElse(-1) >= 0) buffer.clear()
+  } finally {
+    watchdog.interrupt()
+    channel.close()
+  }
+}
+
 ThisBuild / scalaVersion := "3.9.0"
 // The compiler's import suggestions (on a "not found" error) load every class of the classpath's packages; some
 // platform class files refer to IDE classes that are not on it, and the compiler crashes instead of reporting the error.
@@ -223,6 +262,20 @@ lazy val root = (project in file("."))
       val (own, shared) = (Test / definedTests).value.partition(test => isolated(test.name))
       val fork = Tests.SubProcess((Test / forkOptions).value)
       Seq(Tests.Group("shared", shared, fork)) ++ own.map(test => Tests.Group(test.name, Seq(test), fork))
+    },
+    // A fixture sbt server that a test group started is shut down after it; one that was already running is left.
+    Test / testOptions ++= {
+      val log = streams.value.log
+      val startedByTests = new java.util.concurrent.atomic.AtomicBoolean
+      Seq(
+        Tests.Setup(() => startedByTests.set(fixtureServerSocket().isEmpty)),
+        Tests.Cleanup { () =>
+          if (startedByTests.get) fixtureServerSocket().foreach { socket =>
+            stopFixtureServer(socket)
+            if (fixtureServerSocket().nonEmpty) log.warn(s"the sbt server of $bspFixture did not shut down")
+          }
+        },
+      )
     },
     // Tools in the test scope (the type-inference oracle) get their own JVM with the same options.
     Test / run / fork := true,
