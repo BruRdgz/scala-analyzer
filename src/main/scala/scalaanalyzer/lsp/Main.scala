@@ -20,8 +20,8 @@ import scala.util.control.NonFatal
  * [[scalaanalyzer.mcp.McpServer]]) that serves the project in `DIR`, by default the working directory.
  *
  * System properties: `scalaanalyzer.stateDir` (where the platform keeps its state) and `scalaanalyzer.scalaPluginJars`
- * (the Scala plugin's jars, which must also be on the classpath). Environment: `SCALA_ANALYZER_LOG=debug` logs every
- * request.
+ * (the Scala plugin's jars, which must also be on the classpath). Environment: `SCALA_ANALYZER_LOG=debug` also logs
+ * every request, each file's inspection times and each library jar's cache use.
  *
  * The log is written to `<stateDir>/logs/scala-analyzer-<start time>.log` (the latest logs are kept) and, by the
  * language server, sent to the client.

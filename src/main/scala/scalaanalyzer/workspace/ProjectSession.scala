@@ -882,7 +882,11 @@ final class ProjectSession private (
       if (!plan.previousModulesById.contains(moduleId) || plan.moduleIdsToRebuild(moduleId)) {
         val hostModule = addImportedModule(nextModule)
 
-        nextModule.sources.foreach(source => openImportedSource(source, hostModule))
+        // Parsing and indexing a module's sources is a phase of its own, as long as its jars' on a large module.
+        if (nextModule.sources.nonEmpty)
+          HostLog.timed(s"module ${nextModule.spec.name}: ${nextModule.sources.size} sources opened") {
+            nextModule.sources.foreach(source => openImportedSource(source, hostModule))
+          }
       } else {
         val hostModule = host.modules.byId(moduleId).getOrElse(
           throw new IllegalStateException(s"host module $moduleId (${nextModule.spec.name}) disappeared during import"))

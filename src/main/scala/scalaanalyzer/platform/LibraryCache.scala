@@ -19,6 +19,7 @@ import java.security.MessageDigest
 import java.time.{Duration, Instant}
 import java.util.HexFormat
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicInteger
 
 import scala.collection.mutable
 import scala.jdk.CollectionConverters.*
@@ -48,19 +49,29 @@ final class LibraryCache(directory: Path, classpath: String) {
   /**
    * The cached state of one jar.
    *
+   * @param jarName the jar's file name, for the debug log
    * @param file the jar's cache file
+   * @param loaded what reading the cache file found, for the debug log
    * @param names the strings that the stub bytes refer to by number
    * @param attributes attribute bytes by entry path and attribute id
    * @param stubs serialized stub trees by entry path
    */
   private final class JarCache(
+    val jarName: String,
     val file: Path,
+    val loaded: String,
     val names: Names,
     val attributes: ConcurrentHashMap[(String, String), StoredAttribute],
     val stubs: ConcurrentHashMap[String, Array[Byte]],
   ) {
     /** Whether something was added since the cache file was read. */
     @volatile var changed = false
+
+    /** Stub trees served from the cache, for the debug log. */
+    val treesRead = new AtomicInteger()
+
+    /** Stub trees built because the cache had none, for the debug log. */
+    val treesBuilt = new AtomicInteger()
   }
 
   /** An attribute's bytes with the version of the attribute that wrote them. */
@@ -98,7 +109,7 @@ final class LibraryCache(directory: Path, classpath: String) {
   def open(root: VirtualFile, jar: Path): Unit = {
     val file = directory.resolve(cacheFileName(jar))
 
-    jars.computeIfAbsent(root, _ => read(file))
+    jars.computeIfAbsent(root, _ => read(jar.getFileName.toString, file))
   }
 
   /**
@@ -111,10 +122,22 @@ final class LibraryCache(directory: Path, classpath: String) {
    */
   def finish(root: VirtualFile): Unit = {
     val jar = jars.remove(root)
-    if (jar == null || !jar.changed) return
+    if (jar == null) return
 
-    try write(jar)
-    catch { case NonFatal(error) => HostLog.warn(s"library cache not written: ${jar.file}", error) }
+    val outcome =
+      if (!jar.changed) "unchanged"
+      else
+        try {
+          write(jar)
+          s"written, ${Files.size(jar.file) / 1024} KB"
+        } catch {
+          case NonFatal(error) =>
+            HostLog.warn(s"library cache not written: ${jar.file}", error)
+            "not written"
+        }
+
+    HostLog.debug(s"library cache of ${jar.jarName}: ${jar.loaded}; ${jar.treesRead} stub trees read, " +
+      s"${jar.treesBuilt} built; $outcome")
   }
 
   /**
@@ -189,7 +212,11 @@ final class LibraryCache(directory: Path, classpath: String) {
     case None => build()
     case Some((jar, entry)) =>
       val stored = Option(jar.stubs.get(entry)).flatMap { bytes =>
-        try Some(deserialize(bytes, jar.names))
+        try {
+          val tree = deserialize(bytes, jar.names)
+          jar.treesRead.incrementAndGet()
+          Some(tree)
+        }
         catch {
           case NonFatal(error) =>
             HostLog.warn(s"cached stubs of $entry in ${jar.file} are unreadable; building them again", error)
@@ -200,6 +227,7 @@ final class LibraryCache(directory: Path, classpath: String) {
 
       stored.getOrElse {
         val built = build()
+        jar.treesBuilt.incrementAndGet()
         val serialized = built match {
           case tree: StubTree if hasSingleRoot(tree.getRoot) =>
             try serialize(tree.getRoot, jar.names)
@@ -243,13 +271,13 @@ final class LibraryCache(directory: Path, classpath: String) {
     s"${real.getFileName}-${HexFormat.of.formatHex(digest, 0, LibraryCache.DigestBytes)}.bin"
   }
 
-  /** Reads a jar's cache file; a missing file gives an empty cache, an unreadable one is deleted. */
-  private def read(file: Path): JarCache = {
+  /** Reads the cache file of the jar `jarName`: a missing file gives an empty cache, an unreadable one is deleted. */
+  private def read(jarName: String, file: Path): JarCache = {
     val names = new Names
     val attributes = new ConcurrentHashMap[(String, String), StoredAttribute]()
     val stubs = new ConcurrentHashMap[String, Array[Byte]]()
 
-    try {
+    val loaded = try {
       Using.resource(new DataInputStream(new BufferedInputStream(Files.newInputStream(file)))) { in =>
         if (in.readInt() != LibraryCache.Magic || in.readInt() != LibraryCache.FormatVersion)
           throw new IOException("not a library cache file of this format")
@@ -264,17 +292,19 @@ final class LibraryCache(directory: Path, classpath: String) {
       }
       // The modification time records the last use: unused files are deleted by `prune`.
       Files.setLastModifiedTime(file, FileTime.from(Instant.now()))
+      s"${stubs.size} stub trees and ${attributes.size} attributes loaded"
     } catch {
-      case _: NoSuchFileException => ()
+      case _: NoSuchFileException => "no cache file yet"
       case NonFatal(error) =>
         HostLog.warn(s"library cache unreadable, reading the jar again: $file", error)
         names.clear()
         attributes.clear()
         stubs.clear()
         Files.deleteIfExists(file)
+        "cache file unreadable"
     }
 
-    new JarCache(file, names, attributes, stubs)
+    new JarCache(jarName, file, loaded, names, attributes, stubs)
   }
 
   /** Writes a jar's cache file whole, replacing the previous one in one step so a reader never sees half of it. */

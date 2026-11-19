@@ -10,6 +10,8 @@
   indexes that jar without decompiling it. On this repository the library indexing of a start with the cache went
   from about 9 s to under 3 s, and the time to ready from about 15 s to 8.5 s; the cache takes 20 MB for 229 jars.
   A changed jar, plugin or server gets a cache file of its own, and files unused for 30 days are deleted.
+- The log shows how long a build import took to open each module's sources. With `SCALA_ANALYZER_LOG=debug` it also
+  shows each file's inspection time with its five slowest inspections, and what the library cache held for each jar.
 - The launcher sends the JVM's own warnings and log to standard error, so they can no longer corrupt the LSP or MCP
   stream on standard output.
 

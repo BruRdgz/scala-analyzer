@@ -27,7 +27,7 @@ import org.jetbrains.plugins.scala.lang.psi.api.toplevel.imports.{ScImportExpr, 
 import org.jetbrains.plugins.scala.lang.psi.api.toplevel.typedef.ScMember
 
 import scalaanalyzer.Diagnostic
-import scalaanalyzer.platform.ExtensionBean
+import scalaanalyzer.platform.{ExtensionBean, HostLog}
 
 import java.util.{Locale, ResourceBundle}
 
@@ -37,6 +37,9 @@ import scala.jdk.CollectionConverters.*
 private[language] object Inspections {
   /** The id of the unused-import problems, which the unused-declaration tool reports without a registration of its own. */
   val UnusedImportId = "ScalaUnusedImport"
+
+  /** Inspections named in a file's debug timing: enough to find a hot spot among some 60, few enough for one line. */
+  private val SlowestLogged = 5
 
   /**
    * Previews the audited fixes whose native preview does not work on the copy.
@@ -203,11 +206,17 @@ final class Inspections(descriptors: Seq[ExtensionBean]) {
     InspectionDescription(inspectionId(bean), displayName, groupPath)
   }
 
-  /** Runs complete visitor lifecycles and preserves the plugin's problem ranges and messages. */
+  /**
+   * Runs complete visitor lifecycles and preserves the plugin's problem ranges and messages. With debug logging, logs
+   * the file's inspection time and its slowest inspections.
+   */
   private def collect(file: ScalaFile): Seq[Diagnostic] = {
     val manager = InspectionManager.getInstance(file.getProject)
     val elements = SyntaxTraverser.psiTraverser(file).asScala.toVector
-    tools.flatMap { bean =>
+    val nanosById = Vector.newBuilder[(String, Long)]
+
+    val found = tools.flatMap { bean =>
+      val started = System.nanoTime()
       // `tools` holds only local inspection registrations, whose implementation classes are LocalInspectionTool.
       val tool = Class.forName(bean.implementation).getConstructor().newInstance().asInstanceOf[LocalInspectionTool]
       // Batch visitation performs real local reference searches instead of relying on a desktop highlighting pass.
@@ -262,8 +271,19 @@ final class Inspections(descriptors: Seq[ExtensionBean]) {
           problems(importsHolder, Inspections.UnusedImportId, HighlightSeverity.WARNING, unnecessary = true)
         case _ => Seq.empty
       }
+      nanosById += id -> (System.nanoTime() - started)
       declarations ++ imports
     }
+
+    HostLog.debug {
+      val nanos = nanosById.result()
+      val slowest = nanos
+        .sortBy(-_._2)
+        .take(Inspections.SlowestLogged)
+        .map((id, spent) => s"$id ${spent / 1_000_000} ms")
+      s"inspections of ${file.getName}: ${nanos.map(_._2).sum / 1_000_000} ms; slowest: ${slowest.mkString(", ")}"
+    }
+    found
   }
 
   /** Keeps referenced members when native unusedness propagation starts from a public type excluded by our scope. */
