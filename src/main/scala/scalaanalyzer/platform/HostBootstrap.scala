@@ -127,11 +127,10 @@ import com.intellij.openapi.roots.{
 import com.intellij.openapi.roots.impl.PushedFilePropertiesRetriever
 import com.intellij.openapi.roots.libraries.{LibraryTable, LibraryTablesRegistrar}
 import com.intellij.openapi.util.{Computable, ModificationTracker, ThrowableComputable}
-import com.intellij.openapi.util.io.BufferExposingByteArrayOutputStream
 import com.intellij.openapi.util.registry.RegistryKeyDescriptor
 import com.intellij.openapi.vfs.{VirtualFileSet, VirtualFileSetFactory}
 import com.intellij.openapi.vfs.encoding.EncodingManager
-import com.intellij.openapi.vfs.newvfs.{AttributeOutputStream, ManagingFS}
+import com.intellij.openapi.vfs.newvfs.{FileAttribute, ManagingFS}
 import com.intellij.openapi.vfs.transformer.TextPresentationTransformers
 import com.intellij.patterns.PlatformPatterns
 import com.intellij.platform.backend.workspace.WorkspaceModel
@@ -199,7 +198,7 @@ import com.intellij.psi.search.impl.VirtualFileEnumeration
 import com.intellij.psi.search.searches.{ClassInheritorsSearch, DefinitionsScopedSearch, ReferencesSearch}
 import com.intellij.psi.statistics.{StatisticsInfo, StatisticsManager}
 import com.intellij.psi.stubs.{
-  BinaryFileStubBuilders, CoreStubTreeLoader, StubElementRegistryServiceImpl, StubTreeLoader
+  BinaryFileStubBuilders, CoreStubTreeLoader, ObjectStubTree, StubElementRegistryServiceImpl, StubTreeLoader
 }
 import com.intellij.psi.util.{CachedValuesManager, JavaClassSupers, PsiVersioningService}
 import com.intellij.task.ProjectTaskManager
@@ -534,6 +533,13 @@ private[scalaanalyzer] object HostBootstrap {
       val files = new LibraryFileSystem
       Disposer.register(root, (() => files.close()): Disposable)
       files
+    }
+
+    /** Library jars' file attributes and stub trees kept between starts; cache files unused for a month are deleted. */
+    private lazy val libraryCache = {
+      val cache = new LibraryCache(config.stateDir.resolve("library-cache"), LibraryCache.classpathIdentity())
+      cache.prune()
+      cache
     }
 
     /** Maps a library class root to its attached source root; read when Java class files navigate to sources. */
@@ -1323,7 +1329,12 @@ private[scalaanalyzer] object HostBootstrap {
         TastyFileType, new TastyFileStubBuilder)
       BinaryFileStubBuilders.INSTANCE.addExplicitExtension(
         JavaClassFileType.INSTANCE, new ClassFileStubBuilder)
-      appServices.register(classOf[StubTreeLoader])(new CoreStubTreeLoader)
+      // A library jar's stub trees are read from the library cache when an earlier start stored them.
+      val stubCache = this.libraryCache
+      appServices.register(classOf[StubTreeLoader])(new CoreStubTreeLoader {
+        override def readOrBuild(project: Project, vFile: VirtualFile, psiFile: PsiFile): ObjectStubTree[?] =
+          stubCache.stubTree(vFile, () => super.readOrBuild(project, vFile, psiFile))
+      })
       // A binary library file's text (its document, which Java class files' PSI mirrors): decompiled as the IDE
       // registers it, Java class files by the platform's decompiler, TASTy files by the plugin's.
       declare("com.intellij.filetype.decompiler")
@@ -1437,14 +1448,14 @@ private[scalaanalyzer] object HostBootstrap {
         tableProxy(classOf[DumbUtil], "DumbUtil") {
           case ("mayUseIndices", _) => java.lang.Boolean.TRUE
         })
-      // Persistent file attributes: the plugin caches "is this class file Scala?" in them. The host persists nothing,
-      // so every read misses (the plugin recomputes) and writes are discarded.
+      // Persistent file attributes: the plugin caches "is this class file Scala?" and its source name in them, which
+      // spares decompiling the class until its text is needed. Those of library jars persist in the library cache.
+      val libraryCache = this.libraryCache
       appServices.register(classOf[ManagingFS])(new Host_ManagingFS(dispatch {
-        case ("ManagingFS.readAttribute", _) => null
-        case ("ManagingFS.writeAttribute", _) =>
-          new AttributeOutputStream(new BufferExposingByteArrayOutputStream()) {
-            override def writeEnumeratedString(value: String): Unit = writeUTF(value)
-          }
+        case ("ManagingFS.readAttribute", Array(file: VirtualFile, attribute: FileAttribute)) =>
+          libraryCache.readAttribute(file, attribute)
+        case ("ManagingFS.writeAttribute", Array(file: VirtualFile, attribute: FileAttribute)) =>
+          libraryCache.writeAttribute(file, attribute)
       }))
     }
 
@@ -1896,8 +1907,8 @@ private[scalaanalyzer] object HostBootstrap {
       // The plugin's own activity registers the synthetic classes (Any, Int, ...) through DumbService.queueTask.
       new RegisterSyntheticClassesProjectActivity().execute(project)
 
-      new ScalaPsiHost(config.stateDir, project, symbolIndex, wordIndex, importIndex, libraryFiles, librarySources,
-        moduleModel, () => psiChanged(),
+      new ScalaPsiHost(config.stateDir, project, symbolIndex, wordIndex, importIndex, libraryFiles, libraryCache,
+        librarySources, moduleModel, () => psiChanged(),
         new CodeActions(
           Descriptors.scalaExtensions(config.scalaPluginJars, "com.intellij.intentionAction") ++ PlatformListIntentions,
           Descriptors.scalaExtensions(config.scalaPluginJars, "com.intellij.lang.surroundDescriptor"),

@@ -145,7 +145,7 @@ changed sources, and imports the build again when sources are created or deleted
 | Variable | Purpose | Default |
 | --- | --- | --- |
 | `JAVA_HOME` | JDK used to run the server | `java` on `PATH` |
-| `SCALA_ANALYZER_STATE` | State, logs, formatter cache and library source files | `$XDG_CACHE_HOME/scala-analyzer`, or `~/.cache/scala-analyzer` |
+| `SCALA_ANALYZER_STATE` | State, logs, formatter cache, library source files and the library index cache | `$XDG_CACHE_HOME/scala-analyzer`, or `~/.cache/scala-analyzer` |
 | `SCALA_ANALYZER_HEAP` | Maximum JVM heap | `2g` |
 | `SCALA_ANALYZER_LOG` | Set to `debug` to log every request's timing | Informational logging |
 

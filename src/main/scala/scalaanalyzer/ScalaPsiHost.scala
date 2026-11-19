@@ -21,7 +21,7 @@ import scalaanalyzer.language.{
   ChangeEngine, CodeActions, Completion, Extract, InlayHints, InspectionDescription, Inspections, MemberOverrides,
   ParameterInfo, Rename, SelectionRanges,
 }
-import scalaanalyzer.platform.{Descriptors, ExtensionBean, HostBootstrap, HostDispatchThread, HostLock, HostLog, HostPsiDocumentManager, Host_ModuleRootManager, Host_OrderEnumerator, ImportIndex, LibraryFileSystem, SourceFile, SymbolIndex, WordIndex, dispatch, tableProxy}
+import scalaanalyzer.platform.{Descriptors, ExtensionBean, HostBootstrap, HostDispatchThread, HostLock, HostLog, HostPsiDocumentManager, Host_ModuleRootManager, Host_OrderEnumerator, ImportIndex, LibraryCache, LibraryFileSystem, SourceFile, SymbolIndex, WordIndex, dispatch, tableProxy}
 
 import java.nio.file.Path
 import java.util.concurrent.ConcurrentHashMap
@@ -63,6 +63,7 @@ final case class HostConfig(
  * @param wordIndex       word index of project sources
  * @param importIndex     import-ordering index of project sources
  * @param libraryFiles    file system that holds the mounted library jars, source archives and JDK modules
+ * @param libraryCache    library jars' file attributes and stub trees kept between starts
  * @param librarySources  maps a library class root to its attached source root
  * @param modules         module metadata that the project, file-index, module and scope services answer from
  * @param psiChanged      invalidates the PSI caches after the host changes PSI or the mounted libraries
@@ -76,6 +77,7 @@ final class ScalaPsiHost private[scalaanalyzer] (
   wordIndex: WordIndex,
   importIndex: ImportIndex,
   libraryFiles: LibraryFileSystem,
+  libraryCache: LibraryCache,
   librarySources: ConcurrentHashMap[VirtualFile, VirtualFile],
   val modules: ModuleModel,
   psiChanged: () => Unit,
@@ -469,15 +471,22 @@ final class ScalaPsiHost private[scalaanalyzer] (
   def addLibrary(jar: Path, includeEntry: String => Boolean = _ => true): LibraryIndexReport =
     addLibraries(Seq(jar -> includeEntry)).head
 
-  /** Mounts library jars and indexes them together, their files read in parallel (see [[SymbolIndex.readLibraries]]). */
+  /**
+   * Mounts library jars and indexes them together, their files read in parallel (see [[SymbolIndex.readLibraries]]),
+   * through the library cache: what an earlier start stored is not decompiled again, and what was built is stored.
+   */
   private def addLibraries(jars: Seq[(Path, String => Boolean)]): Seq[LibraryIndexReport] = HostLock.write {
     val roots = jars.map { (jar, includeEntry) =>
       val root = libraryFiles.mountJar(jar)
 
       libraryRoots.put(jar.toRealPath(), root)
+      libraryCache.open(root, jar)
       root -> includeEntry
     }
-    val reports = symbolIndex.publishLibraries(symbolIndex.readLibraries(project, roots))
+
+    val reports =
+      try symbolIndex.publishLibraries(symbolIndex.readLibraries(project, roots))
+      finally roots.foreach((root, _) => libraryCache.finish(root))
 
     psiChanged()
     reports

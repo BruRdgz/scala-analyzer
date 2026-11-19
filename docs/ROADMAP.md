@@ -230,7 +230,9 @@ source whose stubs do not pair with its PSI stays out of the symbol index instea
 
 ## Later
 
-- A persistent index, for fast startup.
+- A persistent index, for fast startup: library jars are cached since the library cache (Unreleased); a start still
+  indexes the project's sources on one thread under the import's write lock (about 2.7 s for this repository's 136
+  sources), which could be read in parallel as library jars are.
 - `.sbt` files (sbt's meta-build is a build target over BSP).
 - Test discovery and code lenses over BSP.
 - Change Signature, Introduce Parameter; worksheets; debugging (DAP). See the 0.4 decisions.
