@@ -19,7 +19,9 @@ mkdir -p "$state"
 # G1 otherwise grows the committed heap to the maximum during a session and keeps it while the editor idles. Free
 # ratios of 20-50% kept it ~350 MB lower with no measurable request slowdown (10-30% looked slower); without a
 # collection the heap cannot shrink while idle, so one runs after 5 idle minutes, for ~0.3% of a core.
+# The JVM's own messages and log go to standard error: by default some reach standard output, which carries the protocol.
 exec "$java" -Xmx"${SCALA_ANALYZER_HEAP:-2g}" -XX:MinHeapFreeRatio=20 -XX:MaxHeapFreeRatio=50 \
   -XX:G1PeriodicGCInterval=300000 -Djava.awt.headless=true --add-opens=java.base/java.lang=ALL-UNNAMED \
+  -XX:+DisplayVMOutputToStderr -Xlog:disable -Xlog:all=warning:stderr \
   -Dscalaanalyzer.stateDir="$state" -Dscalaanalyzer.scalaPluginJars="$plugin" \
   -cp "$classpath" scalaanalyzer.lsp.Main "$@"

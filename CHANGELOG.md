@@ -5,6 +5,8 @@
 - A build import indexes the library jars of a module in parallel, one thread per processor, so the server is ready
   sooner: on this repository (226 jars) the import's library indexing went from about 19 s to 8 s, and the time to
   ready from 25 s to 13 s.
+- The launcher sends the JVM's own warnings and log to standard error, so they can no longer corrupt the LSP or MCP
+  stream on standard output.
 
 ## 0.4.0 — 2026-11-18
 
