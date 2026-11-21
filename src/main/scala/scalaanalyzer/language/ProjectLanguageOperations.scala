@@ -808,8 +808,8 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
    * The buffer is unchanged. Organize imports is included only when `only` requests its source-action kind or an
    * ancestor kind. A Scala file has the plugin's fixes, intentions, surround, unwrap, inline and extract actions, and
    * Implement members, which is previewed only when `only` accepts its kind and not at all for a caller that
-   * `resolvesEdits`. A Java file has the Java plugin's intentions, as `refactor.rewrite` like the Scala ones, and
-   * Organize imports, which the platform's Java import optimizer computes.
+   * `resolvesEdits`. A Java file has the Java plugin's intentions, as `refactor.rewrite` like the Scala ones, the fixes of
+   * its errors as `quickfix`, and Organize imports, which the platform's Java import optimizer computes.
    *
    * @param path registered project-source path
    * @param start selection start

@@ -7,7 +7,13 @@ import com.intellij.codeInsight.hints.{
 }
 import com.intellij.codeInsight.editorActions.ExtendWordSelectionHandler
 import com.intellij.codeInsight.editorActions.wordSelection.JavaBasicWordSelectionFilter
+import com.intellij.codeInsight.daemon.impl.analysis.JavaErrorFixProvider
+import com.intellij.codeInsight.daemon.quickFix.ExternalLibraryResolver
+import com.intellij.codeInsight.daemon.{DaemonCodeAnalyzerSettings, DaemonCodeAnalyzerSettingsImpl}
+import com.intellij.codeInsight.intention.QuickFixFactory
+import com.intellij.codeInsight.intention.impl.config.QuickFixFactoryImpl
 import com.intellij.codeInsight.intention.preview.IntentionPreviewUtils
+import com.intellij.codeInsight.quickfix.ChangeVariableTypeQuickFixProvider
 import com.intellij.core.{CoreApplicationEnvironment, CoreFileTypeRegistry}
 import com.intellij.ide.highlighter.HtmlFileHighlighter
 import com.intellij.lang.documentation.{ClientDocumentationSettings, DocumentationSettings}
@@ -83,6 +89,7 @@ import com.intellij.ide.fileTemplates.FileTemplateManager
 import com.intellij.ide.highlighter.{JavaClassFileType, JavaFileType}
 import com.intellij.ide.util.PropertiesComponent
 import com.intellij.internal.statistic.eventLog.{StatisticsEventLogProvidersHolder, StatisticsEventLoggerProvider}
+import com.intellij.java.backend.JavaBackendClassForClassPath
 import com.intellij.java.codeserver.highlighting.JavaErrorFilter
 import com.intellij.java.frontback.psi.impl.syntax.JavaSyntaxDefinitionExtension
 import com.intellij.java.impl.template.{JavaTemplateCodeInsightSupport, JavaTemplateImportSupport}
@@ -100,6 +107,7 @@ import com.intellij.lang.java.{
   JavaSyntaxHighlighterFactory,
 }
 import com.intellij.lang.java.syntax.JavaElementTypeConverterExtension
+import com.intellij.lang.jvm.actions.JvmElementActionsFactory
 import com.intellij.lang.jvm.facade.{JvmElementProvider, JvmFacade, JvmFacadeImpl}
 import com.intellij.mock.MockFileDocumentManagerImpl
 import com.intellij.modcommand.{ModCommandExecutor, ModCommandService}
@@ -155,7 +163,7 @@ import com.intellij.psi.{
   PsiAnnotation, PsiClassOwner, PsiDocumentManager, PsiElementFactory, PsiElementFinder, PsiFileFactory,
   PsiImportList, PsiImportStatementBase, PsiJavaFile, PsiMethod, PsiNameHelper, PsiReference, PsiReferenceProvider,
   PsiReferenceRegistrar, PsiReferenceService, PsiReferenceServiceImpl, PsiResolveHelper, PsiSubstitutorFactory,
-  SmartPointerManager
+  SmartPointerManager, SmartTypePointerManager
 }
 import com.intellij.psi.augment.PsiAugmentProvider
 import com.intellij.psi.codeStyle.{
@@ -188,7 +196,9 @@ import com.intellij.psi.impl.search.{
   JavaOverridingMethodsSearcher, MethodDeepestSuperSearcher, MethodSuperSearcher, MethodUsagesSearcher,
   PsiSearchHelperImpl
 }
-import com.intellij.psi.impl.smartPointers.{SmartPointerAnchorProvider, SmartPointerManagerImpl}
+import com.intellij.psi.impl.smartPointers.{
+  SmartPointerAnchorProvider, SmartPointerManagerImpl, SmartTypePointerManagerImpl
+}
 import com.intellij.psi.impl.source.codeStyle.{
   CodeStyleManagerImpl, ImportHelper, IndentHelper, IndentHelperImpl, JavaCodeStyleManagerImpl,
   JavaReferenceAdjuster, PostFormatProcessor, PreFormatProcessor
@@ -524,6 +534,46 @@ private[scalaanalyzer] object HostBootstrap {
       Descriptors.extensionPoints(classpathJars, config.scalaPluginJars)
     }
 
+    /**
+     * The quick fixes of Java errors, registered as java-backend's JavaPlugin.xml does: the error fix providers (in its
+     * order) with the QuickFixFactory they create their fixes with, and the extension points those fixes read. The
+     * descriptor lists them under the Java plugin; the host takes the same implementations from it.
+     */
+    private def registerJavaErrorFixes(): Unit = {
+      val location = classOf[JavaBackendClassForClassPath].getProtectionDomain.getCodeSource.getLocation
+      val javaBackendJar = Path.of(location.toURI)
+
+      /** Declares an extension point and registers the implementations JavaPlugin.xml lists for it. */
+      def registerListed[T <: AnyRef](epName: String, extensionType: Class[T]): Unit = {
+        // `declare` yields the registry of the descriptor's interface, which `extensionType` names.
+        val extensions = declare(epName).asInstanceOf[ExtensionPointImpl[T]]
+        val listed = Descriptors.scalaExtensions(Seq(javaBackendJar), epName)
+        if (listed.isEmpty) throw new IllegalStateException(s"no extensions registered for $epName in JavaPlugin.xml")
+        for (name <- listed)
+          extensions.registerExtension(newPrivate(Class.forName(name).asSubclass(extensionType)), root)
+      }
+
+      // DefaultJavaErrorFixProvider takes the factory when it is constructed.
+      appServices.register(classOf[QuickFixFactory])(new QuickFixFactoryImpl)
+      registerListed("com.intellij.java.errorFixProvider", classOf[JavaErrorFixProvider])
+      // Make-public, make-final and similar fixes ask the JVM languages' action factories for the modifier change.
+      registerListed("com.intellij.lang.jvm.actions.jvmElementActionsFactory", classOf[JvmElementActionsFactory])
+      // The fixes of an incompatible assignment ask for the types a variable could have.
+      registerListed("com.intellij.codeInsight.changeVariableTypeQuickFixProvider",
+        classOf[ChangeVariableTypeQuickFixProvider])
+      // Import fixes ask whether an extension keeps a file from being changed silently; the host has none.
+      declare("com.intellij.silentChangeVetoer")
+      // Import fixes also read the names the user keeps out of auto-import: the defaults, as the host persists none.
+      appServices.register(classOf[DaemonCodeAnalyzerSettings])(new DaemonCodeAnalyzerSettingsImpl)
+      // The fixes that add a library or a module to the classpath of an unresolved reference's module ask whether the
+      // reference names an annotation through UAST, then the libraries the resolvers know a class of. The host has no
+      // UAST language plugin (the reference is then of unknown kind, as in an IDE without one) and no resolver: the
+      // build owns the classpath.
+      declare("org.jetbrains.uast.uastLanguagePlugin")
+      CoreApplicationEnvironment.registerExtensionPoint(area, "com.intellij.codeInsight.externalLibraryResolver",
+        classOf[ExternalLibraryResolver])
+    }
+
     /** Registers a descriptor-declared extension point and returns its platform registry; fails if undeclared. */
     private def declare(name: String): ExtensionPointImpl[?] = {
       val declaration = epDecls.getOrElse(
@@ -730,6 +780,7 @@ private[scalaanalyzer] object HostBootstrap {
       // Java's unhandled-exception check asks for exceptions that frameworks handle outside the code; there are none.
       CoreApplicationEnvironment.registerExtensionPoint(area, CustomExceptionHandler.KEY.getName,
         classOf[CustomExceptionHandler])
+      registerJavaErrorFixes()
       // The element type is erased; AnyRef only names it.
       declare("com.intellij.implicitClassSearch").asInstanceOf[ExtensionPointImpl[AnyRef]]
         .registerExtension(new ImplicitClassesSearcher, root)
@@ -1670,6 +1721,8 @@ private[scalaanalyzer] object HostBootstrap {
           Class.forName("com.intellij.psi.impl.source.PostprocessReformattingAspectImpl$LangPomModel"), project)))
       projectServices.register(classOf[TreeAspect])(new TreeAspect)
       projectServices.register(classOf[SmartPointerManager])(new SmartPointerManagerImpl(project))
+      // Pointers to Java types that survive edits; the return-type fix keeps one to the type it proposes.
+      projectServices.register(classOf[SmartTypePointerManager])(new SmartTypePointerManagerImpl(project))
       projectServices.register(classOf[PsiElementFactory])(new PsiElementFactoryImpl(project))
       projectServices.register(classOf[PsiNameHelper])(PsiNameHelperImpl.getInstance())
       // One scope for everything, as one scope per module: the plugin keys its caches by scope, so a new object per
@@ -1798,6 +1851,16 @@ private[scalaanalyzer] object HostBootstrap {
             StubIndex.getElements(JavaStubIndexKeys.CLASS_SHORT_NAMES,
               name, project, scope, classOf[PsiClass]).asScala ++ binaries).distinct.toArray
         // Inherited main/suite discovery passes the finite set of superclass files, including Java binaries.
+        // Every method of a name, which the static-import fix searches: the Scala cache answers for Scala sources and
+        // libraries, and the stub index for Java sources. Java binaries have no method index here, so theirs are left
+        // out.
+        case ("PsiShortNamesCache.processMethodsWithName",
+              Array(name: String, scope: GlobalSearchScope, p: Processor[?])) =>
+          // The processor is typed `?` by the pattern; the cache hands it methods only.
+          val processor = p.asInstanceOf[Processor[PsiMethod]]
+          lazy val javaSources = StubIndex.getElements(JavaStubIndexKeys.METHODS, name, project, scope, classOf[PsiMethod])
+          java.lang.Boolean.valueOf(
+            scalaShortNames.processMethodsWithName(name, scope, processor) && javaSources.asScala.forall(processor.process))
         case ("PsiShortNamesCache.getMethodsByName", Array(name: String, scope: GlobalSearchScope)) =>
           /** Lists the methods named `name` declared by `owner` and its inner classes. */
           def methods(owner: PsiClass): Seq[PsiMethod] =

@@ -975,6 +975,61 @@ class EditingTest extends munit.FunSuite {
     }
   }
 
+  // The texts are compared with their whitespace collapsed, since the formatter lays out what the fixes insert.
+  test("Java error fixes are previewed on a copy as quick fixes and keep the source") {
+    // (source with the caret, the fix's title, the source after the fix)
+    val cases = Seq(
+      ("class Cast { void f() { long l = 1; int i = <caret>l; } }",
+        "Cast expression to 'int'",
+        "class Cast { void f() { long l = 1; int i = (int) l; } }"),
+      ("class Throws { void f() { throw <caret>new Exception(\"x\"); } }",
+        "Add exception to method signature",
+        "class Throws { void f() throws Exception { throw new Exception(\"x\"); } }"),
+      // The import fix gives one choice per class; java.awt.List has no type parameters, so the IDE leaves it out.
+      ("class Imports { <caret>List<String> names; }",
+        "java.util.List", // each class the import chooser lists is a choice named by it
+        "import java.util.List; class Imports { List<String> names; }"),
+    )
+    TestHost.libraryReport
+    for ((marked, title, expected) <- cases) {
+      val original = marked.replace("<caret>", "")
+      val file = host.openFile(Path.of("/editing/fixes/Fixes.java"), original, module)
+      try {
+        val at = marked.indexOf("<caret>")
+        val actions = host.codeActions(file, new TextRange(at, at)).choices.filter(_.kind == "quickfix")
+        val chosen = actions.find(_.title == title).getOrElse(fail(s"$title: ${actions.map(_.title)}"))
+        assertEquals(chosen.disabled, None)
+        assertEquals(applyEdits(original, chosen.edits).replaceAll("\\s+", " "), expected)
+        assert(chosen.problems.nonEmpty, chosen.toString)
+        assertEquals(host.read(file.getText), original)
+      } finally host.closeSource(file)
+    }
+  }
+
+  test("an unhandled exception also offers surrounding with try/catch, and an error without a fix offers none") {
+    val cases = Seq(
+      // (source with the caret, the titles of the quick fixes it must offer; none when it must offer no quick fix)
+      ("class Throws { void f() { throw <caret>new Exception(\"x\"); } }",
+        Seq("Add exception to method signature", "Surround with try/catch")),
+      ("class Plain { void f() { <caret>break; } }", Seq.empty), // a stray break has no fix
+    )
+    for ((marked, titles) <- cases) {
+      val original = marked.replace("<caret>", "")
+      val file = host.openFile(Path.of("/editing/fixes/Offered.java"), original, module)
+      try {
+        val at = marked.indexOf("<caret>")
+        val javaFile = file match {
+          case java: PsiJavaFile => java
+          case other => fail(s"not Java: $other")
+        }
+        assert(host.diagnostics(javaFile).nonEmpty, "the source has no error")
+        val offered = host.codeActions(file, new TextRange(at, at)).choices.filter(_.kind == "quickfix").map(_.title)
+        titles.foreach(title => assert(offered.contains(title), offered.toString))
+        if (titles.isEmpty) assertEquals(offered, Seq.empty)
+      } finally host.closeSource(file)
+    }
+  }
+
   // Unwrapping leaves the whitespace around the extracted statements to the formatter, so the texts are compared
   // with their whitespace collapsed.
   test("unwrap actions apply the plugin's unwrappers on a copy and keep the source") {

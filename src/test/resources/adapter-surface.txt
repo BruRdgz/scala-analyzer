@@ -32,6 +32,7 @@ Application.service com.intellij.codeInsight.TestFrameworks
 Application.service com.intellij.codeInsight.completion.CompletionService
 Application.service com.intellij.codeInsight.completion.group.GroupedCompletion
 Application.service com.intellij.codeInsight.hints.settings.ParameterNameHintsSettings
+Application.service com.intellij.codeInsight.intention.QuickFixFactory
 Application.service com.intellij.concurrency.JobLauncher
 Application.service com.intellij.formatting.Formatter
 Application.service com.intellij.formatting.FormattingProgressCallbackFactory

@@ -153,6 +153,13 @@ lazy val root = (project in file("."))
       // no colors.
       "com.jetbrains.intellij.java" % "java-analysis-impl" % platformVersion intransitive(),
       "com.jetbrains.intellij.java" % "java-analysis" % platformVersion intransitive(),
+      // JavaPlugin.xml, from which the host registers the Java error fix providers, the Java element action factory and
+      // the variable-type fix provider; the one class of this jar locates the descriptor. Only this jar.
+      "com.jetbrains.intellij.java" % "java-backend" % platformVersion intransitive(),
+      // AdditionalJavaErrorFixProvider, the Java error fix provider with the import and create-from-usage fixes. Only this jar.
+      "com.jetbrains.intellij.java" % "java-impl-inspections" % platformVersion intransitive(),
+      // UAST, through which the classpath fixes of an unresolved Java reference ask what it names. Only this jar.
+      "com.jetbrains.intellij.platform" % "uast" % platformVersion intransitive(),
       // Java's PSI error collector and shared completion/type-analysis rules, without the IDE container.
       "com.jetbrains.intellij.java" % "java-codeserver-core" % platformVersion intransitive(),
       "com.jetbrains.intellij.java" % "java-codeserver-highlighting" % platformVersion intransitive(),

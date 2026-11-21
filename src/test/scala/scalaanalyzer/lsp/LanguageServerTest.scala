@@ -1716,6 +1716,27 @@ class LanguageServerTest extends munit.FunSuite {
       JavaList.of(new TextDocumentContentChangeEvent(original))))
   }
 
+  test("a Java document with an error gets a quick fix for it") {
+    val javaFile = fixture.resolve("core/src/main/java/core/Shout.java")
+    val original = Files.readString(javaFile)
+    val text = "package core;\nclass Shout { void f() { long l = 1; int i = l; } }\n"
+    val service = server.getTextDocumentService
+    try {
+      service.didOpen(new DidOpenTextDocumentParams(new TextDocumentItem(javaFile.toUri.toString, "java", 232, text)))
+      val context = new CodeActionContext(java.util.List.of())
+      context.setOnly(java.util.List.of(CodeActionKind.QuickFix))
+      val at = new Position(1, text.split("\n")(1).indexOf("l;"))
+      val params = new CodeActionParams(document(javaFile), new Range(at, at), context)
+      val actions = service.codeAction(params).get(1, TimeUnit.MINUTES).asScala.map(_.getRight)
+      assert(actions.nonEmpty && actions.forall(_.getKind == CodeActionKind.QuickFix), actions.toString)
+      val cast = actions.find(_.getTitle == "Cast expression to 'int'").getOrElse(fail(actions.map(_.getTitle).toString))
+      assertEquals(cast.getDisabled, null)
+      assertEquals(cast.getEdit.getDocumentChanges.get(0).getLeft.getTextDocument.getVersion, Integer.valueOf(232))
+    } finally service.didChange(new DidChangeTextDocumentParams(
+      new VersionedTextDocumentIdentifier(javaFile.toUri.toString, 233),
+      JavaList.of(new TextDocumentContentChangeEvent(original))))
+  }
+
   test("inline is offered for a declaration only its file sees, and not for a member used from another module") {
     val original = Files.readString(main).replace("val text: String", "val text: Int")
     val local = "package app\nobject Inlining {\n  def f: Int = {\n    val r = 33\n    r + r\n  }\n}\n"

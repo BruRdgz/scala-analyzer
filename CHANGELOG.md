@@ -47,6 +47,9 @@
 - Java files have the Java plugin's intentions in the lightbulb (`refactor.rewrite`), read from its descriptors: 119
   of its 135 Java intentions, previewed on a copy as the Scala ones are. Those that need a dialog, a popup, an editor
   template or an inline refactoring, or that edit something other than the file, are left out.
+- Java errors have the IDE's quick fixes, from the Java plugin's error fix providers (read from its JavaPlugin.xml):
+  casts, `throws` clauses, try/catch, changed types, and an import choice per class an unresolved name can be. They are
+  computed for the errors a code-action request touches, not in every diagnostics pass.
 - Scala parameter-name hints follow the IDE's default exclusion list, which the Scala filter shares with Java: calls
   such as setters (`*.set*(*)`), `Math` methods or `println` no longer show parameter names.
 

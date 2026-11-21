@@ -1,12 +1,13 @@
 package scalaanalyzer.language
 
+import com.intellij.codeInsight.daemon.impl.quickfix.ImportClassFixBase
 import com.intellij.codeInsight.intention.IntentionAction
 import com.intellij.codeInsight.intention.preview.{IntentionPreviewInfo, IntentionPreviewUtils}
 import com.intellij.codeInsight.unwrap.UnwrapDescriptor
 import com.intellij.lang.ImportOptimizer
 import com.intellij.lang.java.JavaImportOptimizer
 import com.intellij.lang.surroundWith.SurroundDescriptor
-import com.intellij.modcommand.{ActionContext, ModCommandAction, ModCommandExecutor}
+import com.intellij.modcommand.{ActionContext, ModChooseAction, ModCommandAction, ModCommandExecutor}
 import com.intellij.openapi.editor.Editor
 import com.intellij.openapi.progress.ProcessCanceledException
 import com.intellij.openapi.util.TextRange
@@ -23,6 +24,7 @@ import org.jetbrains.plugins.scala.lang.psi.api.base.ScReference
 import scalaanalyzer.Diagnostic
 import scalaanalyzer.platform.{HostLock, HostLog, RequestEditor}
 
+import scala.collection.mutable
 import scala.jdk.CollectionConverters.*
 import scala.util.Using
 import scala.util.control.NonFatal
@@ -112,8 +114,8 @@ object CodeActions {
 }
 
 /**
- * Previews intentions, and for Scala files the plugin's annotator fixes, surround and unwrap actions and inlinings, as
- * source edits.
+ * Previews intentions, the fixes of problems (the plugin's annotator fixes for Scala files, the Java plugin's error
+ * fixes for Java files), and for Scala files surround and unwrap actions and inlinings, as source edits.
  *
  * Callers hold PSI read access. Actions run against copies through the platform's preview contract;
  * unsupported previews are disabled with a reason when the action is known to be available.
@@ -150,8 +152,9 @@ final class CodeActions(scalaIntentionClasses: Seq[String], javaIntentionClasses
   }
 
   /**
-   * Collects previewed intentions for a source range; for a Scala file also the plugin's fixes, import candidates,
-   * surround actions, unwrappers and inlinings.
+   * Collects previewed intentions for a source range, and the fixes of the problems it touches; for a Scala file also
+   * import candidates, surround actions, unwrappers and inlinings. A Java file's unresolved class reference gets one
+   * import candidate per class its import fix lists.
    *
    * Unusable previews are returned disabled when availability was established. Cancellation propagates;
    * failures inside an action's availability or preview check are logged before continuing with other choices.
@@ -162,7 +165,7 @@ final class CodeActions(scalaIntentionClasses: Seq[String], javaIntentionClasses
    *
    * @param file Scala or Java file being queried; a file of another language has no actions
    * @param range selected UTF-16 range, empty for a caret request
-   * @param problems current diagnostics carrying annotator fixes; ignored for a Java file
+   * @param problems current diagnostics carrying fixes
    * @return distinct action choices with edits against the original file
    */
   def collect(file: PsiFile, range: TextRange, problems: Seq[Diagnostic]): Seq[Choice] =
@@ -173,9 +176,28 @@ final class CodeActions(scalaIntentionClasses: Seq[String], javaIntentionClasses
 
         file match {
           case scalaFile: ScalaFile => collectScala(scalaFile, range, problems, editor)
+          case javaFile: PsiJavaFile =>
+            val fixes = javaFixCandidates(javaFile, range, editor, problems)
+            merged(intentionChoices(file, range, editor, fixes ++ intentionCandidates(file)))
           case _ => intentionChoices(file, range, editor, intentionCandidates(file)).distinct
         }
     }
+
+  /**
+   * One choice per action, as the IDE's lightbulb lists them: errors that overlap at a Java reference (an unknown type
+   * and its unresolved name) each offer the same fix, which becomes one choice fixing all of them.
+   */
+  private def merged(choices: Seq[Choice]): Seq[Choice] = {
+    val byAction = mutable.LinkedHashMap.empty[(String, String, Seq[ChangeEngine.Edit], Option[String]), Choice]
+
+    for (choice <- choices)
+      byAction.updateWith((choice.title, choice.kind, choice.edits, choice.disabled)) {
+        case Some(seen) => Some(seen.copy(problems = (seen.problems ++ choice.problems).distinct))
+        case None => Some(choice)
+      }
+
+    byAction.values.toSeq
+  }
 
   /** The annotator fixes, intentions, import candidates, surround actions, unwrappers and inlinings of a Scala file. */
   private def collectScala(file: ScalaFile, range: TextRange, problems: Seq[Diagnostic], editor: Editor)
@@ -292,6 +314,37 @@ final class CodeActions(scalaIntentionClasses: Seq[String], javaIntentionClasses
       case (problem, (fixRange, fix)) if fixRange.intersects(range) || fixRange.containsOffset(range.getStartOffset) =>
         Candidate(fix.getClass.getName, () => fix, "quickfix", Seq(problem))
     }
+
+  /**
+   * The error fixes of a Java file's problems that the range touches. An import fix is replaced by a candidate per
+   * class it can import, as the chooser of the IDE lists them (see [[importCandidates]]).
+   */
+  private def javaFixCandidates(file: PsiJavaFile, range: TextRange, editor: Editor, problems: Seq[Diagnostic])
+      : Seq[Candidate] =
+    fixCandidates(range, problems).flatMap { candidate =>
+      candidate.create() match {
+        case imports: ImportClassFixBase[?, ?] => importCandidates(imports, candidate, ActionContext.from(editor, file))
+        case _ => Seq(candidate)
+      }
+    }
+
+  /**
+   * One candidate per class that an import fix offers: the steps of the chooser its ModCommand fallback performs,
+   * which is what the IDE runs when the user picks a class. With a single class the fallback imports it without a
+   * chooser, and is itself the one candidate.
+   */
+  private def importCandidates(fix: ImportClassFixBase[?, ?], candidate: Candidate, context: ActionContext)
+      : Seq[Candidate] = {
+    val fallback = fix.getFallbackModCommandAction
+
+    fallback.perform(context) match {
+      case chooser: ModChooseAction =>
+        chooser.actions.asScala.toSeq.map { step =>
+          candidate.copy(name = step.getClass.getName, create = () => step.asIntention())
+        }
+      case _ => Seq(candidate.copy(create = () => fallback.asIntention()))
+    }
+  }
 
   private def isImplementMembersFix(candidate: Candidate): Boolean =
     candidate.name == classOf[ImplementMembersQuickFix].getName

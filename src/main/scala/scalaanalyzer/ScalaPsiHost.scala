@@ -1,7 +1,9 @@
 package scalaanalyzer
 
 import com.intellij.codeInsight.daemon.impl.{AnnotationHolderImpl, AnnotationSessionImpl}
-import com.intellij.codeInsight.daemon.impl.analysis.{HighlightInfoHolder, HighlightNamesUtil}
+import com.intellij.codeInsight.daemon.impl.analysis.{HighlightInfoHolder, HighlightNamesUtil, JavaErrorFixProvider}
+import com.intellij.codeInsight.intention.{CommonIntentionAction, IntentionAction}
+import com.intellij.java.codeserver.highlighting.errors.JavaCompilationError
 import com.intellij.lang.annotation.{Annotation, Annotator, HighlightSeverity}
 import com.intellij.openapi.editor.RangeMarker
 import com.intellij.openapi.editor.colors.TextAttributesKey
@@ -30,8 +32,10 @@ import scalaanalyzer.platform.{Descriptors, ExtensionBean, HostBootstrap, HostDi
 
 import java.nio.file.Path
 import java.util.concurrent.ConcurrentHashMap
+import java.util.function.Consumer
 
 import scala.jdk.CollectionConverters.*
+import scala.util.control.NonFatal
 
 /**
  * Startup settings of the process's one host, passed to [[ScalaPsiHost.start]].
@@ -696,7 +700,7 @@ final class ScalaPsiHost private[scalaanalyzer] (
 
   /**
    * Text actions for the selected range, preserving their annotator fixes and previewing on file copies. A Java file
-   * has only its intentions, which need no diagnostics. For a Scala file, until the
+   * has its intentions and the fixes of its errors, which are computed for the request. For a Scala file, until the
    * file's general diagnostics are computed, only what the range touches is analyzed, and until its inspections are,
    * their fixes are left out: the first request on an opened file does not wait for the whole file's analysis, and
    * editors ask again when the diagnostics arrive. A caller that already shows inspection problems in the range asks
@@ -723,6 +727,8 @@ final class ScalaPsiHost private[scalaanalyzer] (
 
         CodeActions.Offered(actions.collect(scalaFile, range, problems),
           actions.implementMembersOffer(scalaFile, range, problems), actions.extractionOffers(scalaFile, range))
+      case javaFile: PsiJavaFile =>
+        CodeActions.Offered(actions.collect(javaFile, range, javaProblemsAround(javaFile, range)), None, Seq.empty)
       case _ => CodeActions.Offered(actions.collect(file, range, Seq.empty), None, Seq.empty)
     }
   }
@@ -813,15 +819,21 @@ final class ScalaPsiHost private[scalaanalyzer] (
    * Uses the platform's error collector and module resolve scope; no compiler output is generated. Analysis uses
    * the host's Java language level and classpath, without javac options or annotation processors.
    *
+   * The errors carry no fixes: [[codeActions]] computes them for the errors it is asked about.
+   *
    * Takes read access itself and checks for cancellation between elements.
    *
    * @param file Java source to analyze
    * @return errors with UTF-16 ranges in the current buffer
    */
   def diagnostics(file: PsiJavaFile): Seq[Diagnostic] = HostLock.query {
-    val errors = Vector.newBuilder[Diagnostic]
-    val collector = new com.intellij.java.codeserver.highlighting.JavaErrorCollector(file, error =>
-      errors += Diagnostic(HighlightSeverity.ERROR, error.range(), error.description()))
+    javaErrors(file).map(error => Diagnostic(HighlightSeverity.ERROR, error.range(), error.description()))
+  }
+
+  /** The Java compilation errors of a file, in the collector's order; the caller holds read access. */
+  private def javaErrors(file: PsiJavaFile): Seq[JavaCompilationError[?, ?]] = {
+    val errors = Vector.newBuilder[JavaCompilationError[?, ?]]
+    val collector = new com.intellij.java.codeserver.highlighting.JavaErrorCollector(file, error => errors += error)
 
     SyntaxTraverser.psiTraverser(file).forEach { element =>
       com.intellij.openapi.progress.ProgressManager.checkCanceled()
@@ -829,6 +841,46 @@ final class ScalaPsiHost private[scalaanalyzer] (
     }
 
     errors.result()
+  }
+
+  /**
+   * The Java errors a code-action range touches, each with its fixes. Fixes are computed only for these, as the IDE
+   * fills the lightbulb of the caret's problems: some build candidate lists (classes to import) that every
+   * diagnostics pass would pay for.
+   */
+  private def javaProblemsAround(file: PsiJavaFile, range: TextRange): Seq[Diagnostic] =
+    javaErrors(file)
+      .filter(error => error.range().intersects(range) || error.range().containsOffset(range.getStartOffset))
+      .map { error =>
+        Diagnostic(HighlightSeverity.ERROR, error.range(), error.description(), javaFixes(error).map(error.range() -> _))
+      }
+
+  /**
+   * The fixes that each registered provider offers for a Java error, in the extension point's order: the provider's
+   * immediate fixes, then its lazy ones, which the IDE computes in the background but a request here can wait for.
+   * The two are independent: a provider whose immediate fixes fail (those that would add a library or a module to the
+   * IDE's classpath need its project model, which the host does not have) still offers its lazy ones, such as the
+   * class imports. A failing phase is logged and the others still contribute.
+   */
+  private def javaFixes(error: JavaCompilationError[?, ?]): Seq[IntentionAction] = {
+    val fixes = Vector.newBuilder[IntentionAction]
+    val sink: Consumer[CommonIntentionAction] = fix => fixes += fix.asIntention()
+
+    /** Runs one phase of a provider, logging its failure. */
+    def offer(provider: JavaErrorFixProvider, phase: String)(register: => Unit): Unit =
+      try register
+      catch {
+        case e: ProcessCanceledException => throw e
+        case e @ (NonFatal(_) | _: LinkageError) =>
+          HostLog.warn(s"${provider.getClass.getName} could not offer its $phase fixes for ${error.kind()}", e)
+      }
+
+    for (provider <- JavaErrorFixProvider.EP_NAME.getExtensionList.asScala) {
+      offer(provider, "immediate")(provider.registerFixes(error, sink))
+      offer(provider, "lazy")(Option(provider.registerLazyFixes(error)).foreach(_.accept(sink)))
+    }
+
+    fixes.result()
   }
 
   /**
