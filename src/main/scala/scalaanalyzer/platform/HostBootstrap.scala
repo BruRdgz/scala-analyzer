@@ -163,7 +163,7 @@ import com.intellij.psi.impl.{
   DocumentCommitProcessor, JavaClassSupersImpl, JavaPsiFacadeImpl, JavaPsiImplementationHelper,
   JvmPsiConversionHelperImpl, PsiCachedValuesFactory, PsiElementFactoryImpl, PsiFileFactoryImpl,
   PsiJavaModuleModificationTracker, PsiModificationTrackerImpl, PsiNameHelperImpl, PsiParserFacadeImpl,
-  PsiSubstitutorFactoryImpl,
+  PsiSubstitutorFactoryImpl, RecordAugmentProvider,
   ResolveScopeManager
 }
 import com.intellij.psi.impl.cache.impl.id.IdIndexers
@@ -178,8 +178,9 @@ import com.intellij.psi.impl.java.stubs.{
 }
 import com.intellij.psi.impl.migration.PsiMigrationManager
 import com.intellij.psi.impl.search.{
-  CachesBasedRefSearcher, ImplicitClassesSearcher, JavaClassInheritorsSearcher, JavaOverridingMethodsSearcher,
-  MethodDeepestSuperSearcher, MethodSuperSearcher, MethodUsagesSearcher, PsiSearchHelperImpl
+  CachesBasedRefSearcher, ImplicitClassesSearcher, JavaClassInheritorsSearcher, JavaDirectInheritorsSearcher,
+  JavaOverridingMethodsSearcher, MethodDeepestSuperSearcher, MethodSuperSearcher, MethodUsagesSearcher,
+  PsiSearchHelperImpl
 }
 import com.intellij.psi.impl.smartPointers.{SmartPointerAnchorProvider, SmartPointerManagerImpl}
 import com.intellij.psi.impl.source.codeStyle.{
@@ -195,7 +196,9 @@ import com.intellij.psi.search.{
   PsiShortNamesCache
 }
 import com.intellij.psi.search.impl.VirtualFileEnumeration
-import com.intellij.psi.search.searches.{ClassInheritorsSearch, DefinitionsScopedSearch, ReferencesSearch}
+import com.intellij.psi.search.searches.{
+  ClassInheritorsSearch, DefinitionsScopedSearch, DirectClassInheritorsSearch, ReferencesSearch
+}
 import com.intellij.psi.statistics.{StatisticsInfo, StatisticsManager}
 import com.intellij.psi.stubs.{
   BinaryFileStubBuilders, CoreStubTreeLoader, ObjectStubTree, StubElementRegistryServiceImpl, StubTreeLoader
@@ -686,9 +689,12 @@ private[scalaanalyzer] object HostBootstrap {
       for (name <- Descriptors.scalaExtensions(config.scalaPluginJars, "com.intellij.vetoRenameCondition"))
         // A class loaded by name is a reference type.
         renameVetoes.registerExtension(newPrivate(Class.forName(name).asInstanceOf[Class[AnyRef]]), root)
+      // The direct inheritors in Java sources and binaries, from the Java stub indices, next to the plugin's searcher
+      // of Scala inheritors. It consults compiler indices only when the IDE enables them, which the host does not.
+      area.getExtensionPoint[QueryExecutor[PsiClass, DirectClassInheritorsSearch.SearchParameters]](
+        "com.intellij.directClassInheritorsSearch").registerExtension(new JavaDirectInheritorsSearcher, root)
       // The deep inheritors search, which the plugin's overriders search relies on: it walks the direct inheritors
-      // that the plugin's searcher gives. (The Java direct searcher reads compiler indices, and would find Java
-      // subclasses only.)
+      // that both searchers give.
       area.getExtensionPoint[QueryExecutor[PsiClass, ClassInheritorsSearch.SearchParameters]](
         "com.intellij.classInheritorsSearch").registerExtension(new JavaClassInheritorsSearcher, root)
       // The references to a Java method, and its overriders in Java classes and in Scala ones (through the
@@ -854,8 +860,11 @@ private[scalaanalyzer] object HostBootstrap {
       CoreApplicationEnvironment.registerExtensionPoint(area, TreeCopyHandler.EP_NAME, classOf[TreeCopyHandler])
       CoreApplicationEnvironment.registerExtensionPoint(area, "com.intellij.multiverseEnabler",
         classOf[MultiverseEnabler])
-      // Java PSI of library classes asks for augmentations (Lombok-style); there are none.
+      // Members that Java classes have without declaring them. The Java PSI's own provider gives a record its canonical
+      // constructor and accessors; augmentations by frameworks (Lombok-style) have no provider in the host.
       CoreApplicationEnvironment.registerExtensionPoint(area, PsiAugmentProvider.EP_NAME, classOf[PsiAugmentProvider])
+      area.getExtensionPoint[PsiAugmentProvider](PsiAugmentProvider.EP_NAME.getName)
+        .registerExtension(new RecordAugmentProvider, root)
       // Which syntax errors are shown: not inside ScalaDoc, and not in files whose errors come from the compiler.
       CoreApplicationEnvironment.registerExtensionPoint(area, HighlightErrorFilter.EP_NAME.getName,
         classOf[HighlightErrorFilter])
@@ -1408,6 +1417,8 @@ private[scalaanalyzer] object HostBootstrap {
       IdIndexers.INSTANCE.addExplicitExtension(JavaFileType.INSTANCE, new JavaIdIndexer)
       // Find usages searches the project scope by default; the host offers no other predefined scopes.
       appServices.register(classOf[FindUsagesSettings])(new FindUsagesSettingsImpl)
+      // Java find usages also searches the elements that frameworks alias to a target; the host has no such mappers.
+      declare("com.intellij.aliasingPsiTargetMapper")
       appServices.register(classOf[PredefinedSearchScopeProvider])(new PredefinedSearchScopeProvider {
         override def getPredefinedScopes(project: Project, dataContext: DataContext, suggestSearchInLibs: Boolean,
                                          prevSearchFiles: Boolean, currentSelection: Boolean, usageView: Boolean,
@@ -1626,9 +1637,9 @@ private[scalaanalyzer] object HostBootstrap {
       // One scope for everything, as one scope per module: the plugin keys its caches by scope, so a new object per
       // request would add entries on every lookup that are never found again.
       val everythingScope = new EverythingGlobalScope(project)
-      // Packages are declared in the files' text, not by directories (the host's files have none): the index holds no
-      // directory, and lists the files that declare a package, which the package scope of a package-private member
-      // needs.
+      // Packages of project sources are declared in the files' text, not by directories (the host's sources have none):
+      // the index holds no directory, and lists the files that declare a package, which the package scope of a
+      // package-private member needs. Library packages get their directories from the LibraryClassFinder.
       projectServices.register(classOf[PackageIndex])(new PackageIndex {
         override def getDirsByPackageName(packageName: String, includeLibrarySources: Boolean): Query[VirtualFile] =
           EmptyQuery.getEmptyQuery
@@ -1722,14 +1733,27 @@ private[scalaanalyzer] object HostBootstrap {
       lazy val scalaShortNames = new ScalaShortNamesCache(using project)
       projectServices.register(classOf[PsiShortNamesCache])(new Host_PsiShortNamesCache(dispatch {
         case ("PsiShortNamesCache.getClassesByName", Array(name: String, scope: GlobalSearchScope)) =>
-          val binaries = libraryFiles.filesNamed(name + ".class")
-            .collect {
-              case binary: LibraryFile if !binary.isLibrarySource && !binary.isDirectory && scope.contains(binary) =>
-                binary
-            }
-            .flatMap(binary => Option(psiManagerRef.findFile(binary)))
-            .collect { case owner: PsiClassOwner => owner.getClasses.toSeq }
-            .flatten
+          /**
+           * Resolves a class file as `LibraryClassFinder` does: through the top-level class file of its directory,
+           * then the member classes. Member classes are read from Java files only; a member's own file has no PSI.
+           */
+          def binaryClass(file: LibraryFile): Option[PsiClass] =
+            for {
+              nesting <- LibraryFileSystem.classNesting(file.getName.stripSuffix(".class"))
+              topFile <- Option(file.getParent.findChild(nesting.head + ".class")) if scope.contains(topFile)
+              owner <- Option(psiManagerRef.findFile(topFile)).collect {
+                case javaFile: PsiJavaFile => javaFile
+                case classOwner: PsiClassOwner if nesting.tail.isEmpty => classOwner
+              }
+              top <- owner.getClasses.find(_.getName == nesting.head)
+              cls <- nesting.tail.foldLeft(Option(top)) { (outer, member) =>
+                outer.flatMap(o => Option(o.findInnerClassByName(member, false)))
+              }
+            } yield cls
+
+          val binaries = libraryFiles.classFilesShortNamed(name)
+            .collect { case binary: LibraryFile if !binary.isLibrarySource && !binary.isDirectory => binary }
+            .flatMap(binaryClass)
             .filter(_.getName == name)
           (scalaShortNames.getClassesByName(name, scope).toSeq ++
             StubIndex.getElements(JavaStubIndexKeys.CLASS_SHORT_NAMES,
@@ -1756,7 +1780,7 @@ private[scalaanalyzer] object HostBootstrap {
         case ("PsiShortNamesCache.getAllClassNames", _) =>
           (scalaShortNames.getAllClassNames.toSeq ++
             StubIndex.getInstance.getAllKeys(JavaStubIndexKeys.CLASS_SHORT_NAMES, project).asScala ++
-            libraryFiles.classFileNames).distinct.sorted.toArray
+            libraryFiles.classShortNames).distinct.sorted.toArray
       }))
       // Annotation lookups cache by owner; the host has no mirrored elements (light copies of sources), so an owner is
       // its own cache key.
@@ -1889,9 +1913,12 @@ private[scalaanalyzer] object HostBootstrap {
       // `area` is an ExtensionsAreaImpl, which registers ExtensionPointImpl instances.
       val finders = area.getExtensionPoint[PsiElementFinder]("com.intellij.java.elementFinder")
         .asInstanceOf[ExtensionPointImpl[PsiElementFinder]]
-      finders.registerExtension(new LibraryClassFinder(project, libraryFiles, moduleModel), root)
+      val libraryClasses = new LibraryClassFinder(project, libraryFiles, moduleModel)
+      finders.registerExtension(libraryClasses, root)
       finders.registerExtension(new ScalaClassFinder(project), root)
       finders.registerExtension(new SyntheticClassElementFinder(project), root)
+      area.getExtensionPoint[PackageDirectoryProvider]("com.intellij.packageDirectoryProvider")
+        .registerExtension(libraryClasses, root)
     }
 
     /** Invalidates source/library PSI caches and the platform's project modification counter. */

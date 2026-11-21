@@ -1,6 +1,9 @@
 package scalaanalyzer
 
 import com.intellij.lang.annotation.HighlightSeverity
+import com.intellij.psi.PsiJavaFile
+
+import java.nio.file.Path
 
 /**
  * The plugin's highlighting through the host. Expected problems are the ones scalac reports for the same code, with
@@ -58,6 +61,41 @@ class DiagnosticsTest extends munit.FunSuite {
       assertEquals(host.diagnostics(file), Seq.empty)
     } finally {
       host.closeSource(file)
+      host.removeModule(module.spec.stableId)
+    }
+  }
+
+  test("Java sources that compile have no problems: on-demand imports, records and uses of Scala objects") {
+    val host = TestHost.host
+    TestHost.libraryReport
+    val scalaLibrary = Path.of(sys.props("scalaanalyzer.fixture.scalaLibrary"))
+    val module = host.addModule(ModuleSpec("java-clean", "2.13.18", Seq.empty, Seq(scalaLibrary)))
+    val greeter = host.openFile(Path.of("/java-clean/Greeter.scala"),
+      "package clean\nobject Greeter { def hi(): String = \"hi\" }\n", module)
+    val cases = Seq(
+      "an on-demand import of a JDK package" ->
+        "import java.util.*;\nclass JdkImport { List<String> names = new ArrayList<>(); }",
+      "an on-demand import of a library package" ->
+        "import scala.runtime.*;\nclass LibraryImport { Object unit = BoxedUnit.UNIT; }",
+      "a record's implicit canonical constructor and accessor" ->
+        "record Point(int x, int y) {}\nclass RecordUse { int x = new Point(1, 2).x(); }",
+      "a Scala object through MODULE$ and its static forwarder" ->
+        "package clean;\nclass ObjectUse { String a = Greeter$.MODULE$.hi(); String b = Greeter.hi(); }",
+    )
+    /** The problems of one case's file, as message and highlighted text. */
+    def problems(text: String, index: Int): Seq[(String, String)] =
+      host.openFile(Path.of(s"/java-clean/Clean$index.java"), text, module) match {
+        case file: PsiJavaFile =>
+          try host.diagnostics(file).map(d => d.message -> d.range.substring(text))
+          finally host.closeSource(file)
+        case other => fail(s"not Java: $other")
+      }
+
+    try {
+      val found = cases.zipWithIndex.map { case ((label, text), index) => label -> problems(text, index) }
+      assertEquals(found.filter(_._2.nonEmpty), Seq.empty)
+    } finally {
+      host.closeSource(greeter)
       host.removeModule(module.spec.stableId)
     }
   }

@@ -7,7 +7,9 @@ import com.intellij.psi.impl.file.PsiPackageImpl
 import com.intellij.psi.impl.java.stubs.index.JavaStubIndexKeys
 import com.intellij.psi.search.GlobalSearchScope
 import com.intellij.psi.stubs.StubIndex
-import com.intellij.psi.{PsiClass, PsiClassOwner, PsiElementFinder, PsiJavaFile, PsiManager, PsiPackage}
+import com.intellij.psi.{
+  PackageDirectoryProvider, PsiClass, PsiClassOwner, PsiDirectory, PsiElementFinder, PsiJavaFile, PsiManager, PsiPackage
+}
 import com.intellij.psi.impl.PsiManagerEx
 import com.intellij.util.Processor
 import org.jetbrains.plugins.scala.lang.psi.api.toplevel.ScPackaging
@@ -19,7 +21,7 @@ import scalaanalyzer.ModuleModel
 import scala.jdk.CollectionConverters.*
 
 /**
- * Resolves classes and packages for the platform's Java PSI facade.
+ * Resolves classes and packages for the platform's Java PSI facade, and gives packages their library directories.
  *
  * Scala classes come from [[SymbolIndex]]. Java binaries are resolved by path on demand to avoid indexing
  * the entire JDK; packages combine class-root directories with Scala and Java source declarations.
@@ -30,7 +32,7 @@ import scala.jdk.CollectionConverters.*
  * @param modules registry of project sources and their owning modules
  */
 final class LibraryClassFinder(project: Project, files: LibraryFileSystem, modules: ModuleModel)
-    extends PsiElementFinder {
+    extends PsiElementFinder with PackageDirectoryProvider {
   /** Obtains the PSI manager after bootstrap has registered its services. */
   private def psiManager: PsiManager = PsiManager.getInstance(project)
 
@@ -107,6 +109,25 @@ final class LibraryClassFinder(project: Project, files: LibraryFileSystem, modul
       else Option(root.findFileByRelativePath(path)).filter(_.isDirectory)
     }
   }
+
+  /**
+   * Gives a package's directories in the mounted class roots, as the IDE's package index does for libraries.
+   *
+   * Java's module access check reads them: it reports a library package without directories as not found. Project
+   * sources have no directories in the host; the files that declare a package stand for it.
+   *
+   * @param psiPackage package whose directories are wanted
+   * @param scope files the directories must be in
+   * @param consumer receives each directory; returns `false` to stop
+   * @param includeLibrarySources ignored: the host gives no directories of attached sources, which are not class roots
+   * @return `false` when the consumer stopped, `true` otherwise
+   */
+  override def processPackageDirectories(psiPackage: PsiPackage, scope: GlobalSearchScope,
+      consumer: Processor[? >: PsiDirectory], includeLibrarySources: Boolean): Boolean =
+    directoriesOf(psiPackage.getQualifiedName)
+      .filter(scope.contains)
+      .flatMap(directory => Option(psiManager.findDirectory(directory)))
+      .forall(consumer.process)
 
   /**
    * Finds a directory-backed or source-declared package.

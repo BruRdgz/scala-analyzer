@@ -1,6 +1,7 @@
 package scalaanalyzer.language
 
 import com.intellij.codeInsight.TargetElementUtil
+import com.intellij.find.findUsages.JavaFindUsagesHandlerFactory
 import com.intellij.ide.hierarchy.{HierarchyBrowserScopes, HierarchyTreeStructure}
 import com.intellij.ide.hierarchy.call.{CallHierarchyNodeDescriptor, JavaCallHierarchyProvider}
 import com.intellij.ide.hierarchy.`type`.{SubtypesHierarchyTreeStructure, SupertypesHierarchyTreeStructure, TypeHierarchyNodeDescriptor}
@@ -90,26 +91,34 @@ object ProjectSearch {
     }
 
   /**
-   * Collects usages with the plugin handler's default search options.
+   * Collects the code usages of a target, with the default search options of the handler the IDE would pick for it.
    *
-   * Both primary and secondary elements contribute usages. Unsupported targets, such as Java declarations,
-   * produce no results.
+   * Like the IDE's find-usages manager, it asks the Scala plugin's handler factory first and the platform's Java
+   * factory second, and uses the first that accepts the target; the Scala factory hands Java declarations it
+   * reaches (such as a Java base method) to the Java factory itself. Both primary and secondary elements of the
+   * handler contribute usages. A target neither factory accepts produces no results.
    *
-   * @param target declaration accepted by the Scala find-usages handler
+   * Text occurrences (the name in comments, strings and non-code files) are not searched: they are no references,
+   * and the IDE lists them apart. The plugin's options leave them out by default; the Java handler's include them.
+   *
+   * @param target declaration to search for
    * @return usages reported by the handler
    */
   def usages(target: PsiElement): Seq[UsageInfo] = {
-    val factory = new ScalaFindUsagesHandlerFactory(target.getProject)
-    if (!factory.canFindUsages(target)) Seq.empty
-    else {
-      val handler = factory.createFindUsagesHandler(target, false)
-      val collected = new CommonProcessors.CollectProcessor[UsageInfo]
+    val project = target.getProject
+    val factories = Seq(new ScalaFindUsagesHandlerFactory(project), new JavaFindUsagesHandlerFactory(project))
+    // A factory may create no handler for a target it accepts; nothing is searched then.
+    val handler = factories.find(_.canFindUsages(target)).flatMap(f => Option(f.createFindUsagesHandler(target, false)))
+    val collected = new CommonProcessors.CollectProcessor[UsageInfo]
 
-      for (element <- handler.getPrimaryElements ++ handler.getSecondaryElements)
-        handler.processElementUsages(element, collected, handler.getFindUsagesOptions)
-
-      collected.getResults.asScala.toSeq
+    for (found <- handler) {
+      val options = found.getFindUsagesOptions.clone()
+      options.isSearchForTextOccurrences = false
+      for (element <- found.getPrimaryElements ++ found.getSecondaryElements)
+        found.processElementUsages(element, collected, options)
     }
+
+    collected.getResults.asScala.toSeq
   }
 
   /**

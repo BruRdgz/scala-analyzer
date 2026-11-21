@@ -199,6 +199,7 @@ Project.service com.intellij.psi.codeStyle.ProjectCodeStyleSettingsManager
 Project.service com.intellij.psi.impl.JavaPsiImplementationHelper
 Project.service com.intellij.psi.impl.ResolveScopeManager
 Project.service com.intellij.psi.impl.file.impl.JavaFileManager
+Project.service com.intellij.psi.impl.search.HighlightingCaches
 Project.service com.intellij.psi.impl.source.resolve.ResolveCache
 Project.service com.intellij.psi.search.ProjectScopeBuilder
 Project.service com.intellij.psi.search.PsiSearchHelper

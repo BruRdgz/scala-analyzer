@@ -196,13 +196,13 @@ is partial, indexes are kept in memory, and each process serves one workspace.
 <details>
 <summary><strong>Search, editing, performance and recovery details</strong></summary>
 
-- References and implementations use text-based searches without compiler indexes. Implicit/SAM usages and Java
-  inheritors can be missed. Rename can leave Java overrides unchanged. Call and type hierarchies list project
+- References and implementations use text-based searches without compiler indexes. Implicit/SAM usages can be
+  missed, and references leave out text occurrences (a name in comments and strings). Rename can leave Java
+  overrides unchanged. Call and type hierarchies list project
   callers and subtypes only; outgoing calls include overriding methods, as in the IDE, without call-site ranges.
   Java constructor callers can be missed.
 - CI exercises ordinary source-member navigation through the packaged server and installed extension.
-- Java binary short-name lookup is incomplete, and JDK symbols come
-  from the JDK running the server.
+- JDK symbols come from the JDK running the server.
 - Native inspections cover deprecation, selected redundancies, explicit unused imports, unannotated
   declarations confined to the file, and the collection inspections that the IDE enables by default.
   Wildcard/given import warnings and whole-project dead-code analysis are outside this scope. Inspect Code

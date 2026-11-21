@@ -36,6 +36,8 @@ final class LibraryFileSystem extends DeprecatedVirtualFileSystem with AutoClose
   private val sourceArchives = new ConcurrentHashMap[Path, FileSystem]()
   /** Filename index across class and source roots, invalidated by mounts and rebuilt on demand. */
   @volatile private var byName: Map[String, Seq[VirtualFile]] = null
+  /** Class files by the short name of the top-level or member class they declare, derived from `byName`. */
+  @volatile private var byClassShortName: Map[String, Seq[VirtualFile]] = null
   private var closed = false
 
   override def getProtocol: String = LibraryFileSystem.Protocol
@@ -126,6 +128,7 @@ final class LibraryFileSystem extends DeprecatedVirtualFileSystem with AutoClose
       files.clear()
       roots.clear()
       byName = null
+      byClassShortName = null
       failure.foreach(error => throw error)
     }
   }
@@ -159,15 +162,37 @@ final class LibraryFileSystem extends DeprecatedVirtualFileSystem with AutoClose
   def filesNamed(name: String): Seq[VirtualFile] = filenameIndex.getOrElse(name, Seq.empty)
 
   /**
-   * Lists binary filenames without opening their PSI.
+   * Finds class files of top-level and member classes by the class's short name, without opening their PSI.
    *
-   * Uses the mounted filename index; names can contain the JVM's nested-class separator.
-   * Callers must still check the resolved class name and its module scope.
+   * `Map.class` is found by "Map" and `Map$Entry.class` by "Entry"; anonymous, local and mangled class files
+   * (see [[LibraryFileSystem.classNesting]]) are found by no name. The index is derived from the filename index,
+   * built on first lookup and invalidated by each mount. Callers must still check the resolved class and its scope.
    *
-   * @return the set of classfile base names
+   * @param name class short name
+   * @return matching class files, or an empty sequence when absent
    */
-  def classFileNames: Set[String] = filenameIndex.keySet.filter(_.endsWith(".class"))
-    .map(_.stripSuffix(".class"))
+  def classFilesShortNamed(name: String): Seq[VirtualFile] = classShortNameIndex.getOrElse(name, Seq.empty)
+
+  /**
+   * Lists the short names of top-level and member classes of mounted binaries, without opening their PSI.
+   *
+   * @return the short names `classFilesShortNamed` answers, without `$` from mangling, anonymous or local classes
+   */
+  def classShortNames: Set[String] = classShortNameIndex.keySet
+
+  /** Builds the class short-name index from the filename index, publishing it only once complete. */
+  private def classShortNameIndex: Map[String, Seq[VirtualFile]] = {
+    var index = byClassShortName
+    if (index == null) {
+      val byDeclaredClass = for {
+        (fileName, classFiles) <- filenameIndex.toSeq if fileName.endsWith(".class")
+        nesting <- LibraryFileSystem.classNesting(fileName.stripSuffix(".class"))
+      } yield nesting.last -> classFiles
+      index = byDeclaredClass.groupMapReduce(_._1)(_._2)(_ ++ _)
+      byClassShortName = index
+    }
+    index
+  }
 
   /** Builds the shared filename index lazily, publishing it only after a complete traversal. */
   private def filenameIndex: Map[String, Seq[VirtualFile]] = {
@@ -196,6 +221,7 @@ final class LibraryFileSystem extends DeprecatedVirtualFileSystem with AutoClose
     files.put(rootPath, root)
     roots.put(name, root)
     byName = null
+    byClassShortName = null
     root
   }
 
@@ -241,6 +267,21 @@ final class LibraryFileSystem extends DeprecatedVirtualFileSystem with AutoClose
 object LibraryFileSystem {
   /** The protocol used to identify this host-owned virtual file system. */
   val Protocol = "scala-analyzer-library"
+
+  /**
+   * Splits a class-file base name into the names of a top-level class and its member classes.
+   *
+   * `Map$Entry` gives `Map :: Entry`. Anonymous and local classes (a segment starting with a digit, as in `Foo$1` or
+   * `Foo$1Local`) and mangled names (an empty segment, as in Scala's `Foo$`, `package$` or `Foo$$anon$1`) are
+   * not member classes and give `None`.
+   *
+   * @param baseName class file name without `.class`
+   * @return the non-empty nesting from the top-level class to the declared class, or `None` if it is no member
+   */
+  def classNesting(baseName: String): Option[List[String]] = {
+    val segments = baseName.split("\\$", -1).toList
+    Option.when(segments.forall(segment => segment.nonEmpty && !segment.head.isDigit))(segments)
+  }
 }
 
 /**

@@ -206,12 +206,9 @@ source whose stubs do not pair with its PSI stays out of the symbol index instea
   `=>`, and the clauses after it parse as loose statements. Nothing to change in the host; bump the pin once it is fixed.
 - Left by the MCP test drives on this repository (2026-11-17), in the host's analysis, so the LSP shows them too.
   MCP writes (rename, quick fixes) are a later decision: they would edit files that the agent edits too.
-  - `references` of a Java class is empty, even asked from a Scala use (`LspServices.Server`,
-    `HostProtocol.Client`), though `definition` from there finds the class.
-  - `subtypes` and `implementations` of a Java interface miss its Java inheritors (`HostProtocol.Client` misses the
-    tests' `ClientBase`); Scala inheritors of a Scala type are found.
-  - The Java analysis reports errors in sources that compile: "Package not found: com.intellij.psi" and Scala's
-    mangled names, in `HostImplicitHintsPass.java`, `HostAsyncExecutionService.java` and `HostPsiManager.java`.
+  - The Java analysis reports an error on a call of a Scala member by its bytecode name: `HostImplicitHintsPass.java`
+    calls the expanded name of a qualified-private member (`...$$collectedHintTemplates`), which the plugin's Java view
+    of Scala classes does not have. Probably the IDE's error too: check in IntelliJ before changing anything.
   - `diagnostics` of every source took 144 s on this repository (133 sources), near the timeout of some clients.
   - Over MCP only: a library symbol cannot be named by `symbol` (`scala.collection.immutable.List`); the search
     covers the project sources only, so an agent reaches a library API through a use of it in the project.

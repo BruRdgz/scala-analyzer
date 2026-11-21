@@ -291,6 +291,52 @@ class EditingTest extends munit.FunSuite {
     } finally host.closeSource(file)
   }
 
+  test("usages of a Java interface include its Java and Scala uses, from its declaration and from a use") {
+    val declaration = "package mixed;\npublic interface Client { void send(); }\n"
+    val scalaUse = "object ScalaUser { val c: mixed.Client = null }\n"
+    val client = host.openFile(Path.of("/editing/mixed/Client.java"), declaration, module)
+    val javaUser =
+      host.openFile(Path.of("/editing/mixed/JavaUser.java"), "package mixed;\nclass JavaUser { Client c; }\n", module)
+    val scalaUser = scalaFile("ScalaUser", scalaUse)
+    try {
+      val askedFrom = Seq("its Java declaration" -> (client, declaration), "a Scala use" -> (scalaUser, scalaUse))
+      for ((place, (file, text)) <- askedFrom) host.read {
+        val target = ProjectSearch.usageTarget(file, text.indexOf("Client")).get
+        val files = ProjectSearch.usages(target).map(_.getElement.getContainingFile.getName).toSet
+        assertEquals(files, Set("JavaUser.java", "ScalaUser.scala"), s"usages asked from $place")
+      }
+    } finally Seq(client, javaUser, scalaUser).foreach(host.closeSource)
+  }
+
+  test("usages of a Java method that implements an interface method include the calls through the interface") {
+    val implementation = "package calls;\npublic class Socket implements Port { public void open() {} }\n"
+    val interface = "package calls;\npublic interface Port { void open(); }\n"
+    val port = host.openFile(Path.of("/editing/calls/Port.java"), interface, module)
+    val socket = host.openFile(Path.of("/editing/calls/Socket.java"), implementation, module)
+    val caller = scalaFile("Caller", "object Caller { def run(p: calls.Port, s: calls.Socket): Unit = { p.open(); s.open() } }\n")
+    try host.read {
+      val target = ProjectSearch.usageTarget(socket, implementation.indexOf("open")).get
+      val calls = ProjectSearch.usages(target).map(usage => usage.getElement.getContainingFile.getName -> usage.getElement.getText)
+      assertEquals(calls.sorted, Seq("Caller.scala" -> "p.open", "Caller.scala" -> "s.open"))
+    } finally Seq(port, socket, caller).foreach(host.closeSource)
+  }
+
+  test("implementations of a Java interface and of its method include Java and Scala inheritors") {
+    val declaration = "package inherit;\npublic interface Sink { void put(); }\n"
+    val sink = host.openFile(Path.of("/editing/inherit/Sink.java"), declaration, module)
+    val javaSink = host.openFile(Path.of("/editing/inherit/JavaSink.java"),
+      "package inherit;\npublic class JavaSink implements Sink { public void put() {} }\n", module)
+    val scalaSink = scalaFile("ScalaSink", "class ScalaSink extends inherit.Sink { def put(): Unit = () }\n")
+    try {
+      val atName = Seq("the interface" -> "Sink {", "its method" -> "put()")
+      for ((subject, name) <- atName) host.read {
+        val found = ProjectSearch.implementations(sink, declaration.indexOf(name))
+        val files = found.map(_.getContainingFile.getName).toSet
+        assertEquals(files, Set("JavaSink.java", "ScalaSink.scala"), s"implementations of $subject")
+      }
+    } finally Seq(sink, javaSink, scalaSink).foreach(host.closeSource)
+  }
+
   // PackagePrivateUseScopeTest: the scope includes the declaring package and its children, but not another package.
   test("package-private use scopes include sources in child packages") {
     val texts = Seq(

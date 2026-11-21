@@ -1,6 +1,6 @@
 package scalaanalyzer
 
-import com.intellij.psi.search.EverythingGlobalScope
+import com.intellij.psi.search.{EverythingGlobalScope, PsiShortNamesCache}
 import org.jetbrains.plugins.scala.caches.ScalaShortNamesCacheManager
 import org.jetbrains.plugins.scala.lang.psi.api.toplevel.typedef.ScClass
 
@@ -42,6 +42,22 @@ class LibraryIndexTest extends munit.FunSuite {
       val target = list.getNavigationElement
       val text = target.getContainingFile.getText
       assert(text.startsWith("ArrayList", target.getTextOffset), text.substring(target.getTextOffset, target.getTextOffset + 40))
+    }
+  }
+
+  test("the short-name cache finds a Java binary's member class and lists no mangled class-file names") {
+    TestHost.libraryReport
+    val host = TestHost.host
+    host.read {
+      val cache = PsiShortNamesCache.getInstance(host.project)
+      val scope = new EverythingGlobalScope(host.project)
+      val entries = cache.getClassesByName("Entry", scope).map(_.getQualifiedName)
+      assert(entries.contains("java.util.Map.Entry"), entries.toSeq)
+
+      val names = cache.getAllClassNames.toSeq
+      assert(names.contains("Entry"))
+      assert(names.contains("Map"))
+      assert(!names.contains("Map$Entry"))
     }
   }
 

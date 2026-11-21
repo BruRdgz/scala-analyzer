@@ -14,6 +14,12 @@
   shows each file's inspection time with its five slowest inspections, and what the library cache held for each jar.
 - The launcher sends the JVM's own warnings and log to standard error, so they can no longer corrupt the LSP or MCP
   stream on standard output.
+- Java sources that compile no longer get false errors on on-demand imports of library and JDK packages
+  (`import java.util.*;`: "Package not found") or on the implicit constructor and accessors of records.
+- References of a Java class or method find its Java and Scala usages; they found nothing.
+  As for Scala declarations, text occurrences in comments and strings are left out.
+- Implementations and subtypes of a Java class or interface include its Java inheritors.
+- Auto-import and class-name completion find the member classes of Java libraries and of the JDK (`Map.Entry`).
 
 ## 0.4.0 — 2026-11-18
 
