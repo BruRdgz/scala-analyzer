@@ -44,6 +44,9 @@
   go, and an on-demand import serving fewer than five classes becomes single-class imports), and rename and
   references are offered on Java documents: renaming a Java interface method renames its Java and Scala overriders
   and every call.
+- Java files have the Java plugin's intentions in the lightbulb (`refactor.rewrite`), read from its descriptors: 119
+  of its 135 Java intentions, previewed on a copy as the Scala ones are. Those that need a dialog, a popup, an editor
+  template or an inline refactoring, or that edit something other than the file, are left out.
 - Scala parameter-name hints follow the IDE's default exclusion list, which the Scala filter shares with Java: calls
   such as setters (`*.set*(*)`), `Math` methods or `println` no longer show parameter names.
 

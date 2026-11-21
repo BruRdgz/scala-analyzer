@@ -34,6 +34,35 @@ object CodeActions {
     "org.jetbrains.plugins.scala.codeInsight.intention.declarations.ChangeAccessModifierIntention",
   )
 
+  /**
+   * Java intentions left out of the lightbulb: each needs a dialog, popup, editor template or inline refactoring that
+   * the headless host cannot show, or acts on something other than the previewed file.
+   */
+  private val UnavailableJavaIntentions = Set(
+    // Dialogs and popups.
+    "com.intellij.codeInsight.intention.impl.CreateSubclassAction", // dialog, then a template
+    "com.intellij.testIntegration.createTest.CreateTestAction", // test-creation dialog
+    "com.intellij.testIntegration.createTest.GenerateMissedTestsAction", // popup of the missing test methods
+    "com.siyeh.ipp.modifiers.ChangeModifierIntention", // popup of the modifiers
+    "com.intellij.refactoring.replaceConstructorWithBuilder.ReplaceConstructorWithBuilderAction", // refactoring dialog
+    "com.intellij.codeInsight.intention.ReplaceConstructorWithFactoryAction", // asks for the target through a chooser
+    // Refactorings that run their handler on the editor.
+    "com.intellij.codeInsight.intention.impl.ExtractMethodIntentionAction", // JavaRefactoringService.extractMethod
+    "com.intellij.codeInsight.intention.impl.IntroduceVariableIntentionAction", // introduce-variable handler
+    "com.intellij.codeInsight.intention.impl.EncapsulateFieldAction", // encapsulate-fields handler and dialog
+    // Templates started on the editor.
+    "com.intellij.codeInsight.daemon.impl.quickfix.IterateOverIterableIntention", // InvokeTemplateAction
+    "com.intellij.codeInsight.daemon.impl.quickfix.CreateLocalVarFromInstanceofAction", // startTemplate
+    // External annotations, which choose or ask for an annotation root and edit files other than the previewed one.
+    "com.intellij.codeInsight.intention.impl.AnnotateIntentionAction",
+    "com.intellij.codeInsight.intention.impl.DeannotateIntentionAction",
+    "com.siyeh.ipp.annotation.AnnotateOverriddenMethodsIntention",
+    // Writes the real file with its own write command later, instead of editing the preview copy.
+    "com.intellij.codeInsight.MakeInferredAnnotationExplicit",
+    // Edits the project's auto-import settings, not the file.
+    "com.intellij.codeInsight.intention.impl.AddOnDemandStaticImportToAutoImportAction",
+  )
+
   /** Lazily created plugin action, the LSP action kind used for its response and the problems it is a fix for. */
   private final case class Candidate(
     name: String,
@@ -83,17 +112,21 @@ object CodeActions {
 }
 
 /**
- * Previews plugin intentions, annotator fixes, surround and unwrap actions and inlinings as source edits.
+ * Previews intentions, and for Scala files the plugin's annotator fixes, surround and unwrap actions and inlinings, as
+ * source edits.
  *
  * Callers hold PSI read access. Actions run against copies through the platform's preview contract;
  * unsupported previews are disabled with a reason when the action is known to be available.
  *
- * @param intentionClasses intention implementation names: the plugin descriptors' and the platform's that act through
- *                         the plugin's extensions
+ * @param scalaIntentionClasses Scala intention implementation names: the plugin descriptors' and the platform's that
+ *                              act through the plugin's extensions; offered in Scala files
+ * @param javaIntentionClasses Java intention implementation names from the Java plugin's descriptors; offered in Java
+ *                             files
  * @param descriptorClasses surround-descriptor implementation names from plugin descriptors
  * @param unwrapClasses unwrap-descriptor implementation names from plugin descriptors
  */
-final class CodeActions(intentionClasses: Seq[String], descriptorClasses: Seq[String], unwrapClasses: Seq[String]) {
+final class CodeActions(scalaIntentionClasses: Seq[String], javaIntentionClasses: Seq[String],
+    descriptorClasses: Seq[String], unwrapClasses: Seq[String]) {
   import CodeActions.{Candidate, Choice, ImplementMembers}
 
   /**
@@ -117,7 +150,8 @@ final class CodeActions(intentionClasses: Seq[String], descriptorClasses: Seq[St
   }
 
   /**
-   * Collects previewed fixes, intentions, surround actions and inlinings for a source range.
+   * Collects previewed intentions for a source range; for a Scala file also the plugin's fixes, import candidates,
+   * surround actions, unwrappers and inlinings.
    *
    * Unusable previews are returned disabled when availability was established. Cancellation propagates;
    * failures inside an action's availability or preview check are logged before continuing with other choices.
@@ -126,90 +160,129 @@ final class CodeActions(intentionClasses: Seq[String], descriptorClasses: Seq[St
    * must not wait for. See [[implementMembersOffer]] and [[implementMembers]]. Nor are the extractions
    * ([[extractionOffers]]).
    *
-   * @param file Scala file being queried
+   * @param file Scala or Java file being queried; a file of another language has no actions
    * @param range selected UTF-16 range, empty for a caret request
-   * @param problems current diagnostics carrying annotator fixes
+   * @param problems current diagnostics carrying annotator fixes; ignored for a Java file
    * @return distinct action choices with edits against the original file
    */
-  def collect(file: ScalaFile, range: TextRange, problems: Seq[Diagnostic]): Seq[Choice] = {
-    val project = file.getProject
-    Using.resource(new RequestEditor(file.getViewProvider.getDocument, project, range.getStartOffset)) { request =>
-      val editor = request.editor
-      val intentions = intentionClasses.filterNot(CodeActions.UnavailableIntentions).map { name =>
-        Candidate(name, () => newIntention(name), "refactor.rewrite")
-      }
-      val fixes = fixCandidates(range, problems).filterNot(isImplementMembersFix)
+  def collect(file: PsiFile, range: TextRange, problems: Seq[Diagnostic]): Seq[Choice] =
+    Using.resource(new RequestEditor(file.getViewProvider.getDocument, file.getProject, range.getStartOffset)) {
+      request =>
+        val editor = request.editor
+        editor.getSelectionModel.setSelection(range.getStartOffset, range.getEndOffset)
 
-      editor.getSelectionModel.setSelection(range.getStartOffset, range.getEndOffset)
-      val choices = (fixes ++ intentions).flatMap { candidate =>
-        var title = candidate.name.split('.').last
-        var available = false
+        file match {
+          case scalaFile: ScalaFile => collectScala(scalaFile, range, problems, editor)
+          case _ => intentionChoices(file, range, editor, intentionCandidates(file)).distinct
+        }
+    }
+
+  /** The annotator fixes, intentions, import candidates, surround actions, unwrappers and inlinings of a Scala file. */
+  private def collectScala(file: ScalaFile, range: TextRange, problems: Seq[Diagnostic], editor: Editor)
+      : Seq[Choice] = {
+    val project = file.getProject
+    val fixes = fixCandidates(range, problems).filterNot(isImplementMembersFix)
+    val choices = intentionChoices(file, range, editor, fixes ++ intentionCandidates(file))
+
+    val surrounded = if (range.isEmpty) Seq.empty else descriptorClasses.flatMap { name =>
+      // `descriptorClasses` holds the surround-descriptor implementations registered in the plugin descriptors.
+      val descriptor = Class.forName(name).getConstructor().newInstance().asInstanceOf[SurroundDescriptor]
+      val elements = descriptor.getElementsToSurround(file, range.getStartOffset, range.getEndOffset)
+      if (elements.isEmpty) Seq.empty else descriptor.getSurrounders.toSeq.flatMap { surrounder =>
         try {
-          val action = candidate.create()
-          if (!action.isAvailable(project, editor, file)) None
+          if (!surrounder.isApplicable(elements)) None
           else {
-            available = true
-            title = action.getText
-            val (result, info) = preview(file, intentionEditor = true) { copy =>
+            val (result, _) = preview(file) { copy =>
+              val selected = descriptor.getElementsToSurround(copy, range.getStartOffset, range.getEndOffset)
               val previewEditor = IntentionPreviewUtils.getPreviewEditor
               previewEditor.getCaretModel.moveToOffset(range.getStartOffset)
               previewEditor.getSelectionModel.setSelection(range.getStartOffset, range.getEndOffset)
-              val commandAction = action.asModCommandAction()
-              // The desktop import fix delegates to a UI processor and supplies no preview; reuse our optimizer path.
-              if (action.isInstanceOf[ScalaOptimizeImportsFix]) {
-                new ScalaImportOptimizer().processFile(copy).run()
-                IntentionPreviewInfo.DIFF
-              } else Inspections.previewFix(action, copy).getOrElse {
-                if (commandAction == null) action.generatePreview(project, previewEditor, copy)
-                else {
-                  val command = commandAction.perform(ActionContext.from(editor, file))
-                  ModCommandExecutor.getInstance.executeForFileCopy(command, copy)
-                  IntentionPreviewInfo.DIFF
-                }
-              }
+              surrounder.surroundElements(project, previewEditor, selected)
             }
-            val supported = info == IntentionPreviewInfo.DIFF || info == IntentionPreviewInfo.DIFF_NO_TRIM
-            Some(Choice(title, candidate.kind, if (supported) result.edits else Seq.empty,
-              Option.when(!supported)("This action does not provide an applicable text preview."), candidate.problems))
+            Some(Choice(surrounder.getTemplateDescription, "refactor.rewrite", result.edits, None))
           }
         } catch {
           case e: ProcessCanceledException => throw e
           case e @ (NonFatal(_) | _: LinkageError) =>
-            HostLog.warn(s"code action $title could not be previewed", e)
-            Option.when(available)(Choice(title, candidate.kind, Seq.empty,
-              Some("This action is unavailable in the headless host."), candidate.problems))
+            HostLog.warn(s"surround action ${surrounder.getClass.getName} could not be previewed", e)
+            Some(Choice(surrounder.getTemplateDescription, "refactor.rewrite", Seq.empty,
+              Some("This action is unavailable in the headless host.")))
         }
       }
+    }
 
-      val surrounded = if (range.isEmpty) Seq.empty else descriptorClasses.flatMap { name =>
-        // `descriptorClasses` holds the surround-descriptor implementations registered in the plugin descriptors.
-        val descriptor = Class.forName(name).getConstructor().newInstance().asInstanceOf[SurroundDescriptor]
-        val elements = descriptor.getElementsToSurround(file, range.getStartOffset, range.getEndOffset)
-        if (elements.isEmpty) Seq.empty else descriptor.getSurrounders.toSeq.flatMap { surrounder =>
-          try {
-            if (!surrounder.isApplicable(elements)) None
-            else {
-              val (result, _) = preview(file) { copy =>
-                val selected = descriptor.getElementsToSurround(copy, range.getStartOffset, range.getEndOffset)
-                val previewEditor = IntentionPreviewUtils.getPreviewEditor
-                previewEditor.getCaretModel.moveToOffset(range.getStartOffset)
-                previewEditor.getSelectionModel.setSelection(range.getStartOffset, range.getEndOffset)
-                surrounder.surroundElements(project, previewEditor, selected)
-              }
-              Some(Choice(surrounder.getTemplateDescription, "refactor.rewrite", result.edits, None))
-            }
-          } catch {
-            case e: ProcessCanceledException => throw e
-            case e @ (NonFatal(_) | _: LinkageError) =>
-              HostLog.warn(s"surround action ${surrounder.getClass.getName} could not be previewed", e)
-              Some(Choice(surrounder.getTemplateDescription, "refactor.rewrite", Seq.empty,
-                Some("This action is unavailable in the headless host.")))
+    (typeImports(file, range, problems) ++ choices ++ surrounded ++ unwrapped(file, range, editor) ++
+      inlinings(file, range)).distinct
+  }
+
+  /** The registered intentions of the file's language, as candidates; none for a file of another language. */
+  private def intentionCandidates(file: PsiFile): Seq[Candidate] = {
+    val classes = file match {
+      case _: ScalaFile => scalaIntentionClasses.filterNot(CodeActions.UnavailableIntentions)
+      case _: PsiJavaFile => javaIntentionClasses.filterNot(CodeActions.UnavailableJavaIntentions)
+      case _ => Seq.empty
+    }
+
+    classes.map(name => Candidate(name, () => newIntention(name), "refactor.rewrite"))
+  }
+
+  /**
+   * Previews each available candidate on a copy of the file, with the selection of `range`; one that is not available
+   * is left out, and one whose preview fails is disabled.
+   */
+  private def intentionChoices(file: PsiFile, range: TextRange, editor: Editor, candidates: Seq[Candidate])
+      : Seq[Choice] = {
+    val project = file.getProject
+
+    candidates.flatMap { candidate =>
+      var title = candidate.name.split('.').last
+      var available = false
+      try {
+        val action = candidate.create()
+        if (!action.isAvailable(project, editor, file)) None
+        else {
+          available = true
+          title = action.getText
+          val (result, info) = previewIntention(file) { copy =>
+            val previewEditor = IntentionPreviewUtils.getPreviewEditor
+            previewEditor.getCaretModel.moveToOffset(range.getStartOffset)
+            previewEditor.getSelectionModel.setSelection(range.getStartOffset, range.getEndOffset)
+            applyIntention(action, file, copy, editor, previewEditor)
           }
+          val supported = info == IntentionPreviewInfo.DIFF || info == IntentionPreviewInfo.DIFF_NO_TRIM
+          Some(Choice(title, candidate.kind, if (supported) result.edits else Seq.empty,
+            Option.when(!supported)("This action does not provide an applicable text preview."), candidate.problems))
         }
+      } catch {
+        case e: ProcessCanceledException => throw e
+        case e @ (NonFatal(_) | _: LinkageError) =>
+          HostLog.warn(s"code action $title could not be previewed", e)
+          Option.when(available)(Choice(title, candidate.kind, Seq.empty,
+            Some("This action is unavailable in the headless host."), candidate.problems))
+      }
+    }
+  }
+
+  /** Applies an intention to its preview `copy`, through the ModCommand pipeline when it is one. */
+  private def applyIntention(action: IntentionAction, original: PsiFile, copy: PsiFile, editor: Editor,
+      previewEditor: Editor): IntentionPreviewInfo = {
+    val commandAction = action.asModCommandAction()
+
+    def generic: IntentionPreviewInfo =
+      if (commandAction == null) action.generatePreview(original.getProject, previewEditor, copy)
+      else {
+        val command = commandAction.perform(ActionContext.from(editor, original))
+        ModCommandExecutor.getInstance.executeForFileCopy(command, copy)
+        IntentionPreviewInfo.DIFF
       }
 
-      (typeImports(file, range, problems) ++ choices ++ surrounded ++ unwrapped(file, range, editor) ++
-        inlinings(file, range)).distinct
+    copy match {
+      // The desktop import fix delegates to a UI processor and supplies no preview; reuse our optimizer path.
+      case _: ScalaFile if action.isInstanceOf[ScalaOptimizeImportsFix] =>
+        new ScalaImportOptimizer().processFile(copy).run()
+        IntentionPreviewInfo.DIFF
+      case scalaCopy: ScalaFile => Inspections.previewFix(action, scalaCopy).getOrElse(generic)
+      case _ => generic
     }
   }
 
@@ -412,16 +485,17 @@ final class CodeActions(intentionClasses: Seq[String], descriptorClasses: Seq[St
     }
   }
 
+  /** Previews a transformation of a Scala file copy, checking that it logged no error (see [[withoutLoggedErrors]]). */
+  private def preview[A](file: ScalaFile)(modify: ScalaFile => A): (ChangeEngine.Result, A) =
+    withoutLoggedErrors(ChangeEngine.run(file)(modify))
+
   /**
-   * Previews a transformation of a Scala file copy, checking that it logged no error (see [[withoutLoggedErrors]]).
-   *
-   * @param intentionEditor whether the session's editor is the one the IDE previews an intention with (see
-   *                        [[ChangeEngine.runIntention]])
+   * Previews an intention on a copy of a Scala or Java file, checking that it logged no error (see
+   * [[withoutLoggedErrors]]). The session's editor is the one the IDE previews an intention with (see
+   * [[ChangeEngine.runIntention]]).
    */
-  private def preview[A](file: ScalaFile, intentionEditor: Boolean = false)(modify: ScalaFile => A)
-      : (ChangeEngine.Result, A) =
-    withoutLoggedErrors(
-      if (intentionEditor) ChangeEngine.runIntention(file)(modify) else ChangeEngine.run(file)(modify))
+  private def previewIntention[A](file: PsiFile)(modify: PsiFile => A): (ChangeEngine.Result, A) =
+    withoutLoggedErrors(ChangeEngine.runIntention(file)(modify))
 
   /**
    * Runs a preview and rejects it when the platform logged an error meanwhile, since that can leave a partial preview

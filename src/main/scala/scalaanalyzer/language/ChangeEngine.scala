@@ -75,12 +75,12 @@ object ChangeEngine {
    * does not follow the document's changes.
    *
    * @tparam A transformation result type
-   * @param file original Scala file to copy
+   * @param file original Scala or Java file to copy
    * @param modify transformation allowed to mutate only the preview copy
    * @return the changed text and edits, paired with the transformation's result
    */
-  def runIntention[A](file: ScalaFile)(modify: ScalaFile => A): (Result, A) =
-    session(file, intentionEditor = true)(onScala(modify))
+  def runIntention[A](file: PsiFile)(modify: PsiFile => A): (Result, A) =
+    session(file, intentionEditor = true)(modify)
 
   /** `modify` for the copy of a Scala file, which is one as well. */
   private def onScala[A](modify: ScalaFile => A): PsiFile => A = {

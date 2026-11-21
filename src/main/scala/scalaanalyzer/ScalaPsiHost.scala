@@ -695,7 +695,8 @@ final class ScalaPsiHost private[scalaanalyzer] (
   def organizeImports(file: PsiFile): CodeActions.Choice = read(actions.organizeImports(file))
 
   /**
-   * Text actions for the selected range, preserving their annotator fixes and previewing on file copies. Until the
+   * Text actions for the selected range, preserving their annotator fixes and previewing on file copies. A Java file
+   * has only its intentions, which need no diagnostics. For a Scala file, until the
    * file's general diagnostics are computed, only what the range touches is analyzed, and until its inspections are,
    * their fixes are left out: the first request on an opened file does not wait for the whole file's analysis, and
    * editors ask again when the diagnostics arrive. A caller that already shows inspection problems in the range asks
@@ -707,19 +708,23 @@ final class ScalaPsiHost private[scalaanalyzer] (
    *
    * Takes read access itself.
    *
-   * @param file Scala source being queried
+   * @param file Scala or Java source being queried
    * @param range UTF-16 range the actions apply to
    * @param withInspections whether to run the inspections for their fixes when the file's diagnostics are not cached
    * @return the actions available for the range; those that fix or suppress an inspection problem say which
    */
-  def codeActions(file: ScalaFile, range: TextRange, withInspections: Boolean = false): CodeActions.Offered = read {
-    val general = upToDate(file, generalCache).getOrElse(problemsAround(file, range))
-    val inspected = upToDate(file, inspectionCache)
-      .getOrElse(if (withInspections) inspectionDiagnostics(file) else Seq.empty)
-    val problems = general ++ inspected
+  def codeActions(file: PsiFile, range: TextRange, withInspections: Boolean = false): CodeActions.Offered = read {
+    file match {
+      case scalaFile: ScalaFile =>
+        val general = upToDate(scalaFile, generalCache).getOrElse(problemsAround(scalaFile, range))
+        val inspected = upToDate(scalaFile, inspectionCache)
+          .getOrElse(if (withInspections) inspectionDiagnostics(scalaFile) else Seq.empty)
+        val problems = general ++ inspected
 
-    CodeActions.Offered(actions.collect(file, range, problems), actions.implementMembersOffer(file, range, problems),
-      actions.extractionOffers(file, range))
+        CodeActions.Offered(actions.collect(scalaFile, range, problems),
+          actions.implementMembersOffer(scalaFile, range, problems), actions.extractionOffers(scalaFile, range))
+      case _ => CodeActions.Offered(actions.collect(file, range, Seq.empty), None, Seq.empty)
+    }
   }
 
   /**

@@ -1977,10 +1977,24 @@ private[scalaanalyzer] object HostBootstrap {
         librarySources, moduleModel, () => psiChanged(),
         new CodeActions(
           Descriptors.scalaExtensions(config.scalaPluginJars, "com.intellij.intentionAction") ++ PlatformListIntentions,
+          javaIntentions(),
           Descriptors.scalaExtensions(config.scalaPluginJars, "com.intellij.lang.surroundDescriptor"),
           Descriptors.scalaExtensions(config.scalaPluginJars, "com.intellij.lang.unwrapDescriptor")),
         new Inspections(Descriptors.scalaExtensionBeans(config.scalaPluginJars, "com.intellij.localInspection")))
     }
+  }
+
+  /**
+   * The Java intentions that the Java plugin's descriptors register for Java; the ones for UAST (Kotlin and Java alike)
+   * are left out.
+   */
+  private def javaIntentions(): Seq[String] = {
+    // The descriptors are in the jar that holds the Java plugin's implementation classes.
+    val location = classOf[JavaTemplateCodeInsightSupport].getProtectionDomain.getCodeSource.getLocation
+    val javaImplJar = Path.of(location.toURI)
+
+    Descriptors.scalaExtensionBeans(Seq(javaImplJar), "com.intellij.intentionAction")
+      .filter(_.children.get("language").contains(JavaLanguage.INSTANCE.getID)).map(_.implementation)
   }
 
   /** Invokes the declared constructor of `cls` that takes `args.size` parameters, ignoring its visibility. */

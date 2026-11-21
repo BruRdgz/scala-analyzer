@@ -803,12 +803,13 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
   }
 
   /**
-   * Previews the plugin's applicable actions for a range, with their edits against the current document.
+   * Previews the applicable actions for a range, with their edits against the current document.
    *
    * The buffer is unchanged. Organize imports is included only when `only` requests its source-action kind or an
    * ancestor kind. A Scala file has the plugin's fixes, intentions, surround, unwrap, inline and extract actions, and
    * Implement members, which is previewed only when `only` accepts its kind and not at all for a caller that
-   * `resolvesEdits`. A Java file has only Organize imports, which the platform's Java import optimizer computes.
+   * `resolvesEdits`. A Java file has the Java plugin's intentions, as `refactor.rewrite` like the Scala ones, and
+   * Organize imports, which the platform's Java import optimizer computes.
    *
    * @param path registered project-source path
    * @param start selection start
@@ -835,13 +836,10 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
       // The host reads for itself: Implement members previews on the dispatch thread, so this must not hold a read.
       val (range, stamp) = host.read(
         (new TextRange(offset(sourceDocument, start), offset(sourceDocument, end)), sourceDocument.getModificationStamp))
-      val offered = sourceFile match {
-        case scalaFile: ScalaFile
-            if accepts("quickfix") || accepts("refactor.rewrite") || accepts("refactor.inline") ||
-              accepts("refactor.extract") =>
-          host.codeActions(scalaFile, range, withInspections)
-        case _ => CodeActions.Offered(Seq.empty, None, Seq.empty)
-      }
+      val offered =
+        if (accepts("quickfix") || accepts("refactor.rewrite") || accepts("refactor.inline") || accepts("refactor.extract"))
+          host.codeActions(sourceFile, range, withInspections)
+        else CodeActions.Offered(Seq.empty, None, Seq.empty)
       val implementing = offered.implementMembers.filter(action => accepts(action.kind))
       val (previewed, deferred) = sourceFile match {
         case scalaFile: ScalaFile if !resolvesEdits =>

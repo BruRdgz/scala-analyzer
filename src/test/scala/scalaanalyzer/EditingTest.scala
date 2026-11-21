@@ -6,7 +6,7 @@ import com.intellij.openapi.editor.colors.TextAttributesKey
 import com.intellij.openapi.editor.impl.DocumentImpl
 import com.intellij.openapi.progress.ProcessCanceledException
 import com.intellij.openapi.util.TextRange
-import com.intellij.psi.{PsiJavaFile, PsiMethod}
+import com.intellij.psi.{PsiFile, PsiJavaFile, PsiMethod}
 import com.intellij.psi.search.searches.ReferencesSearch
 import com.intellij.psi.util.PsiTreeUtil
 import org.jetbrains.plugins.scala.lang.psi.api.ScalaFile
@@ -919,6 +919,62 @@ class EditingTest extends munit.FunSuite {
     }
   }
 
+  // The texts are compared with their whitespace collapsed, since the formatter lays out what the intentions insert.
+  test("Java intentions are previewed on a copy at the caret and keep the source") {
+    val cases = Seq(
+      ("class Flip { boolean f(int a, int b) { return a <caret>< b; } }", "Flip",
+        "class Flip { boolean f(int a, int b) { return b > a; } }"),
+      ("class Split { void f() { int x<caret> = 1; } }", "Split into declaration and assignment",
+        "class Split { void f() { int x; x = 1; } }"),
+      ("class Loop { void f(int[] a) { f<caret>or (int item : a) { System.out.println(item); } } }",
+        "Replace for-each loop with indexed 'for' loop",
+        "class Loop { void f(int[] a) { for (int i = 0; i < a.length; i++) { int item = a[i]; " +
+          "System.out.println(item); } } }"),
+    )
+    TestHost.libraryReport
+    for ((marked, title, expected) <- cases) {
+      val original = marked.replace("<caret>", "")
+      val file = host.openFile(Path.of("/editing/intentions/Intent.java"), original, module)
+      try {
+        val at = marked.indexOf("<caret>")
+        val actions = host.codeActions(file, new TextRange(at, at)).choices
+        val chosen = actions.find(_.title.startsWith(title)).getOrElse(fail(actions.toString))
+        assertEquals(chosen.kind, "refactor.rewrite")
+        assertEquals(chosen.disabled, None)
+        assertEquals(applyEdits(original, chosen.edits).replaceAll("\\s+", " "), expected)
+        assertEquals(host.read(file.getText), original)
+      } finally host.closeSource(file)
+    }
+  }
+
+  test("an intention is offered only in a file of its language, and an excluded Java intention is not offered") {
+    val flip = "com.siyeh.ipp.bool.FlipComparisonIntention"
+    val changeModifier = "com.siyeh.ipp.modifiers.ChangeModifierIntention"
+    val javaText = "class Flip { boolean f(int a, int b) { return a < b; } }"
+    val scalaText = "object Flip { def f(a: Int, b: Int) = a < b }"
+    val javaFile = host.openFile(Path.of("/editing/intentions/Language.java"), javaText, module)
+    val scalaSource = scalaFile("Language", scalaText)
+    try {
+      def offered(actions: CodeActions, file: PsiFile, text: String, at: String) = {
+        val caret = text.indexOf(at)
+        host.read(actions.collect(file, new TextRange(caret, caret), Seq.empty)).map(_.title)
+      }
+      // Control: the Java intention is offered in the Java file when it is registered for Java.
+      assert(offered(new CodeActions(Seq.empty, Seq(flip), Seq.empty, Seq.empty), javaFile, javaText, "<").nonEmpty)
+      assertEquals(offered(new CodeActions(Seq.empty, Seq(flip), Seq.empty, Seq.empty), scalaSource, scalaText, "<"),
+        Seq.empty)
+      assertEquals(offered(new CodeActions(Seq(flip), Seq.empty, Seq.empty, Seq.empty), javaFile, javaText, "<"),
+        Seq.empty)
+      // The modifier popup is excluded however it is registered; this checks its absence, not that it would apply here.
+      assertEquals(
+        offered(new CodeActions(Seq.empty, Seq(changeModifier), Seq.empty, Seq.empty), javaFile, javaText, "Flip"),
+        Seq.empty)
+    } finally {
+      host.closeSource(javaFile)
+      host.closeSource(scalaSource)
+    }
+  }
+
   // Unwrapping leaves the whitespace around the extracted statements to the formatter, so the texts are compared
   // with their whitespace collapsed.
   test("unwrap actions apply the plugin's unwrappers on a copy and keep the source") {
@@ -1636,8 +1692,7 @@ class EditingTest extends munit.FunSuite {
       case java: PsiJavaFile => java
       case other => fail(s"not Java: $other")
     }
-    // (text that holds the name, the name, the key the IDE colors it with). Keys marked "guess" were not confirmed
-    // against a run: the order in which the highlighter checks a declaration's modifiers.
+    // (text that holds the name, the name, the key the IDE colors it with).
     val expected: Seq[(String, String, TextAttributesKey)] = Seq(
       ("abstract class Base", "Base", J.ABSTRACT_CLASS_NAME_ATTRIBUTES),
       ("<T>", "T", J.TYPE_PARAMETER_NAME_ATTRIBUTES),
@@ -1645,8 +1700,8 @@ class EditingTest extends munit.FunSuite {
       ("enum Color", "Color", J.ENUM_NAME_ATTRIBUTES),
       ("int LIMIT", "LIMIT", J.STATIC_FINAL_FIELD_ATTRIBUTES),
       ("int count;", "count", J.INSTANCE_FIELD_ATTRIBUTES),
-      ("RED", "RED", J.STATIC_FINAL_FIELD_ATTRIBUTES), // guess: an enum constant is a static final field
-      ("String shout(", "shout", J.METHOD_DECLARATION_ATTRIBUTES), // guess: a declaration wins over static
+      ("RED", "RED", J.STATIC_FINAL_FIELD_ATTRIBUTES), // an enum constant is a static final field
+      ("String shout(", "shout", J.METHOD_DECLARATION_ATTRIBUTES), // a declaration wins over static
       ("= shout(", "shout", J.STATIC_METHOD_ATTRIBUTES),
       ("+ helper(", "helper", J.METHOD_CALL_ATTRIBUTES),
       ("(int times)", "times", J.PARAMETER_ATTRIBUTES),

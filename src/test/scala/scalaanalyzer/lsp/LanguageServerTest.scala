@@ -1663,7 +1663,7 @@ class LanguageServerTest extends munit.FunSuite {
     } finally change(original, 29)
   }
 
-  test("a Java document gets the organize imports action and no other") {
+  test("a Java document gets organize imports on request and its intentions as rewrite actions") {
     val javaFile = fixture.resolve("core/src/main/java/core/Shout.java")
     val original = Files.readString(javaFile)
     val text = "package core;\nimport java.util.List;\nimport java.util.Map;\nclass Shout { Map<String, String> m; }\n"
@@ -1673,8 +1673,9 @@ class LanguageServerTest extends munit.FunSuite {
       val context = new CodeActionContext(java.util.List.of())
       val start = new Position(3, 0)
       val params = new CodeActionParams(document(javaFile), new Range(start, start), context)
-      // Without a requested kind only the contextual actions are offered, and a Java file has none yet.
-      assertEquals(service.codeAction(params).get(1, TimeUnit.MINUTES).asScala.toSeq, Seq.empty)
+      // Without a requested kind only the contextual actions are offered: the intentions, none of them an import fix.
+      val contextual = service.codeAction(params).get(1, TimeUnit.MINUTES).asScala.map(_.getRight)
+      assert(contextual.forall(_.getKind == CodeActionKind.RefactorRewrite), contextual.toString)
       context.setOnly(java.util.List.of(CodeActionKind.SourceOrganizeImports))
       val actions = service.codeAction(params).get(1, TimeUnit.MINUTES).asScala.map(_.getRight)
       assertEquals(actions.map(_.getKind).toSeq, Seq(CodeActionKind.SourceOrganizeImports))
@@ -1691,6 +1692,27 @@ class LanguageServerTest extends munit.FunSuite {
         "package core;\n\nimport java.util.Map;\n\nclass Shout { Map<String, String> m; }\n")
     } finally service.didChange(new DidChangeTextDocumentParams(
       new VersionedTextDocumentIdentifier(javaFile.toUri.toString, 221),
+      JavaList.of(new TextDocumentContentChangeEvent(original))))
+  }
+
+  test("a Java document with the caret on a comparison gets its flip intention as a rewrite action") {
+    val javaFile = fixture.resolve("core/src/main/java/core/Shout.java")
+    val original = Files.readString(javaFile)
+    val text = "package core;\nclass Shout { boolean f(int a, int b) { return a < b; } }\n"
+    val service = server.getTextDocumentService
+    try {
+      service.didOpen(new DidOpenTextDocumentParams(new TextDocumentItem(javaFile.toUri.toString, "java", 230, text)))
+      val context = new CodeActionContext(java.util.List.of())
+      context.setOnly(java.util.List.of(CodeActionKind.RefactorRewrite))
+      val at = new Position(1, text.split("\n")(1).indexOf('<'))
+      val params = new CodeActionParams(document(javaFile), new Range(at, at), context)
+      val actions = service.codeAction(params).get(1, TimeUnit.MINUTES).asScala.map(_.getRight)
+      val flip = actions.find(_.getTitle.startsWith("Flip")).getOrElse(fail(actions.toString))
+      assertEquals(flip.getKind, CodeActionKind.RefactorRewrite)
+      assertEquals(flip.getDisabled, null)
+      assertEquals(flip.getEdit.getDocumentChanges.get(0).getLeft.getTextDocument.getVersion, Integer.valueOf(230))
+    } finally service.didChange(new DidChangeTextDocumentParams(
+      new VersionedTextDocumentIdentifier(javaFile.toUri.toString, 231),
       JavaList.of(new TextDocumentContentChangeEvent(original))))
   }
 
