@@ -806,8 +806,9 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
    * Previews the plugin's applicable actions for a range, with their edits against the current document.
    *
    * The buffer is unchanged. Organize imports is included only when `only` requests its source-action kind or an
-   * ancestor kind. Only Scala files have actions. Implement members is previewed only when `only` accepts its kind,
-   * and not at all for a caller that `resolvesEdits`.
+   * ancestor kind. A Scala file has the plugin's fixes, intentions, surround, unwrap, inline and extract actions, and
+   * Implement members, which is previewed only when `only` accepts its kind and not at all for a caller that
+   * `resolvesEdits`. A Java file has only Organize imports, which the platform's Java import optimizer computes.
    *
    * @param path registered project-source path
    * @param start selection start
@@ -819,13 +820,13 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
    * @return each accepted action paired with its edits, and the problems it fixes or suppresses in its result; the
    *         edits of Implement members are absent when `resolvesEdits`, and [[implementMembers]] at `start` computes
    *         them. The extractions have none: [[extract]] computes them once the user chooses one, and the result
-   *         says which. Empty for a file that is not Scala
+   *         says which. Empty for a file that is neither Scala nor Java
    * @throws com.intellij.openapi.progress.ProcessCanceledException when the buffer is edited meanwhile
    */
   def codeActions(path: Path, start: LineColumn, end: LineColumn, only: Seq[String] = Seq.empty,
       withInspections: Boolean = false, resolvesEdits: Boolean = false)
       : Seq[(CodeActionResult, Option[Seq[TextChange]])] = file(path) match {
-    case sourceFile: ScalaFile =>
+    case sourceFile: (ScalaFile | PsiJavaFile) =>
       val sourceDocument = document(sourceFile)
 
       /** Whether `kind` is a requested kind or a descendant of one; every kind when none was requested. */
@@ -834,14 +835,19 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
       // The host reads for itself: Implement members previews on the dispatch thread, so this must not hold a read.
       val (range, stamp) = host.read(
         (new TextRange(offset(sourceDocument, start), offset(sourceDocument, end)), sourceDocument.getModificationStamp))
-      val offered =
-        if (accepts("quickfix") || accepts("refactor.rewrite") || accepts("refactor.inline") || accepts("refactor.extract"))
-          host.codeActions(sourceFile, range, withInspections)
-        else CodeActions.Offered(Seq.empty, None, Seq.empty)
+      val offered = sourceFile match {
+        case scalaFile: ScalaFile
+            if accepts("quickfix") || accepts("refactor.rewrite") || accepts("refactor.inline") ||
+              accepts("refactor.extract") =>
+          host.codeActions(scalaFile, range, withInspections)
+        case _ => CodeActions.Offered(Seq.empty, None, Seq.empty)
+      }
       val implementing = offered.implementMembers.filter(action => accepts(action.kind))
-      val (previewed, deferred) =
-        if (resolvesEdits) (None, implementing)
-        else (implementing.map(host.previewImplementMembers(sourceFile, range, _)), None)
+      val (previewed, deferred) = sourceFile match {
+        case scalaFile: ScalaFile if !resolvesEdits =>
+          (implementing.map(host.previewImplementMembers(scalaFile, range, _)), None)
+        case _ => (None, implementing)
+      }
       val source =
         if (only.nonEmpty && accepts("source.organizeImports")) Seq(host.organizeImports(sourceFile))
         else Seq.empty

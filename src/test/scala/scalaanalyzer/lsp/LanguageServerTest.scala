@@ -1,6 +1,7 @@
 package scalaanalyzer.lsp
 
 import com.google.gson.{Gson, JsonArray, JsonObject, JsonPrimitive}
+import com.intellij.openapi.util.TextRange
 import com.intellij.psi.PsiManager
 import org.eclipse.lsp4j.*
 import org.eclipse.lsp4j.jsonrpc.ResponseErrorException
@@ -330,14 +331,15 @@ class LanguageServerTest extends munit.FunSuite {
     }
     def scalaSelector(options: AnyRef): Unit = selector(options, "scala")
     // Features already shared with Java files; the others follow as their Java support lands.
-    val scalaAndJava = Set("textDocument/signatureHelp", "textDocument/formatting", "textDocument/rangeFormatting")
+    val scalaAndJava = Set("textDocument/signatureHelp", "textDocument/formatting", "textDocument/rangeFormatting",
+      "textDocument/references", "textDocument/codeAction")
     selector(capabilities.getInlayHintProvider.getRight, "scala", "java")
     assert(capabilities.getInlayHintProvider.getRight.getResolveProvider)
     selector(capabilities.getSelectionRangeProvider.getRight, "scala", "java")
     scalaSelector(capabilities.getImplementationProvider.getRight)
     scalaSelector(capabilities.getCallHierarchyProvider.getRight)
     scalaSelector(capabilities.getTypeHierarchyProvider.getRight)
-    scalaSelector(capabilities.getRenameProvider.getRight)
+    selector(capabilities.getRenameProvider.getRight, "scala", "java")
     selector(capabilities.getSemanticTokensProvider, "scala", "java")
     assertEquals(capabilities.getCompletionProvider.getTriggerCharacters.asScala.toSeq, Seq("."))
     assertEquals(capabilities.getCompletionProvider.getResolveProvider, java.lang.Boolean.FALSE)
@@ -1659,6 +1661,37 @@ class LanguageServerTest extends munit.FunSuite {
       val combined = service.codeAction(params).get(1, TimeUnit.MINUTES).asScala.map(_.getRight.getKind).toSet
       assertEquals(combined, Set(CodeActionKind.SourceOrganizeImports, CodeActionKind.QuickFix))
     } finally change(original, 29)
+  }
+
+  test("a Java document gets the organize imports action and no other") {
+    val javaFile = fixture.resolve("core/src/main/java/core/Shout.java")
+    val original = Files.readString(javaFile)
+    val text = "package core;\nimport java.util.List;\nimport java.util.Map;\nclass Shout { Map<String, String> m; }\n"
+    val service = server.getTextDocumentService
+    try {
+      service.didOpen(new DidOpenTextDocumentParams(new TextDocumentItem(javaFile.toUri.toString, "java", 220, text)))
+      val context = new CodeActionContext(java.util.List.of())
+      val start = new Position(3, 0)
+      val params = new CodeActionParams(document(javaFile), new Range(start, start), context)
+      // Without a requested kind only the contextual actions are offered, and a Java file has none yet.
+      assertEquals(service.codeAction(params).get(1, TimeUnit.MINUTES).asScala.toSeq, Seq.empty)
+      context.setOnly(java.util.List.of(CodeActionKind.SourceOrganizeImports))
+      val actions = service.codeAction(params).get(1, TimeUnit.MINUTES).asScala.map(_.getRight)
+      assertEquals(actions.map(_.getKind).toSeq, Seq(CodeActionKind.SourceOrganizeImports))
+      val edit = actions.head.getEdit.getDocumentChanges.get(0).getLeft
+      assertEquals(edit.getTextDocument.getVersion, Integer.valueOf(220))
+      val lineStarts = text.linesWithSeparators.map(_.length).scanLeft(0)(_ + _).toSeq
+      def offset(position: Position): Int = lineStarts(position.getLine) + position.getCharacter
+      val changes = edit.getEdits.asScala.toSeq.map { change =>
+        ChangeEngine.Edit(new TextRange(offset(change.getRange.getStart), offset(change.getRange.getEnd)),
+          change.getNewText)
+      }
+      // The optimizer also lays the import list out with the style's blank lines around it.
+      assertEquals(TestHost.applyEdits(text, changes),
+        "package core;\n\nimport java.util.Map;\n\nclass Shout { Map<String, String> m; }\n")
+    } finally service.didChange(new DidChangeTextDocumentParams(
+      new VersionedTextDocumentIdentifier(javaFile.toUri.toString, 221),
+      JavaList.of(new TextDocumentContentChangeEvent(original))))
   }
 
   test("inline is offered for a declaration only its file sees, and not for a member used from another module") {

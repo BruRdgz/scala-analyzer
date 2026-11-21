@@ -459,19 +459,19 @@ final class ScalaLanguageServer(
       capabilities.setImplementationProvider(scalaOnly(new ImplementationRegistrationOptions))
       capabilities.setCallHierarchyProvider(scalaOnly(new CallHierarchyRegistrationOptions))
       capabilities.setTypeHierarchyProvider(scalaOnly(new TypeHierarchyRegistrationOptions))
-      scalaOnly(rename)
+      scalaAndJava(rename)
       scalaAndJava(tokens)
       val signatures = scalaAndJava(new SignatureHelpRegistrationOptions)
       signatures.setTriggerCharacters(signatureTriggers)
       signatures.setRetriggerCharacters(signatureRetriggers)
-      val actions = scalaOnly(new CodeActionRegistrationOptions)
+      val actions = scalaAndJava(new CodeActionRegistrationOptions)
       actions.setCodeActionKinds(actionKinds)
       actions.setResolveProvider(true)
       languageRegistrations = Seq(
         "codeLens" -> lenses, "signatureHelp" -> signatures,
         "formatting" -> scalaAndJava(new DocumentFormattingRegistrationOptions),
         "rangeFormatting" -> scalaAndJava(new DocumentRangeFormattingRegistrationOptions),
-        "references" -> scalaOnly(new ReferenceRegistrationOptions), "codeAction" -> actions,
+        "references" -> scalaAndJava(new ReferenceRegistrationOptions), "codeAction" -> actions,
       ).map { (method, options) => new Registration(s"scala-analyzer-$method", s"textDocument/$method", options) }
     } else {
       capabilities.setCodeLensProvider(new CodeLensOptions(false))

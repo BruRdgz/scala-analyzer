@@ -550,6 +550,31 @@ class EditingTest extends munit.FunSuite {
     }
   }
 
+  // The Java method processor adds every overrider (the Java class and the Scala one) to the renames, and the
+  // declaration and the calls through each name follow.
+  test("renaming a Java interface method renames its Java and Scala overriders and every call, from either declaration") {
+    val port = "package ren;\npublic interface Port { void open(); }\n"
+    val socket = "package ren;\npublic class Socket implements Port { public void open() {} }\n"
+    val scalaPort = "class ScalaPort extends ren.Port { def open(): Unit = () }\n"
+    val javaCaller = "package ren;\nclass JavaCaller { void f(Port p, Socket s) { p.open(); s.open(); } }\n"
+    val scalaCaller = "object ScalaCaller { def f(p: ren.Port, s: ren.Socket): Unit = { p.open(); s.open() } }\n"
+    val files = Seq(
+      host.openFile(Path.of("/editing/ren/Port.java"), port, module),
+      host.openFile(Path.of("/editing/ren/Socket.java"), socket, module),
+      scalaFile("ScalaPort", scalaPort),
+      host.openFile(Path.of("/editing/ren/JavaCaller.java"), javaCaller, module),
+      scalaFile("ScalaCaller", scalaCaller),
+    )
+    val texts = Seq(port, socket, scalaPort, javaCaller, scalaCaller)
+
+    try for ((name, asked) <- Seq("the interface declaration" -> 0, "the Java implementation" -> 1)) {
+      val changes = host.rename(files(asked), texts(asked).indexOf("open"), "start").toMap
+      assertEquals(changes.keySet, files.toSet, s"files changed by a rename from $name")
+      for ((file, text) <- files.zip(texts))
+        assertEquals(applyEdits(text, changes(file)), text.replace("open", "start"), s"${file.getName} renamed from $name")
+    } finally files.foreach(host.closeSource)
+  }
+
   test("completion renders member signatures, and its handler adds the parentheses once chosen") {
     val text = "object Complete { val emoji = \"😀\"; def message(n: Int): String = \"hi\"; Complete.mes }"
     val file = scalaFile("Complete", text)
@@ -1435,6 +1460,22 @@ class EditingTest extends munit.FunSuite {
       assertEquals(changed, original.replace("import scala.util.Try\n", ""))
       assertEquals(host.read(file.getText), original)
       host.edit(file, 0, original.length, changed)
+      assertEquals(host.organizeImports(file).edits, Seq.empty)
+    } finally host.closeSource(file)
+  }
+
+  // IntelliJ's default Java import layout sorts by package name, and the single `java.` group needs no blank line.
+  test("Java organize imports removes unused imports and, as the default Java style does, expands a little-used on-demand import") {
+    val original = "package organize;\n\nimport java.util.Map;\nimport java.util.List;\nimport java.io.*;\n" +
+      "import java.util.ArrayList;\n\nclass Organized { Map<String, String> m; File f; ArrayList<String> a; }\n"
+    // The default style keeps `*` only from five classes of a package on: `java.io.*` serves one, `File`.
+    val organized = "package organize;\n\nimport java.io.File;\nimport java.util.ArrayList;\nimport java.util.Map;\n\n" +
+      "class Organized { Map<String, String> m; File f; ArrayList<String> a; }\n"
+    val file = host.openFile(Path.of("/editing/organize/Organized.java"), original, module)
+    try {
+      assertEquals(applyEdits(original, host.organizeImports(file).edits), organized)
+      assertEquals(host.read(file.getText), original)
+      host.edit(file, 0, original.length, organized)
       assertEquals(host.organizeImports(file).edits, Seq.empty)
     } finally host.closeSource(file)
   }

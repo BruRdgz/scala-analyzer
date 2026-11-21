@@ -574,8 +574,8 @@ final class ProjectSession private (
    * @param resolvesEdits whether the caller asks for an action's edits once the user chooses it; Implement members is
    *                      then offered without its edits, which `implementMembers` computes
    * @return each accepted action paired with its current-buffer edits, absent for Implement members when
-   *         `resolvesEdits`; the action's result lists the problems it fixes or suppresses. Empty for a source that is
-   *         not Scala
+   *         `resolvesEdits`; the action's result lists the problems it fixes or suppresses. A Java source has only
+   *         Organize imports; empty for a source that is neither Scala nor Java
    */
   def codeActions(path: Path, start: LineColumn, end: LineColumn, only: Seq[String] = Seq.empty,
       withInspections: Boolean = false, resolvesEdits: Boolean = false)

@@ -85,7 +85,7 @@ import com.intellij.ide.util.PropertiesComponent
 import com.intellij.internal.statistic.eventLog.{StatisticsEventLogProvidersHolder, StatisticsEventLoggerProvider}
 import com.intellij.java.codeserver.highlighting.JavaErrorFilter
 import com.intellij.java.frontback.psi.impl.syntax.JavaSyntaxDefinitionExtension
-import com.intellij.java.impl.template.JavaTemplateCodeInsightSupport
+import com.intellij.java.impl.template.{JavaTemplateCodeInsightSupport, JavaTemplateImportSupport}
 import com.intellij.lang.{
   LanguageFormatting, LanguageFormattingRestriction, LanguageImportStatements, LanguageNamesValidation, MetaLanguage
 }
@@ -96,7 +96,8 @@ import com.intellij.lang.folding.CustomFoldingProvider
 import com.intellij.lang.impl.modcommand.ModCommandServiceImpl
 import com.intellij.lang.injection.InjectedLanguageManager
 import com.intellij.lang.java.{
-  JavaFindUsagesProvider, JavaFormattingModelBuilder, JavaParserDefinition, JavaSyntaxHighlighterFactory
+  JavaFindUsagesProvider, JavaFormattingModelBuilder, JavaImportOptimizer, JavaParserDefinition,
+  JavaSyntaxHighlighterFactory,
 }
 import com.intellij.lang.java.syntax.JavaElementTypeConverterExtension
 import com.intellij.lang.jvm.facade.{JvmElementProvider, JvmFacade, JvmFacadeImpl}
@@ -774,6 +775,10 @@ private[scalaanalyzer] object HostBootstrap {
           .asSubclass(classOf[ModCompletionItemProvider])))
       CoreApplicationEnvironment.registerExtensionPoint(area, JavaTemplateCodeInsightSupport.EP_NAME.getName,
         classOf[JavaTemplateCodeInsightSupport])
+      // The Java import optimizer and the platform's import helper ask every template-language support whether it
+      // allows the optimization or finds redundant imports; the host has none.
+      CoreApplicationEnvironment.registerExtensionPoint(area, JavaTemplateImportSupport.EP_NAME.getName,
+        classOf[JavaTemplateImportSupport])
       projectServices.register(classOf[AutoPopupControllerHelper])(
         tableProxy(classOf[AutoPopupControllerHelper], "AutoPopupControllerHelper") {
           case ("autoPopupParameterInfoAfterCompletion", _) => CallLog.hit("Completion.popup.parameterInfo"); null
@@ -1047,6 +1052,7 @@ private[scalaanalyzer] object HostBootstrap {
       CoreApplicationEnvironment.registerExtensionPoint(area, "com.intellij.lang.importOptimizer",
         classOf[LanguageExtensionPoint[?]])
       LanguageImportStatements.INSTANCE.addExplicitExtension(ScalaLanguage.INSTANCE, new ScalaImportOptimizer)
+      LanguageImportStatements.INSTANCE.addExplicitExtension(JavaLanguage.INSTANCE, new JavaImportOptimizer)
       for (name <- Seq(
              "com.intellij.formattingService", "com.intellij.lang.formatter.restriction",
              "com.intellij.externalFormatProcessor", "com.intellij.preFormatProcessor",

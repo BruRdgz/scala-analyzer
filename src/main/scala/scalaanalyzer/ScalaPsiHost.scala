@@ -685,14 +685,14 @@ final class ScalaPsiHost private[scalaanalyzer] (
   }
 
   /**
-   * The plugin's organize-imports action, with edits against a copy of `file`.
+   * The organize-imports action of the file's language, with edits against a copy of `file`.
    *
    * Runs under read access.
    *
-   * @param file Scala source whose imports are organized
+   * @param file Scala or Java source whose imports are organized
    * @return the action's choice; `file` itself is not changed
    */
-  def organizeImports(file: ScalaFile): CodeActions.Choice = read(actions.organizeImports(file))
+  def organizeImports(file: PsiFile): CodeActions.Choice = read(actions.organizeImports(file))
 
   /**
    * Text actions for the selected range, preserving their annotator fixes and previewing on file copies. Until the

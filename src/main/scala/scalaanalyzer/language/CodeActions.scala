@@ -3,11 +3,14 @@ package scalaanalyzer.language
 import com.intellij.codeInsight.intention.IntentionAction
 import com.intellij.codeInsight.intention.preview.{IntentionPreviewInfo, IntentionPreviewUtils}
 import com.intellij.codeInsight.unwrap.UnwrapDescriptor
+import com.intellij.lang.ImportOptimizer
+import com.intellij.lang.java.JavaImportOptimizer
 import com.intellij.lang.surroundWith.SurroundDescriptor
 import com.intellij.modcommand.{ActionContext, ModCommandAction, ModCommandExecutor}
 import com.intellij.openapi.editor.Editor
 import com.intellij.openapi.progress.ProcessCanceledException
 import com.intellij.openapi.util.TextRange
+import com.intellij.psi.{PsiFile, PsiJavaFile}
 import org.jetbrains.plugins.scala.ScalaBundle
 import org.jetbrains.plugins.scala.annotator.quickfix.ImplementMembersQuickFix
 import org.jetbrains.plugins.scala.autoImport.quickFix.{MemberToImport, PrefixPackageToImport, ScalaImportTypeFix}
@@ -94,14 +97,23 @@ final class CodeActions(intentionClasses: Seq[String], descriptorClasses: Seq[St
   import CodeActions.{Candidate, Choice, ImplementMembers}
 
   /**
-   * Previews the plugin's import optimizer on a file copy.
+   * Previews the language's import optimizer on a file copy: the plugin's for a Scala file, the platform's for a Java
+   * file.
    *
-   * @param file Scala file whose imports should be organized
+   * @param file Scala or Java file whose imports should be organized
    * @return the organize-imports action with edits against the original
+   * @throws IllegalArgumentException when `file` is neither Scala nor Java
    */
-  def organizeImports(file: ScalaFile): Choice = {
-    val (result, _) = preview(file)(copy => new ScalaImportOptimizer().processFile(copy).run())
+  def organizeImports(file: PsiFile): Choice = {
+    val (result, _) = withoutLoggedErrors(ChangeEngine.run(file)(copy => importOptimizer(copy).processFile(copy).run()))
     Choice("Organize imports", "source.organizeImports", result.edits, None)
+  }
+
+  /** The import optimizer of a file's language. */
+  private def importOptimizer(file: PsiFile): ImportOptimizer = file match {
+    case _: ScalaFile => new ScalaImportOptimizer
+    case _: PsiJavaFile => new JavaImportOptimizer
+    case other => throw new IllegalArgumentException(s"no import optimizer for ${other.getClass.getName}")
   }
 
   /**
@@ -401,17 +413,24 @@ final class CodeActions(intentionClasses: Seq[String], descriptorClasses: Seq[St
   }
 
   /**
-   * Logged platform failures can leave a partial preview even when the plugin returns normally. Only errors logged on
-   * this thread count: the preview runs on it, while other requests and the diagnostics log on their own threads.
+   * Previews a transformation of a Scala file copy, checking that it logged no error (see [[withoutLoggedErrors]]).
    *
    * @param intentionEditor whether the session's editor is the one the IDE previews an intention with (see
    *                        [[ChangeEngine.runIntention]])
    */
   private def preview[A](file: ScalaFile, intentionEditor: Boolean = false)(modify: ScalaFile => A)
-      : (ChangeEngine.Result, A) = {
+      : (ChangeEngine.Result, A) =
+    withoutLoggedErrors(
+      if (intentionEditor) ChangeEngine.runIntention(file)(modify) else ChangeEngine.run(file)(modify))
+
+  /**
+   * Runs a preview and rejects it when the platform logged an error meanwhile, since that can leave a partial preview
+   * even when the plugin returns normally. Only errors logged on this thread count: the preview runs on it, while other
+   * requests and the diagnostics log on their own threads.
+   */
+  private def withoutLoggedErrors[A](preview: => (ChangeEngine.Result, A)): (ChangeEngine.Result, A) = {
     val errors = HostLog.threadCount(HostLog.Level.Error)
-    val result =
-      if (intentionEditor) ChangeEngine.runIntention(file)(modify) else ChangeEngine.run(file)(modify)
+    val result = preview
     if (HostLog.threadCount(HostLog.Level.Error) != errors)
       throw new UnsupportedOperationException("An error was logged while previewing this action.")
     result

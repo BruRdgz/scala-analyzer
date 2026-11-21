@@ -40,6 +40,10 @@
 - Java files have semantic tokens from the Java plugin's name highlighting: classes, interfaces, enums, annotations,
   type parameters, methods and their declarations, fields (final ones read-only), parameters and locals, with the
   same token types as the Scala names of the same kind.
+- Java files have Organize imports (the platform's Java import optimizer, with the default Java style: unused imports
+  go, and an on-demand import serving fewer than five classes becomes single-class imports), and rename and
+  references are offered on Java documents: renaming a Java interface method renames its Java and Scala overriders
+  and every call.
 - Scala parameter-name hints follow the IDE's default exclusion list, which the Scala filter shares with Java: calls
   such as setters (`*.set*(*)`), `Math` methods or `println` no longer show parameter names.
 
