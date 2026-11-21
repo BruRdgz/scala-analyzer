@@ -225,6 +225,42 @@ source whose stubs do not pair with its PSI stays out of the symbol index instea
   - The progress callback of an import runs under the host write lock: a client that stops reading its messages stalls
     every query.
 
+## Java support (branch `java-support`, from 2026-11-21)
+
+The goal is Java at the IDE's level, as for Scala, in sbt projects and in Maven and Gradle ones. It is a program of
+milestones, not one release; each wave ends with the full suite and its own commit.
+
+- Done:
+  - Wave A, Java resolution and search: library packages get their directories (Java's module access check reported
+    every on-demand import as "Package not found"), records their implicit members, references of Java declarations
+    go through the Java find-usages handler, Java inheritors come from the Java direct inheritors searcher, and the
+    short-name cache finds member classes of Java binaries.
+  - Wave E, Maven and Gradle: Java-only build targets become modules without a Scala SDK; a workspace with no `.bsp/`
+    and a Maven or Gradle root is imported through Bloop (the host runs the tool's Bloop install step, then speaks BSP
+    over `bloop bsp`'s Unix socket, and runs the step again when a build file changes). The JDK that runs the build
+    tool is `SCALA_ANALYZER_BUILD_JAVA_HOME` (VS Code: `scalaAnalyzer.buildJavaHome`).
+  - Each module's Java language level comes from its javac options; parser and stub builder read the same level.
+  - Wave B, read features: Extend Selection, formatting, signature help and parameter-name hints for Java files.
+- Decisions:
+  - Bloop for both Maven and Gradle (spike E0): Microsoft's build-server-for-gradle publishes no artifact, reports no
+    compile diagnostics and has no test or run environment. Bloop answers no `workspace/reload` and has no stdio mode.
+  - Java references leave out text occurrences, as the plugin's Scala options do.
+  - sbt announces Scala only and never answers `buildTarget/javacOptions`: it is not asked, and the Java sources of
+    sbt modules stay at the highest language level.
+- Next: semantic tokens (in progress); then wave C, editing (rename across Java overrides, organize imports, quick
+  fixes and intentions, override/implement, a selected set of Java inspections, and a spike of a descriptor-driven
+  loader for the Java plugin's inspections); then wave D, main and JUnit 4/5 lenses and runs.
+- Candidates taken from JetBrains' own LSP extension, "Java and Kotlin by IntelliJ IDEA"
+  ([docs](https://www.jetbrains.com/help/intellij-vscode/About-instance.html)), which runs the IDE itself and is
+  closed source, so only its documented behavior is a reference:
+  - A setting that names the projects to import (`intellij.projects`: type `maven`, `gradle` or `bazel`, and a path)
+    when detection is not enough, and one for the JDK to resolve symbols against when the build gives none
+    (`intellij.jdkForSymbolResolution`).
+  - Per-kind toggles of the Java inlay hints (`jetbrains.java.hints.*`); the host's Java hints have no settings yet.
+  - Its editor mapping as wave C's checklist: intentions and quick fixes in one lightbulb list, live templates
+    through completion, file templates for new files, problem descriptions on hover.
+  - Bazel projects, later.
+
 ## Later
 
 - A persistent index, for fast startup: library jars are cached since the library cache (Unreleased); a start still
