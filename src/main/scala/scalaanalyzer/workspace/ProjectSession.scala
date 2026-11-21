@@ -251,7 +251,7 @@ final class ProjectSession private (
    * @param start range start in zero-based lines and UTF-16 columns
    * @param end range end in the same coordinates
    * @return the hints whose offset lies within the range, in the order the host returns them; empty for a source
-   *         that is not Scala
+   *         that is neither Scala nor Java
    */
   def inlayHints(path: Path, start: LineColumn, end: LineColumn): Seq[InlineHint] = language.inlayHints(path, start, end)
 
@@ -263,8 +263,8 @@ final class ProjectSession private (
    * @param path registered project-source path
    * @param at the hint's position, as `inlayHints` returned it
    * @param index the hint's index, as `inlayHints` returned it
-   * @return one target per piece of the hint; empty for a source that is not Scala, and when the source has no hint
-   *         at that index and position any more
+   * @return one target per piece of the hint; empty for a source that is not Scala (a Java source's hints have no
+   *         navigable pieces), and when the source has no hint at that index and position any more
    */
   def inlayHintTargets(path: Path, at: LineColumn, index: Int): Seq[HintPartTarget] =
     language.inlayHintTargets(path, at, index)
@@ -291,7 +291,7 @@ final class ProjectSession private (
    * @param path registered project-source path
    * @param at caret position in zero-based lines and UTF-16 columns
    * @return the rendered overloads and the active one as the host reports them; `None` when the host finds no call,
-   *         and for a source that is not Scala
+   *         and for a source that is neither Scala nor Java
    */
   def signatures(path: Path, at: LineColumn): Option[SignatureChoices] = language.signatures(path, at)
 

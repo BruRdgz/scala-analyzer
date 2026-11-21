@@ -330,8 +330,8 @@ class LanguageServerTest extends munit.FunSuite {
     }
     def scalaSelector(options: AnyRef): Unit = selector(options, "scala")
     // Features already shared with Java files; the others follow as their Java support lands.
-    val scalaAndJava = Set("textDocument/formatting", "textDocument/rangeFormatting")
-    scalaSelector(capabilities.getInlayHintProvider.getRight)
+    val scalaAndJava = Set("textDocument/signatureHelp", "textDocument/formatting", "textDocument/rangeFormatting")
+    selector(capabilities.getInlayHintProvider.getRight, "scala", "java")
     assert(capabilities.getInlayHintProvider.getRight.getResolveProvider)
     selector(capabilities.getSelectionRangeProvider.getRight, "scala", "java")
     scalaSelector(capabilities.getImplementationProvider.getRight)
@@ -1374,8 +1374,8 @@ class LanguageServerTest extends munit.FunSuite {
     val text = """package app
                  |object Hints {
                  |  def names = Option(1).toList
-                 |  def setup(timeout: Int): Int = timeout
-                 |  setup(30)
+                 |  def configure(timeout: Int): Int = timeout
+                 |  configure(30)
                  |}
                  |""".stripMargin
     def change(value: String, version: Int): Unit = server.getTextDocumentService.didChange(new DidChangeTextDocumentParams(
@@ -1469,6 +1469,30 @@ class LanguageServerTest extends munit.FunSuite {
       assertEquals(selected.head.getParent.getRange, new Range(new Position(3, 11), new Position(3, 16)))
     } finally service.didChange(new DidChangeTextDocumentParams(
       new VersionedTextDocumentIdentifier(javaFile.toUri.toString, 171), JavaList.of(new TextDocumentContentChangeEvent(original))))
+  }
+
+  test("signature help and parameter-name inlay hints of a Java buffer") {
+    val javaFile = fixture.resolve("core/src/main/java/core/Shout.java")
+    val original = Files.readString(javaFile)
+    val text = "package core;\nclass Shout {\n  static String greet(String name) { return name; }\n" +
+      "  static String greet(String name, int times) { return name; }\n" +
+      "  static String call() { return greet(\"Ann\", 3); }\n}\n"
+    val call = text.split("\n")(4)
+    val service = server.getTextDocumentService
+    try {
+      service.didOpen(new DidOpenTextDocumentParams(new TextDocumentItem(javaFile.toUri.toString, "java", 200, text)))
+      val help = service.signatureHelp(new SignatureHelpParams(document(javaFile), new Position(4, call.indexOf("3)"))))
+        .get(1, TimeUnit.MINUTES)
+      val signature = help.getSignatures.get(help.getActiveSignature)
+      assertEquals(signature.getLabel, "String greet(String name, int times)")
+      val current = signature.getParameters.get(signature.getActiveParameter).getLabel.getRight
+      assertEquals(signature.getLabel.substring(current.getFirst, current.getSecond), "int times")
+      val hints = service.inlayHint(new InlayHintParams(document(javaFile),
+        new Range(new Position(0, 0), new Position(5, 0)))).get(1, TimeUnit.MINUTES).asScala.toSeq
+      assertEquals(hints.map(h => h.getPosition -> labelText(h)),
+        Seq(new Position(4, call.indexOf("\"Ann\"")) -> "name:", new Position(4, call.indexOf("3)")) -> "times:"))
+    } finally service.didChange(new DidChangeTextDocumentParams(
+      new VersionedTextDocumentIdentifier(javaFile.toUri.toString, 201), JavaList.of(new TextDocumentContentChangeEvent(original))))
   }
 
   test("type info shows the type of the identifier under the caret or of the selected expression, and nothing else") {

@@ -2,7 +2,9 @@ package scalaanalyzer.platform
 
 import com.intellij.codeInsight.javadoc.{DocumentationDelegateProvider, JavaDocInfoGeneratorFactory}
 import com.intellij.codeInsight.hints.settings.ParameterNameHintsSettings
-import com.intellij.codeInsight.hints.{InlayParameterHintsExtension, InlayParameterHintsProvider}
+import com.intellij.codeInsight.hints.{
+  InlayHintsProviderExtensionBean, InlayHintsSettings, InlayParameterHintsExtension, JavaInlayParameterHintsProvider
+}
 import com.intellij.codeInsight.editorActions.ExtendWordSelectionHandler
 import com.intellij.codeInsight.editorActions.wordSelection.JavaBasicWordSelectionFilter
 import com.intellij.codeInsight.intention.preview.IntentionPreviewUtils
@@ -283,7 +285,6 @@ import scalaanalyzer.ScalaPsiHost.{CompletionWeighers, SemanticExtensionPoints, 
 import java.io.File
 import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Path}
-import java.util.{Set as JavaSet}
 import java.util.concurrent.{ConcurrentHashMap, TimeUnit}
 import java.util.concurrent.atomic.AtomicReference
 
@@ -1233,12 +1234,19 @@ private[scalaanalyzer] object HostBootstrap {
       LanguageParserDefinitions.INSTANCE.addExplicitExtension(JavaLanguage.INSTANCE, new JavaParserDefinition)
       // Java's typed leaves (PsiIdentifier, PsiKeyword, ...): Java PSI casts its tokens to them.
       LanguageASTFactory.INSTANCE.addExplicitExtension(JavaLanguage.INSTANCE, new JavaASTFactory)
-      // The Scala filter requires a Java provider. Java's real provider fails to construct without JavaBundle;
-      // its default exclusions are unavailable, so Java calls can show names the IDE would exclude.
+      // The Java parameter-name hints, with the default exclusion list and options of the IDE. The Scala hints take
+      // this list as well: the Scala filter unions its dependency language's, which is Java.
       InlayParameterHintsExtension.INSTANCE.addExplicitExtension(JavaLanguage.INSTANCE,
-        new InlayParameterHintsProvider {
-          override def getDefaultBlackList: JavaSet[String] = JavaSet.of()
-        })
+        new JavaInlayParameterHintsProvider)
+      // The hint settings read the providers listed here to find the language a language's settings are kept under;
+      // with none listed, Java keeps its own.
+      CoreApplicationEnvironment.registerExtensionPoint(area, InlayParameterHintsExtension.INSTANCE.getName,
+        classOf[LanguageExtensionPoint[?]])
+      // The Java provider's gate (`isParameterHintsEnabledForLanguage`) reads these settings, which enable every
+      // language; the settings subscribe to their provider extension point, which holds no providers here.
+      CoreApplicationEnvironment.registerExtensionPoint(area, "com.intellij.codeInsight.inlayProvider",
+        classOf[InlayHintsProviderExtensionBean])
+      appServices.register(classOf[InlayHintsSettings])(new InlayHintsSettings)
       // Java classes and fields describe themselves through these (getPresentation): completion shows a library class
       // after `new` with its package.
       ItemPresentationProviders.INSTANCE.addExplicitExtension(classOf[PsiClass], new ClassPresentationProvider)

@@ -34,6 +34,11 @@
   Java 11 is reported. A build that reports no javac options, as sbt does over BSP, keeps the highest level.
 - Java files have Extend Selection ranges, with the Java plugin's selectioners, and IntelliJ formatting of the whole
   file or a range, with the request's indentation.
+- Java files have signature help, from the Java plugin's parameter info (each overload's signature, the active one and
+  the parameter at the caret), and the IDE's parameter-name hints at its defaults (`name:` before a literal argument,
+  none where the argument is named like the parameter).
+- Scala parameter-name hints follow the IDE's default exclusion list, which the Scala filter shares with Java: calls
+  such as setters (`*.set*(*)`), `Math` methods or `println` no longer show parameter names.
 
 ## 0.4.0 — 2026-11-18
 

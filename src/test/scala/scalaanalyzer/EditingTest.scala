@@ -4,7 +4,7 @@ import com.intellij.lang.annotation.HighlightSeverity
 import com.intellij.openapi.editor.impl.DocumentImpl
 import com.intellij.openapi.progress.ProcessCanceledException
 import com.intellij.openapi.util.TextRange
-import com.intellij.psi.PsiMethod
+import com.intellij.psi.{PsiJavaFile, PsiMethod}
 import com.intellij.psi.search.searches.ReferencesSearch
 import com.intellij.psi.util.PsiTreeUtil
 import org.jetbrains.plugins.scala.lang.psi.api.ScalaFile
@@ -1535,6 +1535,40 @@ class EditingTest extends munit.FunSuite {
       assert(texts.containsSlice(Seq("n * 2", "return n * 2;")), texts.toString)
       assert(chain.sliding(2).forall { case Seq(inner, outer) => outer.contains(inner) && outer != inner; case _ => true },
         chain.toString)
+    } finally host.closeSource(file)
+  }
+
+  test("signature help in a Java file lists the overloads and the parameter at the caret") {
+    val marked = "class Calls {\n  static String greet(String name) { return name; }\n" +
+      "  static String greet(String name, int times) { return name; }\n" +
+      "  static String call() { return greet(\"Ann\", |3); }\n}\n"
+    val text = marked.replace("|", "")
+    val file = host.openFile(Path.of("/editing/Calls.java"), text, module)
+    try {
+      val found = host.parameterInfo(file, marked.indexOf('|')).getOrElse(fail("no signatures"))
+      // Overload order is the resolver's; the labels are the signatures as the IDE's Java handler presents them.
+      assertEquals(found.items.map(_.text).toSet, Set("String greet(String name)", "String greet(String name, int times)"))
+      val active = found.items(found.active.getOrElse(fail("no active overload")))
+      assertEquals(active.text, "String greet(String name, int times)")
+      assertEquals(active.current.map(r => active.text.substring(r.getStartOffset, r.getEndOffset)), Some("int times"))
+    } finally host.closeSource(file)
+  }
+
+  test("Java parameter-name hints label literal arguments, within the requested range") {
+    val text = "class Greeter {\n  static String greet(String name, int times) { return name; }\n" +
+      "  static String call(String name) {\n    greet(\"Ann\", 3);\n    return greet(name, 3);\n  }\n}\n"
+    val file = host.openFile(Path.of("/editing/Greeter.java"), text, module) match {
+      case java: PsiJavaFile => java
+      case other => fail(s"not Java: $other")
+    }
+    val literalCall = text.indexOf("greet(\"Ann\"")
+    def hintsIn(range: TextRange) = host.javaInlayHints(file, range).map(hint => hint.offset -> hint.text)
+    try {
+      // The argument that is a variable named like its parameter has none.
+      assertEquals(hintsIn(new TextRange(0, text.length)),
+        Seq(text.indexOf("\"Ann\"") -> "name:", text.indexOf("3);") -> "times:", text.lastIndexOf("3)") -> "times:"))
+      assertEquals(hintsIn(new TextRange(literalCall, text.indexOf("\n", literalCall))),
+        Seq(text.indexOf("\"Ann\"") -> "name:", text.indexOf("3);") -> "times:"))
     } finally host.closeSource(file)
   }
 

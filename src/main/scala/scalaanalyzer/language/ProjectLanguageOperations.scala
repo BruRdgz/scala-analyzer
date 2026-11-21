@@ -145,29 +145,38 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
   }
 
   /**
-   * Collects the plugin's inline hints within a range. Only Scala files have them.
+   * Collects the inline hints within a range: the plugin's for a Scala file, the parameter names of calls for a
+   * Java file.
    *
    * @param path registered project-source path
    * @param start range start
    * @param end range end
    * @return the hints whose offset lies within the range, in the order the host returns them; empty for a file that
-   *         is not Scala
+   *         is neither Scala nor Java
    */
   def inlayHints(path: Path, start: LineColumn, end: LineColumn): Seq[InlineHint] = file(path) match {
     case sourceFile: ScalaFile => host.read {
       val sourceDocument = document(sourceFile)
       val range = new TextRange(offset(sourceDocument, start), offset(sourceDocument, end))
 
-      host.inlayHints(sourceFile).zipWithIndex
-        .filter((hint, _) => range.contains(hint.offset))
-        .map { (hint, index) =>
-          val parts = hint.parts.map(part => HintLabelPart(part.string, InlayHints.target(part).isDefined))
+      inlineHints(sourceDocument, host.inlayHints(sourceFile).filter(hint => range.contains(hint.offset)))
+    }
+    case sourceFile: PsiJavaFile => host.read {
+      val sourceDocument = document(sourceFile)
+      val range = new TextRange(offset(sourceDocument, start), offset(sourceDocument, end))
 
-          InlineHint(position(sourceDocument, hint.offset), parts, index, hint.annotation)
-        }
+      inlineHints(sourceDocument, host.javaInlayHints(sourceFile, range))
     }
     case _ => Seq.empty
   }
+
+  /** Converts the host's hints, which lie within one request's range, to the model; the index is the hint's order. */
+  private def inlineHints(sourceDocument: Document, hints: Seq[InlayHints.InlayHint]): Seq[InlineHint] =
+    hints.zipWithIndex.map { (hint, index) =>
+      val parts = hint.parts.map(part => HintLabelPart(part.string, InlayHints.target(part).isDefined))
+
+      InlineHint(position(sourceDocument, hint.offset), parts, index, hint.annotation)
+    }
 
   /**
    * Locates what the label pieces of one hint navigate to, as `definition` locates a declaration.
@@ -178,8 +187,9 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
    * @param path registered project-source path
    * @param at the hint's position, as `inlayHints` returned it
    * @param index the hint's `index`, as `inlayHints` returned it
-   * @return one target per piece of the hint; empty for a file that is not Scala, and when the document has no hint
-   *         at that index and position any more
+   * @return one target per piece of the hint; empty for a file that is not Scala (a Java file's parameter-name hints
+   *         have no navigable pieces, so none is asked for), and when the document has no hint at that index and
+   *         position any more
    */
   def inlayHintTargets(path: Path, at: LineColumn, index: Int): Seq[HintPartTarget] = file(path) match {
     case sourceFile: ScalaFile => host.read {
@@ -246,15 +256,15 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
   }
 
   /**
-   * Looks up the signatures of the call around a position. Only Scala files have them.
+   * Looks up the signatures of the call around a position.
    *
    * @param path registered project-source path
    * @param at caret position
    * @return the signatures and the active one as the host reports them; `None` when the host finds no call, and for
-   *         a file that is not Scala
+   *         a file that is neither Scala nor Java
    */
   def signatures(path: Path, at: LineColumn): Option[SignatureChoices] = file(path) match {
-    case sourceFile: ScalaFile =>
+    case sourceFile: (ScalaFile | PsiJavaFile) =>
       host.read(host.parameterInfo(sourceFile, offset(document(sourceFile), at))).map { found =>
         SignatureChoices(
           found.items.map { signature =>

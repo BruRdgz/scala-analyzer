@@ -135,6 +135,17 @@ final class ScalaPsiHost private[scalaanalyzer] (
   def inlayHints(file: ScalaFile): Seq[InlayHints.InlayHint] = InlayHints.in(file)
 
   /**
+   * The Java plugin's parameter-name hints within a range, with the IDE's default options and exclusion list.
+   *
+   * Takes read access itself.
+   *
+   * @param file Java source to collect hints for
+   * @param range UTF-16 range whose hints are wanted
+   * @return the hints whose offset lies within the range, in document order
+   */
+  def javaInlayHints(file: PsiJavaFile, range: TextRange): Seq[InlayHints.InlayHint] = InlayHints.inJava(file, range)
+
+  /**
    * Selects the kinds of hints [[inlayHints]] produces, for every file of the host.
    *
    * Takes the write lock itself: the queries running meanwhile are cancelled.
@@ -148,11 +159,11 @@ final class ScalaPsiHost private[scalaanalyzer] (
    *
    * Takes read access itself.
    *
-   * @param file Scala source being queried
+   * @param file Scala or Java source being queried
    * @param offset caret offset in UTF-16 code units
    * @return the rendered signatures, or none when no parameter-info handler finds a call
    */
-  def parameterInfo(file: ScalaFile, offset: Int): Option[ParameterInfo.Signatures] = ParameterInfo.at(file, offset)
+  def parameterInfo(file: PsiFile, offset: Int): Option[ParameterInfo.Signatures] = ParameterInfo.at(file, offset)
 
   /**
    * Successive Extend Selection ranges, smallest first.

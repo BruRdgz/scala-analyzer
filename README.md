@@ -33,8 +33,8 @@ It exposes editor features through the **Language Server Protocol (LSP)** and im
 | Area | Capabilities |
 | --- | --- |
 | Diagnostics | Scala plugin and compiler diagnostics; current-buffer compilation for Scala 3; selected native inspections, also over the whole project (Inspect Code, listed by group, inspection and file in VS Code's Inspection Results view). |
-| Completion | Automatic imports, insertion handlers, postfix templates (`expr.if`, `.match`, `.for`, `.var`, `.not`...) and signature help. |
-| Inlay hints | Inferred types, parameter names, implicit arguments and conversions, method chains. Type names are links to their declarations, an inferred definition type can be written into the source, and `scalaAnalyzer.inlayHints.*` selects the kinds shown. |
+| Completion | Automatic imports, insertion handlers, postfix templates (`expr.if`, `.match`, `.for`, `.var`, `.not`...) and signature help (also in Java files). |
+| Inlay hints | Inferred types, parameter names, implicit arguments and conversions, method chains. Type names are links to their declarations, an inferred definition type can be written into the source, and `scalaAnalyzer.inlayHints.*` selects the kinds shown. Java files get the IDE's parameter-name hints, with its default options. |
 | Navigation | Definitions (through the plugin's Go to Declaration), type definitions, references, implementations, go to super, go to test (from a class to its tests and back), call/type hierarchies and workspace symbols; library sources and decompiled classes. |
 | Documentation | Markdown hover with declaration context, parameters, return values and linked references. |
 | Editing | Rename, organize imports, previewable quick fixes, intentions, surround and unwrap actions; implement and override members; split/join lists and flip comma; Inline for `val`s, `def`s and type aliases; Extract to val and Extract method. |
@@ -267,10 +267,13 @@ partial, indexes are kept in memory, and each process serves one workspace.
   (`scalaAnalyzer.inlayHints.xRay`, off by default; the VS Code extension's **Toggle X-Ray** flips it) rather than a
   held key, with the plugin's default X-Ray hints but not its editor changes (indent guides, method separators). In
   Scala 3 files, whose errors come from the compiler, the plugin shows type and method chain hints only in X-Ray mode,
-  as in the IDE. Label parts get their
+  as in the IDE. Java files show only parameter-name hints, at the IDE's defaults: `scalaAnalyzer.inlayHints.*`
+  does not apply to them. Label parts get their
   locations and tooltips from `inlayHint/resolve`, so a client without resolve support shows plain labels, and a
   type written from a hint is the hint's text: it adds no import. Project IDE code-style
   settings are not imported, and range formatting uses the IntelliJ formatter even when scalafmt is configured.
+- Java signature help lists the overloads and the current parameter; unlike the IDE, it does not mark the overloads
+  that do not fit the arguments, nor the deprecated ones.
 - One workspace is served per process. Shared sources assigned to multiple BSP targets are rejected as ambiguous;
   `.sbt` build-definition files are not treated as editable Scala sources.
 - Indexes are in memory. Initial imports and checks can be expensive; document requests run in order, so an import

@@ -1,11 +1,12 @@
 package scalaanalyzer.language
 
 import com.intellij.codeInsight.hint.ShowParameterInfoContext
+import com.intellij.codeInsight.hint.api.JavaSignaturePresentation
+import com.intellij.codeInsight.hint.api.impls.MethodParameterInfoHandler
 import com.intellij.lang.parameterInfo.{LanguageParameterInfo, ParameterInfoHandler, ParameterInfoUIContext, UpdateParameterInfoContext}
 import com.intellij.openapi.editor.Editor
 import com.intellij.openapi.util.TextRange
-import com.intellij.psi.PsiElement
-import org.jetbrains.plugins.scala.lang.psi.api.ScalaFile
+import com.intellij.psi.{PsiElement, PsiFile, PsiJavaFile}
 
 import scalaanalyzer.platform.{HostLock, RequestEditor, tableProxy}
 
@@ -15,10 +16,11 @@ import scala.jdk.CollectionConverters.*
 import scala.util.Using
 
 /**
- * Renders call signatures using the Scala plugin's parameter-info handlers.
+ * Renders call signatures using the Scala plugin's parameter-info handlers and the Java plugin's method handler.
  *
- * Handlers receive creation, update and presentation contexts equivalent to the editor hint's lifecycle.
- * The result contains text and active-parameter ranges without creating a popup.
+ * Scala handlers receive creation, update and presentation contexts equivalent to the editor hint's lifecycle. Java
+ * calls go through the handler's editor-free API (see `inJava`). The result contains text and active-parameter
+ * ranges without creating a popup.
  */
 object ParameterInfo {
   /**
@@ -43,6 +45,9 @@ object ParameterInfo {
   /** The hint's background, which the handlers only hand back to `setupUIComponentPresentation`. */
   private val Background = Color.WHITE
 
+  /** The Java plugin's handler for method and constructor calls; it keeps no state between requests. */
+  private val JavaHandler = new MethodParameterInfoHandler
+
   /**
    * Finds signatures for the call around a document offset.
    *
@@ -50,20 +55,50 @@ object ParameterInfo {
    * empty). Collection runs under a cancellable host read, reusing one the caller already holds; the temporary
    * editor is released before returning.
    *
-   * @param file Scala source being queried
+   * @param file Scala or Java source being queried
    * @param offset caret offset in UTF-16 code units
    * @return rendered signatures, or none when no handler finds a call
    */
-  def at(file: ScalaFile, offset: Int): Option[Signatures] = HostLock.query {
-    Using.resource(new RequestEditor(file.getViewProvider.getDocument, file.getProject, offset)) { editor =>
-      LanguageParameterInfo.INSTANCE.allForLanguage(file.getLanguage).asScala.iterator
-        .map(handler => signatures(handler, file, editor.editor, offset))
-        .collectFirst { case Some(found) => found }
+  def at(file: PsiFile, offset: Int): Option[Signatures] = HostLock.query {
+    file match {
+      case javaFile: PsiJavaFile => inJava(javaFile, offset)
+      case _ =>
+        Using.resource(new RequestEditor(file.getViewProvider.getDocument, file.getProject, offset)) { editor =>
+          LanguageParameterInfo.INSTANCE.allForLanguage(file.getLanguage).asScala.iterator
+            .map(handler => signatures(handler, file, editor.editor, offset))
+            .collectFirst { case Some(found) => found }
+        }
     }
   }
 
+  /**
+   * Renders the overloads of the Java call around an offset through the handler's read-only API.
+   *
+   * The handler's editor path updates the hint with the editor's parameter-name inlays (`Editor.isDisposed`,
+   * `ParameterHintsPresentationManager`) and reads the caret, which the host has no editor to answer. The read-only
+   * API returns the same texts, parameter ranges, overload and parameter, from the file and offset alone. It carries
+   * neither which overloads fit the arguments nor which are deprecated, so those are reported as applicable and not
+   * deprecated.
+   */
+  private def inJava(file: PsiJavaFile, offset: Int): Option[Signatures] =
+    Option(JavaHandler.getParameterInfo(file, offset)).map { info =>
+      val items = info.getSignaturePresentationList.asScala.toSeq.map(javaSignature)
+
+      Signatures(items, Option(info.getCurrentSignatureIndex).map(_.intValue))
+    }
+
+  /** One Java overload's label, with the range of the parameter the call's current argument fills, if any. */
+  private def javaSignature(presentation: JavaSignaturePresentation): Signature = {
+    val current = for {
+      index <- Option(presentation.getCurrentParameterIndex)
+      parameter <- presentation.getParameterRangeList.asScala.lift(index.intValue)
+    } yield new TextRange(parameter.getRange.getFrom.intValue, parameter.getRange.getTo.intValue)
+
+    Signature(presentation.getLabel, current, applicable = true, deprecated = false)
+  }
+
   /** Runs one plugin handler's creation and update steps, keeping only the items it renders. */
-  private def signatures(handler: ParameterInfoHandler[?, ?], file: ScalaFile, editor: Editor,
+  private def signatures(handler: ParameterInfoHandler[?, ?], file: PsiFile, editor: Editor,
                          offset: Int): Option[Signatures] = {
     // The handler's owner and item types are those of what it finds itself: it only gets back its own objects.
     val typed = handler.asInstanceOf[ParameterInfoHandler[PsiElement, AnyRef]]
@@ -90,7 +125,7 @@ object ParameterInfo {
   }
 
   /** What the IDE's hint keeps between its updates: the call, the current parameter and the highlighted overload. */
-  private final class HintState(file: ScalaFile, editor: Editor, offset: Int, var owner: PsiElement,
+  private final class HintState(file: PsiFile, editor: Editor, offset: Int, var owner: PsiElement,
                                 items: Seq[AnyRef]) {
     var currentParameter = -1
     var highlighted: AnyRef = null

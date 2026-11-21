@@ -1,8 +1,13 @@
 package scalaanalyzer.language
 
 import com.intellij.codeHighlighting.TextEditorHighlightingPass
+import com.intellij.codeInsight.hints.settings.ParameterNameHintsSettings
+import com.intellij.codeInsight.hints.{HintInfo, InlayParameterHintsExtension, InlayParameterHintsProvider, MethodInfoExcludeListFilter}
+import com.intellij.lang.java.JavaLanguage
 import com.intellij.openapi.progress.ProgressManager
-import com.intellij.psi.PsiElement
+import com.intellij.openapi.util.TextRange
+import com.intellij.psi.util.PsiTreeUtil
+import com.intellij.psi.{PsiCall, PsiElement, PsiJavaFile}
 import org.jetbrains.plugins.scala.annotator.hints.Hint.HintPosition
 import org.jetbrains.plugins.scala.annotator.hints.{AnnotatorHints, Hint, Text}
 import org.jetbrains.plugins.scala.codeInsight.ScalaCodeInsightSettings
@@ -21,10 +26,10 @@ import scala.jdk.CollectionConverters.*
 import scala.util.Using
 
 /**
- * Collects inline hints from the Scala plugin's own editor pass.
+ * Collects inline hints from the Scala plugin's own editor pass, and Java parameter-name hints from the Java plugin's.
  *
- * Includes inferred types, parameter names, implicit/using arguments, conversions, method chains and type arguments.
- * Range hints requiring desktop editor presentations are excluded, also in X-Ray mode.
+ * Scala hints include inferred types, parameter names, implicit/using arguments, conversions, method chains and type
+ * arguments. Range hints requiring desktop editor presentations are excluded, also in X-Ray mode.
  */
 object InlayHints {
 
@@ -169,6 +174,46 @@ object InlayHints {
       }
       (ordinary ++ methodChains(pass)).sortBy(_.offset)
     }
+  }
+
+  /**
+   * Collects the Java plugin's parameter-name hints for the calls within a range.
+   *
+   * Applies what the IDE's Java collector applies: the provider's options, and its exclusion list (the default list
+   * with the user's changes, which the host has none of) for the hints that the list governs. The IDE's last
+   * step, the extensions that suppress hints by file, has no implementation in the host. Collection runs under a
+   * cancellable host read.
+   *
+   * @param file Java source to query
+   * @param range UTF-16 range whose hints are wanted
+   * @return the hints whose offset lies within the range, in document order, preserving collection order at equal
+   *         offsets. Each label is the parameter name and a colon, as the IDE draws it
+   */
+  def inJava(file: PsiJavaFile, range: TextRange): Seq[InlayHint] = HostLock.query {
+    val provider = InlayParameterHintsExtension.INSTANCE.forLanguage(JavaLanguage.INSTANCE)
+    val exclusions = ParameterNameHintsSettings.getInstance.getExcludeListDiff(JavaLanguage.INSTANCE)
+      .applyOn(provider.getDefaultBlackList)
+    val filter = new MethodInfoExcludeListFilter(exclusions)
+
+    PsiTreeUtil.findChildrenOfType(file, classOf[PsiCall]).asScala.toSeq
+      .filter(_.getTextRange.intersects(range))
+      .flatMap(javaHints(provider, filter, _))
+      .filter(hint => range.contains(hint.offset))
+      .sortBy(_.offset)
+  }
+
+  /** The hints of one call that the exclusion list lets through. */
+  private def javaHints(provider: InlayParameterHintsProvider, filter: MethodInfoExcludeListFilter,
+                        call: PsiCall): Seq[InlayHint] = {
+    val hints = provider.getParameterHints(call).asScala.toSeq
+    // As the IDE's collector: only a method's own hints are matched against the list.
+    lazy val listed = Option(provider.getHintInfo(call, call.getContainingFile)).forall {
+      case _: HintInfo.OptionInfo => true
+      case info => filter.showHint(info)
+    }
+
+    hints.filter(hint => !hint.isFilterByExcludeList || listed)
+      .map(hint => InlayHint(hint.getOffset, Seq(Text(s"${hint.getText}:")), annotation = None))
   }
 
   /** The hint's parts, including nested parts when the IDE's implicit-hint expansion toggle is on. */
