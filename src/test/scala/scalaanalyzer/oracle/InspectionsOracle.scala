@@ -143,7 +143,7 @@ object InspectionsOracle {
           // The plugin's bundles are resources of the jars that the inspection's class is loaded from.
           loader = Class.forName(bean.implementation).getClassLoader
           values <- classValues(chain, loader)
-        } yield Setup(bean, ModuleSpec(s"inspections-${version.minor}", version.minor, Seq.empty, classpath), loader, values)
+        } yield Setup(bean, ModuleSpec(s"inspections-${version.minor}", Some(version.minor), Seq.empty, classpath), loader, values)
 
         tests.flatMap { method =>
           val calls = PsiTreeUtil.findChildrenOfType(method, classOf[ScMethodCall]).asScala.toVector

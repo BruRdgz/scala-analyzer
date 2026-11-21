@@ -19,7 +19,13 @@
     "scala-lang.scala"
   ],
   "activationEvents": [
-    "onLanguage:scala"
+    "onLanguage:scala",
+    "onLanguage:java",
+    "workspaceContains:pom.xml",
+    "workspaceContains:build.gradle",
+    "workspaceContains:build.gradle.kts",
+    "workspaceContains:settings.gradle",
+    "workspaceContains:settings.gradle.kts"
   ],
   "main": "./extension.js",
   "contributes": {
@@ -35,6 +41,11 @@
           "type": "string",
           "default": "",
           "description": "JDK 25 home for the server. Empty: the JAVA_HOME of VS Code's environment."
+        },
+        "scalaAnalyzer.buildJavaHome": {
+          "type": "string",
+          "default": "",
+          "description": "The JDK that runs Maven and Gradle for the import. Empty: the JAVA_HOME VS Code was started with."
         },
         "scalaAnalyzer.debugLog": {
           "type": "boolean",
@@ -100,7 +111,7 @@
             "enum": [
               "compile"
             ],
-            "description": "The build task to run: compile builds every Scala target and reports its diagnostics in the Problems panel."
+            "description": "The build task to run: compile builds every build target and reports its diagnostics in the Problems panel."
           }
         }
       }

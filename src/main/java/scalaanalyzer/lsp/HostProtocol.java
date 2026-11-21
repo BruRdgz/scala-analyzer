@@ -62,7 +62,7 @@ public final class HostProtocol {
     /** The target's display name, which several targets may share. */
     public final String name;
 
-    /** The Scala version the target is compiled with. */
+    /** The Scala version the target is compiled with, or {@code null} for a Java target. */
     public final String scalaVersion;
 
     /** The identities of the targets this one directly depends on, in the build's order. */
@@ -79,7 +79,7 @@ public final class HostProtocol {
      *
      * @param id the target's stable identity
      * @param name the target's display name
-     * @param scalaVersion the Scala version the target is compiled with
+     * @param scalaVersion the Scala version the target is compiled with, or {@code null} for a Java target
      * @param dependsOn identities of the targets this one directly depends on
      * @param libraries absolute paths of the jar files on the target's classpath
      * @param sourceFileCount number of project sources that belong to the target

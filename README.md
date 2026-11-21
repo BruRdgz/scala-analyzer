@@ -51,8 +51,8 @@ See [known limitations](#known-limitations) for the supported boundaries of thes
 | --- | --- |
 | Runtime | **JDK 25** for the language server. |
 | Platforms | Linux x64, macOS Intel and macOS Apple Silicon. |
-| Languages | Scala 2 and Scala 3; partial Java support in mixed Scala/Java projects. |
-| Build import | A BSP connection file under `.bsp/`; integration tests use sbt builds. |
+| Languages | Scala 2 and Scala 3; Java in mixed Scala/Java projects, and in Maven and Gradle projects with Java sources only. Java support has the [limits listed below](#known-limitations). |
+| Build import | A BSP connection file under `.bsp/` (sbt), or a Maven or Gradle build imported through [Bloop](https://scalacenter.github.io/bloop/), which must be on the `PATH`. |
 | Editors | The included VS Code extension, or an LSP client that launches the server over stdio. |
 
 The server uses one workspace root per process. Your project's build can use its own required JDK.
@@ -83,6 +83,26 @@ sbt bspConfig
 ```
 
 This creates the BSP connection under `.bsp/`. The server expects one connection file.
+
+For Maven and Gradle, install [Bloop](https://scalacenter.github.io/bloop/) so that `bloop` is on the `PATH`, and
+open the project's root. The root must hold either a `pom.xml` (Maven) or a `settings.gradle`, `settings.gradle.kts`,
+`build.gradle` or `build.gradle.kts` (Gradle), not both, and no `.bsp/` connection files: those take precedence. The
+server imports the project the way an IDE does:
+
+- It runs the build tool's Bloop install step in the root: `./mvnw` or `mvn` with `ch.epfl.scala:bloop-maven-plugin`'s
+  `bloopInstall`, or `./gradlew` or `gradle` with an init script that applies the Bloop Gradle plugin. Your build files
+  are not edited, and the wrappers are used when they are executable files in the root. This writes a `.bloop/`
+  directory into the project, which you can ignore in version control, and needs network access the first time to
+  fetch the plugin.
+- It starts `bloop bsp` and connects to it over a Unix socket. The Bloop server keeps running after the editor closes,
+  like sbt's; stop it with `bloop exit`.
+- When a `pom.xml`, a Gradle script, `gradle.properties` or `gradle/libs.versions.toml` changes, it runs the install
+  step again and imports the project again.
+
+The build tool runs with the server's environment. To run it on another JDK than the server's JDK 25, which older
+Gradle versions cannot run on, set `SCALA_ANALYZER_BUILD_JAVA_HOME` to that JDK's home; it becomes the tool's
+`JAVA_HOME`. The VS Code setting `scalaAnalyzer.buildJavaHome` sets it, and when it is empty the extension passes the
+`JAVA_HOME` that VS Code was started with.
 
 ### 3. Connect your editor
 
@@ -146,6 +166,7 @@ changed sources, and imports the build again when sources are created or deleted
 | --- | --- | --- |
 | `JAVA_HOME` | JDK used to run the server | `java` on `PATH` |
 | `SCALA_ANALYZER_STATE` | State, logs, formatter cache, library source files and the library index cache | `$XDG_CACHE_HOME/scala-analyzer`, or `~/.cache/scala-analyzer` |
+| `SCALA_ANALYZER_BUILD_JAVA_HOME` | JDK that runs Maven and Gradle for the import (set as the tool's `JAVA_HOME`) | The server's environment |
 | `SCALA_ANALYZER_HEAP` | Maximum JVM heap | `2g` |
 | `SCALA_ANALYZER_LOG` | Set to `debug` to log every request's timing, each file's inspection times and each library jar's cache use | Informational logging |
 
@@ -155,8 +176,8 @@ Whole-file formatting uses the nearest `.scalafmt.conf` between the source file 
 must declare a formatter version; missing dependencies are downloaded from Maven Central and cached locally.
 Project exclusion filters apply. Without a config, and for range requests, the IntelliJ formatter is used.
 
-When the client supports dynamic file watchers, changes to sbt build definitions and source-file creation or deletion
-trigger a reimport. Unsaved source text is preserved.
+When the client supports dynamic file watchers, changes to build definitions (sbt files, `pom.xml`, Gradle scripts,
+`gradle.properties` and `gradle/libs.versions.toml`) and source-file creation or deletion trigger a reimport. Unsaved source text is preserved.
 
 ### Running tests
 
@@ -190,8 +211,8 @@ If a reimport fails after host updates have begun, restart the server; see the r
 
 ## Known limitations
 
-Some searches, inspections and editor actions have a narrower scope than the full IntelliJ IDE. Mixed Java support
-is partial, indexes are kept in memory, and each process serves one workspace.
+Some searches, inspections and editor actions have a narrower scope than the full IntelliJ IDE. Java support is
+partial, indexes are kept in memory, and each process serves one workspace.
 
 <details>
 <summary><strong>Search, editing, performance and recovery details</strong></summary>

@@ -552,12 +552,13 @@ final class ScalaPsiHost private[scalaanalyzer] (
   /**
    * Adds a module as an IDE module after a build import: the jars of its classpath are mounted and indexed (each
    * jar once, however many modules use it), its Scala version becomes a Scala SDK library and its compiler options
-   * a compiler-settings profile, from which the plugin derives the module's language features.
+   * a compiler-settings profile, from which the plugin derives the module's language features. A Java module (no
+   * Scala version) gets neither.
    * Classpath entries must be jars; the class directories of other modules are given by `dependsOn`.
    *
    * Takes the write lock itself.
    *
-   * @param spec the module's identity, Scala version, compiler options, classpath and dependencies
+   * @param spec the module's identity, Scala version (none for Java), compiler options, classpath and dependencies
    * @return the registered host module
    * @throws IllegalArgumentException when a classpath entry is not a jar
    */
@@ -573,31 +574,39 @@ final class ScalaPsiHost private[scalaanalyzer] (
     hostModule.module = newModule(hostModule)
 
     modules.add(hostModule)
-    org.jetbrains.plugins.scala.project.settings.ScalaCompilerConfiguration.instanceIn(project).configureSettingsForModule(
-      spec.stableId, "bsp",
-      org.jetbrains.plugins.scala.project.settings.ScalaCompilerSettings.fromOptions(
-        spec.scalacOptions, org.jetbrains.plugins.scala.compiler.data.CompileOrder.Mixed))
-    org.jetbrains.plugins.scala.project.settings.ScalaCompilerConfiguration.incModificationCount()
+    // A Java module has no Scala compiler settings.
+    if (spec.scalaVersion.isDefined) {
+      org.jetbrains.plugins.scala.project.settings.ScalaCompilerConfiguration.instanceIn(project).configureSettingsForModule(
+        spec.stableId, "bsp",
+        org.jetbrains.plugins.scala.project.settings.ScalaCompilerSettings.fromOptions(
+          spec.scalacOptions, org.jetbrains.plugins.scala.compiler.data.CompileOrder.Mixed))
+      org.jetbrains.plugins.scala.project.settings.ScalaCompilerConfiguration.incModificationCount()
+    }
 
     psiChanged()
     hostModule
   }
 
-  /** The IDE `Module` of a host module; its only order entry is the Scala SDK, and scopes come from [[ModuleModel]]. */
+  /**
+   * The IDE `Module` of a host module; its only order entry is the Scala SDK, which a Java module lacks, and scopes
+   * come from [[ModuleModel]].
+   */
   private def newModule(hostModule: HostModule): Module = {
     val data = new UserDataHolderBase
-    val sdkProperties = org.jetbrains.plugins.scala.project.ScalaLibraryProperties(
-      Some(hostModule.spec.scalaVersion), Seq.empty, Seq.empty, None, org.jetbrains.plugins.scala.project.ReplClasspath.Bundled)
 
     // The SDK library carries the module's Scala version; the classpath jars are not presented as libraries.
-    lazy val scalaSdk: com.intellij.openapi.roots.impl.libraries.LibraryEx =
+    lazy val scalaSdk: Option[com.intellij.openapi.roots.impl.libraries.LibraryEx] = hostModule.spec.scalaVersion.map { version =>
+      val sdkProperties = org.jetbrains.plugins.scala.project.ScalaLibraryProperties(
+        Some(version), Seq.empty, Seq.empty, None, org.jetbrains.plugins.scala.project.ReplClasspath.Bundled)
+
       tableProxy(classOf[com.intellij.openapi.roots.impl.libraries.LibraryEx], "ScalaSdkLibrary") {
         // ScalaModuleSettings reads the compiler version from the library name, as for an imported "scala-sdk-x.y.z".
-        case ("getName", _) => s"scala-sdk-${hostModule.spec.scalaVersion}"
+        case ("getName", _) => s"scala-sdk-$version"
         case ("getKind", _) => org.jetbrains.plugins.scala.project.ScalaLibraryType.Kind
         case ("getProperties", _) => sdkProperties
         case ("isDisposed", _) => java.lang.Boolean.FALSE
       }
+    }
 
     lazy val orderEntries: com.intellij.openapi.roots.OrderEnumerator = new Host_OrderEnumerator(dispatch {
       // Filters that keep libraries leave the one entry in place.
@@ -606,7 +615,8 @@ final class ScalaPsiHost private[scalaanalyzer] (
             | "OrderEnumerator.productionOnly", _) => orderEntries
       case ("OrderEnumerator.forEachLibrary", Array(p: com.intellij.util.Processor[?])) =>
         // The processor is typed `?` by the pattern; `forEachLibrary` hands it libraries, which is all this one gets.
-        p.asInstanceOf[com.intellij.util.Processor[com.intellij.openapi.roots.libraries.Library]].process(scalaSdk); null
+        val processor = p.asInstanceOf[com.intellij.util.Processor[com.intellij.openapi.roots.libraries.Library]]
+        scalaSdk.foreach(processor.process); null
     })
 
     lazy val rootManager: com.intellij.openapi.roots.ModuleRootManager = new Host_ModuleRootManager(dispatch {

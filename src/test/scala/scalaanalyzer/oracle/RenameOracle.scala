@@ -65,8 +65,8 @@ object RenameOracle {
     val library3 = Path.of(classOf[Mirror].getProtectionDomain.getCodeSource.getLocation.toURI)
     host.addLibrary(library)
     host.addLibrary(library3)
-    val module2 = host.addModule(ModuleSpec("rename-oracle-2", "2.13.18", Seq.empty, Seq(library)))
-    val module3 = host.addModule(ModuleSpec("rename-oracle-3", "3.9.0", Seq.empty, Seq(library, library3)))
+    val module2 = host.addModule(ModuleSpec("rename-oracle-2", Some("2.13.18"), Seq.empty, Seq(library)))
+    val module3 = host.addModule(ModuleSpec("rename-oracle-3", Some("3.9.0"), Seq.empty, Seq(library, library3)))
     val started = System.nanoTime()
     val results = cases.map { c =>
       val errorsBefore = HostLog.count(HostLog.Level.Error)

@@ -46,12 +46,12 @@ object CompletionOracle {
     ))
     host.addJdk(Path.of(System.getProperty("java.home")))
     host.addLibrary(Path.of(sys.props("scalaanalyzer.fixture.scalaLibrary")))
-    val module = host.addModule(ModuleSpec("completion-oracle", "2.13.18", Seq.empty,
+    val module = host.addModule(ModuleSpec("completion-oracle", Some("2.13.18"), Seq.empty,
       Seq(Path.of(sys.props("scalaanalyzer.fixture.scalaLibrary")))))
     lazy val importModule = {
       val library = Path.of(sys.props("scalaanalyzer.fixture.scalaLibrary212"))
       host.addLibrary(library)
-      host.addModule(ModuleSpec("auto-import-oracle", "2.12.21", Seq.empty, Seq(library)))
+      host.addModule(ModuleSpec("auto-import-oracle", Some("2.12.21"), Seq.empty, Seq(library)))
     }
     val only = flags.collectFirst { case f if f.startsWith("--only=") => f.stripPrefix("--only=").split(',').toSet }
     val cases = host.read(collect(host, pluginRoot) ++ collectMethods(host, pluginRoot) ++ collectImports(pluginRoot)).filter(c => only.forall(_.contains(c.name)))

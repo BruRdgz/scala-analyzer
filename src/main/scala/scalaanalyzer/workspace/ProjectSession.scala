@@ -864,7 +864,8 @@ final class ProjectSession private (
       val moduleId = spec.stableId
 
       progress(s"module ${spec.name} ($moduleId): ${spec.classpath.size} jars, ${nextModule.sources.size} sources")
-      HostLog.timed(s"module ${spec.name} ($moduleId, Scala ${spec.scalaVersion}, ${spec.classpath.size} jars) added") {
+      val language = spec.scalaVersion.fold("Java")(version => s"Scala $version")
+      HostLog.timed(s"module ${spec.name} ($moduleId, $language, ${spec.classpath.size} jars) added") {
         beforeHostMutation()
         host.addModule(spec)
       }
@@ -906,7 +907,7 @@ final class ProjectSession private (
       HostLog.info(s"library sources attached to ${plan.librarySourcesByJar.size} of ${plan.classpathJarsToFetchSources.size} jars")
 
     imported = plan.orderedModules
-    compileSpecs = plan.orderedModules.map(module => module.spec.stableId -> module.compile).toMap
+    compileSpecs = plan.orderedModules.flatMap(module => module.compile.map(module.spec.stableId -> _)).toMap
     sourcesAskedFor ++= plan.classpathJarsToFetchSources
     lastImportedSnapshot = ProjectSession.Snapshot(imported.size, files.size)
     HostLog.info(s"${openedSourceCount} sources opened, ${closedSourceCount} closed, ${files.size} in all")
@@ -962,7 +963,7 @@ final class ProjectSession private (
    * @return whether the build compiled, the number of errors and warnings of the compiled targets and their
    *         dependencies (in registered sources or not), and the registered sources whose stored diagnostics changed
    *         and may need republishing
-   * @throws BspImport.UnknownTarget when `target` is not a Scala target of the build
+   * @throws BspImport.UnknownTarget when `target` is not an imported target of the build
    * @throws IllegalStateException when the session is closed or unavailable
    */
   def compileBuild(target: Option[String] = None): ProjectSession.BuildCompilation = buildLock.synchronized {
@@ -1092,7 +1093,7 @@ object ProjectSession {
    *
    * @param id stable identity of the module, which is its BSP target URI
    * @param name display name, which several targets may share
-   * @param scalaVersion Scala version of the target
+   * @param scalaVersion Scala version of the target; none for a Java target
    * @param dependsOn stable identities of the modules this one directly depends on
    * @param libraries jars on the target's classpath; the class output of other targets is not among them
    * @param sourceFileCount number of project sources the build assigns to the target
@@ -1100,7 +1101,7 @@ object ProjectSession {
   final case class TargetSummary(
     id: String,
     name: String,
-    scalaVersion: String,
+    scalaVersion: Option[String],
     dependsOn: Seq[String],
     libraries: Seq[Path],
     sourceFileCount: Int,
@@ -1134,7 +1135,7 @@ object ProjectSession {
    * Any host mutations already performed remain in the process-scoped host.
    *
    * @param host initialized process-scoped host receiving the workspace modules and sources
-   * @param root workspace directory containing the BSP connection definitions
+   * @param root workspace directory containing the BSP connection definitions, or a Maven or Gradle build
    * @param connection optional BSP connection-file name without its `.json` suffix; required if several exist
    * @param progress callback invoked synchronously on the calling thread as each stage starts; defaults to a no-op
    * @return the session with its initial import completed; the caller owns it and must close it

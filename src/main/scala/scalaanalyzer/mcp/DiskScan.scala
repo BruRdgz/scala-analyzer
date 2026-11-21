@@ -15,8 +15,9 @@ import scala.util.Using
  *
  * It looks at the `.scala` and `.java` files under the session's source directories, and at the files that define
  * the build (see `BuildDefinition.isPart`): the `.sbt` files in the root, its `project` directory and the modules'
- * base directories, and the `.scala` and `build.properties` files in the `project` directory. A file counts as
- * changed when its modification time or size differs.
+ * base directories, and the `.scala` and `build.properties` files in the `project` directory. For Maven and Gradle
+ * it looks at `pom.xml`, `*.gradle`, `*.gradle.kts` and `gradle.properties` in the root and the modules' base
+ * directories, and at `gradle/libs.versions.toml` in the root. A file counts as changed when its modification time or size differs.
  *
  * Not thread safe: one scan runs at a time, and what a scan leaves is visible to the next thread that scans after it.
  *
@@ -62,7 +63,9 @@ private[mcp] final class DiskScan(root: Path) {
     val project = root.resolve("project")
     val buildFiles =
       Seq(root -> "*.sbt", project -> "*.sbt", project -> "*.scala", project -> "build.properties") ++
-        session.moduleBaseDirectories.map(_ -> "*.sbt")
+        session.moduleBaseDirectories.map(_ -> "*.sbt") ++
+        (root +: session.moduleBaseDirectories).flatMap(directory => DiskScan.MavenAndGradleGlobs.map(directory -> _)) :+
+        (root.resolve("gradle") -> "libs.versions.toml")
     val files = session.sourceDirectories.flatMap(sourcesUnder) ++
       buildFiles.distinct.flatMap((directory, glob) => listed(directory, glob))
 
@@ -112,6 +115,9 @@ private[mcp] final class DiskScan(root: Path) {
 
 /** The values a [[DiskScan]] exchanges with its caller. */
 private[mcp] object DiskScan {
+  /** Names of the files that define a Maven or Gradle build, as globs of the directory that holds them. */
+  private val MavenAndGradleGlobs = Seq("pom.xml", "*.gradle", "*.gradle.kts", "gradle.properties")
+
   /**
    * What identifies a file's content cheaply: files with the same stamp are taken to have the same content.
    *

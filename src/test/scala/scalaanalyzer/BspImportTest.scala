@@ -1,9 +1,12 @@
 package scalaanalyzer
 
-import ch.epfl.scala.bsp4j.{BuildTargetIdentifier, SourceItem, SourceItemKind, SourcesItem}
+import ch.epfl.scala.bsp4j.{
+  BuildTarget, BuildTargetCapabilities, BuildTargetDataKind, BuildTargetIdentifier, SourceItem, SourceItemKind, SourcesItem,
+}
 import com.google.gson.JsonObject
 import com.intellij.lang.annotation.HighlightSeverity
 
+import scalaanalyzer.build.BspImport.TargetKind
 import scalaanalyzer.build.{BspImport, CompileSpec, DocumentCompiler, ImportedModule}
 import scalaanalyzer.platform.{CallLog}
 
@@ -33,6 +36,28 @@ class BspImportTest extends munit.FunSuite {
     assert(sbtServerListening(), "closing the connection stopped the sbt server")
   }
 
+  test("a build target is imported as Scala, as Java or not at all, by its data kind and languages") {
+    def target(dataKind: String, languages: String*) = {
+      val built = new BuildTarget(
+        new BuildTargetIdentifier("file:///target"), java.util.List.of(), languages.asJava, java.util.List.of(),
+        new BuildTargetCapabilities())
+      built.setDataKind(dataKind)
+      built
+    }
+
+    val cases = Seq(
+      target(BuildTargetDataKind.SCALA, "scala") -> TargetKind.Scala,
+      target(BuildTargetDataKind.JVM, "java") -> TargetKind.Java,
+      target(null, "java") -> TargetKind.Java,
+      target(BuildTargetDataKind.SBT, "scala") -> TargetKind.NotImported,
+      target(null, "kotlin") -> TargetKind.NotImported,
+    )
+
+    cases.foreach { (built, expected) =>
+      assertEquals(BspImport.classify(built), expected, s"${built.getDataKind} ${built.getLanguageIds}")
+    }
+  }
+
   // The server reads the request and exits, as sbt does when the build fails to load.
   test("a build server that exits without answering fails the connection at once, not at the timeout") {
     val project = Files.createTempDirectory("scala-analyzer-exiting-server")
@@ -56,7 +81,7 @@ class BspImportTest extends munit.FunSuite {
     val app = module("app")
     assert(app.spec.identity.exists(_ == app.spec.stableId), app.spec)
     assert(app.spec.stableId != app.spec.name, app.spec)
-    assertEquals(app.spec.scalaVersion, "2.13.18")
+    assertEquals(app.spec.scalaVersion, Some("2.13.18"))
     assertEquals(app.spec.dependsOn, Seq(module("core").spec.stableId))
     assertEquals(imported.map(_.spec.stableId).distinct.size, imported.size)
     assert(app.spec.scalacOptions.contains("-Xsource:3"), app.spec.scalacOptions)
@@ -90,7 +115,7 @@ class BspImportTest extends munit.FunSuite {
   test("module ordering rejects duplicate identities, unknown dependencies and ambiguous shared sources") {
     val compile = CompileSpec("2.13.18", Seq.empty, Seq.empty, Path.of("/classes"), Seq.empty)
     def target(name: String, id: String, dependencies: Seq[String] = Seq.empty, sources: Seq[Path] = Seq.empty) =
-      ImportedModule(ModuleSpec(name, "2.13.18", Seq.empty, Seq.empty, dependsOn = dependencies, identity = Some(id)), sources, compile)
+      ImportedModule(ModuleSpec(name, Some("2.13.18"), Seq.empty, Seq.empty, dependsOn = dependencies, identity = Some(id)), sources, Some(compile))
 
     val duplicate = intercept[IllegalArgumentException] {
       BspImport.dependenciesFirst(Seq(target("first", "duplicate"), target("second", "duplicate")))
@@ -134,11 +159,11 @@ class BspImportTest extends munit.FunSuite {
     // The module's class output holds its other files' classes (Greet3), which the document uses.
     Using.resource(BspImport.connect(fixture))(_.compile())
     Using.resource(new DocumentCompiler) { compiler =>
-      def errors(text: String) = compiler.compile(core3.compile, "Use.scala", text).filter(_.severity == HighlightSeverity.ERROR)
+      def errors(text: String) = compiler.compile(core3.compile.get, "Use.scala", text).filter(_.severity == HighlightSeverity.ERROR)
 
       assertEquals(errors("package core3\n\nobject Use:\n  val s: String = Greet3.hello(\"x\")\n"), Seq.empty)
       // The error alone: not the compiler's summary of the run ("1 error found").
-      val mismatch = compiler.compile(core3.compile, "Use.scala", "package core3\n\nobject Use:\n  val n: Int = Greet3.hello(\"x\")\n")
+      val mismatch = compiler.compile(core3.compile.get, "Use.scala", "package core3\n\nobject Use:\n  val n: Int = Greet3.hello(\"x\")\n")
       assertEquals(mismatch.map(d => (d.severity, d.start.line)), Seq((HighlightSeverity.ERROR, 3)))
       assert(mismatch.head.message.contains("Required: Int"), mismatch)
     }

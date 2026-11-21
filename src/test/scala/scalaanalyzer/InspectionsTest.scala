@@ -11,7 +11,7 @@ class InspectionsTest extends munit.FunSuite {
   private def host = TestHost.host
   private lazy val module = {
     TestHost.libraryReport
-    host.addModule(ModuleSpec("inspections", "2.13.18", Seq.empty,
+    host.addModule(ModuleSpec("inspections", Some("2.13.18"), Seq.empty,
       Seq(Path.of(sys.props("scalaanalyzer.fixture.scalaLibrary")))))
   }
 
@@ -55,7 +55,7 @@ class InspectionsTest extends munit.FunSuite {
   }
 
   test("Scala 3 inspections supplement compiler highlighting without build warning flags") {
-    val scala3 = host.addModule(ModuleSpec("inspections3", "3.3.4", Seq.empty,
+    val scala3 = host.addModule(ModuleSpec("inspections3", Some("3.3.4"), Seq.empty,
       Seq(Path.of(sys.props("scalaanalyzer.fixture.scalaLibrary")))))
     val text = "object Inspect3:\n  private val dead = 1\n  def f(b: Boolean): Boolean = b == true\n"
     val file = host.openFile(Path.of("/inspections3/Inspect3.scala"), text, scala3).asInstanceOf[ScalaFile]

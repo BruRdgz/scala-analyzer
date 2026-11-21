@@ -24,11 +24,12 @@ final case class CompileSpec(
 )
 
 /**
- * A Scala build target with its sources and compiler settings.
+ * An imported build target, Scala or Java, with its sources and compiler settings.
  *
  * @param spec host module identity, dependencies and PSI settings
  * @param sources Scala and Java source paths owned by the target
- * @param compile settings for compiling current document text
+ * @param compile settings for compiling current document text; none for a Java target, which the document compiler
+ *                does not serve
  * @param generatedSources the part of `sources` the build marks as generated; empty when it marks none
  * @param sourceDirectories the directories the build lists as source entries: a file created in one is a source of
  *                          the module once the build is imported again
@@ -38,7 +39,7 @@ final case class CompileSpec(
 final case class ImportedModule(
   spec: ModuleSpec,
   sources: Seq[Path],
-  compile: CompileSpec,
+  compile: Option[CompileSpec],
   generatedSources: Set[Path] = Set.empty,
   sourceDirectories: Seq[Path] = Seq.empty,
   baseDirectory: Option[Path] = None,

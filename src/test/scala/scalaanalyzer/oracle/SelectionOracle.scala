@@ -41,7 +41,7 @@ object SelectionOracle {
       scalaPluginJars = sys.props("scalaanalyzer.scalaPluginJars").split(File.pathSeparator).toSeq.map(Path.of(_)),
       unitTestMode = true,
     ))
-    val module = host.addModule(ModuleSpec("selection-oracle", "2.13.18", Seq.empty, Seq.empty))
+    val module = host.addModule(ModuleSpec("selection-oracle", Some("2.13.18"), Seq.empty, Seq.empty))
     val results = cases.map { c =>
       val errorsBefore = HostLog.count(HostLog.Level.Error)
       val result = runCase(host, module, c)

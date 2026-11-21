@@ -9,7 +9,9 @@ import org.eclipse.lsp4j.jsonrpc.services.JsonNotification
 import scalaanalyzer.{LineColumn, ModuleSpec}
 import scalaanalyzer.platform.HostLog
 
+import java.io.{InputStream, OutputStream}
 import java.net.URI
+import java.nio.channels.Channels
 import java.nio.file.{Files, Path}
 import java.util.concurrent.{CompletableFuture, ConcurrentHashMap, ExecutionException, TimeUnit}
 import java.util.concurrent.atomic.AtomicBoolean
@@ -21,11 +23,11 @@ import scala.util.Using
 import scala.util.control.NonFatal
 
 /**
- * Imports and compiles Scala modules over an initialized BSP connection.
+ * Imports and compiles modules over an initialized BSP connection.
  *
- * Only Scala targets (data kind `scala`) become modules: sbt's own build definition targets are left out. Classpath
- * entries that are directories (the class output of other targets) are dropped, since target dependencies are
- * modules' `dependsOn`.
+ * Scala targets (data kind `scala`) and Java targets (see [[BspImport.classify]]) become modules: sbt's own build
+ * definition targets are left out. Classpath entries that are directories (the class output of other targets) are
+ * dropped, since target dependencies are modules' `dependsOn`.
  * Callers serialize requests and close the connection after use. Closing ends this client process while
  * leaving a build server shared by other clients available.
  *
@@ -35,6 +37,10 @@ import scala.util.control.NonFatal
  * @param client receives the diagnostics the server publishes; compiles return its snapshot
  * @param log file holding the client process's stderr, named in the error reported when the process exits early
  * @param timeoutMinutes deadline for each import or compile request
+ * @param release frees what the transport holds besides the process (a Bloop connection's socket channel and
+ *                directory); runs when the connection closes
+ * @param regenerate rewrites the build server's configuration from the build files, for a server that reads it from
+ *                   disk (Bloop: the build tool's install step); `None` for a server that loads the build itself
  */
 final class BuildConnection private[scalaanalyzer] (
   process: Process,
@@ -43,29 +49,31 @@ final class BuildConnection private[scalaanalyzer] (
   client: BspImport.DiagnosticsClient,
   log: Path,
   timeoutMinutes: Long,
+  release: () => Unit = () => (),
+  regenerate: Option[() => Unit] = None,
 ) extends AutoCloseable {
   import BspImport.gson
 
   /** Shutdown deadline: a local handshake needs seconds, not the minutes allowed for importing and compiling. */
   private val ShutdownDeadlineSeconds = 2L
   private val closed = new AtomicBoolean()
-  /** Caches Scala targets until a successful build reload. */
+  /** Caches the imported targets until a successful build reload. */
   @volatile private var targets: Option[Seq[BuildTarget]] = None
 
   /** Waits with the connection's import/compile deadline and reports early process exit with its log path. */
   private def await[T](f: CompletableFuture[T]): T = BspImport.await(process, log, f, timeoutMinutes)
 
-  /** Loads and caches Scala build targets until [[reload]] invalidates the build definition. */
-  private def scalaTargets: Seq[BuildTarget] = targets.getOrElse {
+  /** Loads and caches the build targets the host imports until [[reload]] invalidates the build definition. */
+  private def importedTargets: Seq[BuildTarget] = targets.getOrElse {
     val found = await(server.workspaceBuildTargets()).getTargets.asScala.toSeq
-      .filter(_.getDataKind == BuildTargetDataKind.SCALA)
+      .filter(BspImport.classify(_) != BspImport.TargetKind.NotImported)
       .sortBy(_.getId.getUri)
     targets = Some(found)
     found
   }
 
   /**
-   * Imports Scala targets, source ownership and compiler settings.
+   * Imports the build's Scala and Java targets, source ownership and compiler settings.
    *
    * Stable target URIs identify modules even when display names collide. Duplicate identities, shared sources,
    * missing dependencies and dependency cycles are rejected before a host can apply the result.
@@ -73,38 +81,41 @@ final class BuildConnection private[scalaanalyzer] (
    * @return imported modules ordered after their dependencies
    */
   def modules(): Seq[ImportedModule] = {
-    val buildTargets = scalaTargets
+    val buildTargets = importedTargets
     val ids = buildTargets.map(_.getId).asJava
-    val optionsById = await(server.buildTargetScalacOptions(new ScalacOptionsParams(ids))).getItems.asScala
-      .map(item => item.getTarget -> item).toMap
+    val optionsById = scalacOptionsById(buildTargets) ++ javacOptionsById(buildTargets)
     val sourcesById = await(server.buildTargetSources(new SourcesParams(ids))).getItems.asScala
       .map(item => item.getTarget -> item).toMap
     val nameById = buildTargets.map(t => t.getId -> BspImport.moduleName(t)).toMap
     val identityById = buildTargets.map(t => t.getId -> BspImport.targetIdentity(t)).toMap
 
     val imported = buildTargets.map { target =>
-      // bsp4j reads `BuildTarget.data` through lsp4j's JsonElementTypeAdapter, and `scalaTargets` keeps only
-      // targets whose data kind is `scala`, so the cast holds and the data decodes as a ScalaBuildTarget.
-      val scala = gson.fromJson(target.getData.asInstanceOf[JsonElement], classOf[ScalaBuildTarget])
+      // bsp4j reads `BuildTarget.data` through lsp4j's JsonElementTypeAdapter, and a target classified as Scala has
+      // data kind `scala`, so the cast holds and the data decodes as a ScalaBuildTarget.
+      val scala = Option.when(BspImport.classify(target) == BspImport.TargetKind.Scala)(
+        gson.fromJson(target.getData.asInstanceOf[JsonElement], classOf[ScalaBuildTarget]))
+      val optionsRequest = if (scala.isDefined) "buildTarget/scalacOptions" else "buildTarget/javacOptions"
       val options = optionsById.getOrElse(target.getId,
-        throw new IllegalStateException(s"build server sent no scalac options for ${target.getId.getUri}"))
-      val fullClasspath = options.getClasspath.asScala.toSeq.map(uri => Path.of(URI.create(uri)))
+        throw new IllegalStateException(s"build server sent no $optionsRequest result for ${target.getId.getUri}"))
       val spec = ModuleSpec(
         name = nameById(target.getId),
-        scalaVersion = scala.getScalaVersion,
-        scalacOptions = options.getOptions.asScala.toSeq,
-        classpath = fullClasspath.filter(p => Files.isRegularFile(p) && p.getFileName.toString.endsWith(".jar")),
-        // Dependencies on non-Scala targets have no module.
+        scalaVersion = scala.map(_.getScalaVersion),
+        scalacOptions = if (scala.isDefined) options.options else Seq.empty,
+        classpath = options.classpath.filter(p => Files.isRegularFile(p) && p.getFileName.toString.endsWith(".jar")),
+        // Dependencies on targets that are not imported have no module.
         dependsOn = target.getDependencies.asScala.toSeq.flatMap(identityById.get),
         identity = Some(identityById(target.getId)),
       )
-      val compile = CompileSpec(
-        scalaVersion = scala.getScalaVersion,
-        compilerJars = scala.getJars.asScala.toSeq.map(uri => Path.of(URI.create(uri))),
-        classpath = fullClasspath,
-        classDirectory = Path.of(URI.create(options.getClassDirectory)),
-        scalacOptions = options.getOptions.asScala.toSeq,
-      )
+      // The document compiler serves Scala only.
+      val compile = scala.map { scalaTarget =>
+        CompileSpec(
+          scalaVersion = scalaTarget.getScalaVersion,
+          compilerJars = scalaTarget.getJars.asScala.toSeq.map(uri => Path.of(URI.create(uri))),
+          classpath = options.classpath,
+          classDirectory = Path.of(URI.create(options.classDirectory)),
+          scalacOptions = options.options,
+        )
+      }
       val items = sourcesById.get(target.getId).toSeq
 
       ImportedModule(spec, items.flatMap(BspImport.sourceFiles), compile,
@@ -116,13 +127,42 @@ final class BuildConnection private[scalaanalyzer] (
     BspImport.dependenciesFirst(imported)
   }
 
+  /** Asks for the Scala options of the Scala targets among `targets`; sends no request when there are none. */
+  private def scalacOptionsById(targets: Seq[BuildTarget]): Map[BuildTargetIdentifier, BspImport.TargetOptions] = {
+    val ids = targets.filter(BspImport.classify(_) == BspImport.TargetKind.Scala).map(_.getId)
+
+    if (ids.isEmpty) Map.empty
+    else await(server.buildTargetScalacOptions(new ScalacOptionsParams(ids.asJava))).getItems.asScala.map { item =>
+      item.getTarget -> BspImport.TargetOptions(
+        item.getOptions.asScala.toSeq, item.getClasspath.asScala.toSeq.map(uri => Path.of(URI.create(uri))),
+        item.getClassDirectory)
+    }.toMap
+  }
+
+  /** Asks for the Java options of the Java targets among `targets`; sends no request when there are none. */
+  private def javacOptionsById(targets: Seq[BuildTarget]): Map[BuildTargetIdentifier, BspImport.TargetOptions] = {
+    val ids = targets.filter(BspImport.classify(_) == BspImport.TargetKind.Java).map(_.getId)
+
+    if (ids.isEmpty) Map.empty
+    else await(server.buildTargetJavacOptions(new JavacOptionsParams(ids.asJava))).getItems.asScala.map { item =>
+      item.getTarget -> BspImport.TargetOptions(
+        item.getOptions.asScala.toSeq, item.getClasspath.asScala.toSeq.map(uri => Path.of(URI.create(uri))),
+        item.getClassDirectory)
+    }.toMap
+  }
+
   /**
    * Reloads the build definition and invalidates cached targets after success.
+   *
+   * A connection with a `regenerate` action (Bloop) runs it first, so the server's configuration matches the
+   * changed build files; the server re-reads that configuration by itself. Otherwise only a server that announced
+   * `canReload` is asked to reload; one that cannot only has its cached targets dropped.
    *
    * A failed reload leaves the cached targets intact; callers decide whether to retry the import.
    */
   def reload(): Unit = {
-    await(server.workspaceReload())
+    regenerate.foreach(_())
+    if (BspImport.canReload(capabilities)) await(server.workspaceReload())
     targets = None
   }
 
@@ -138,7 +178,7 @@ final class BuildConnection private[scalaanalyzer] (
   def librarySources(classpath: Set[Path]): Map[Path, Path] =
     if (!Option(capabilities.getDependencySourcesProvider).exists(_.booleanValue)) Map.empty
     else {
-      val params = new DependencySourcesParams(scalaTargets.map(_.getId).asJava)
+      val params = new DependencySourcesParams(importedTargets.map(_.getId).asJava)
       val result = await(server.buildTargetDependencySources(params))
       val sourceJars = result.getItems.asScala.toSeq
         .flatMap(_.getSources.asScala)
@@ -155,24 +195,24 @@ final class BuildConnection private[scalaanalyzer] (
     }
 
   /**
-   * Requests an incremental compile of every Scala target.
+   * Requests an incremental compile of every imported target.
    *
    * Diagnostics are published during the request and retained across compiles according to BSP reset flags.
    * A compile error response is treated as a failed compile; other connection failures propagate.
    *
    * @return compile success, the latest published compiler diagnostics by file, and those of the compiled targets
    */
-  def compile():scalaanalyzer.build.CompileResult = compileTargets(scalaTargets.map(_.getId))
+  def compile():scalaanalyzer.build.CompileResult = compileTargets(importedTargets.map(_.getId))
 
   /**
-   * Requests an incremental compile of one Scala target, with the diagnostic and error handling of a build compile.
+   * Requests an incremental compile of one imported target, with the diagnostic and error handling of a build compile.
    * An unknown target URI is rejected with `BspImport.UnknownTarget`.
    *
-   * @param target BSP target URI of an imported Scala target
+   * @param target BSP target URI of an imported target
    * @return compile success, the latest published compiler diagnostics by file, and those of the target and its
    *         dependencies
    */
-  def compile(target: String): scalaanalyzer.build.CompileResult = compileTargets(Seq(scalaTarget(target).getId))
+  def compile(target: String): scalaanalyzer.build.CompileResult = compileTargets(Seq(importedTarget(target).getId))
 
   /**
    * Compiles the targets and pairs the outcome with the diagnostics published so far, all of them and those of the
@@ -193,7 +233,7 @@ final class BuildConnection private[scalaanalyzer] (
 
   /** The targets and, transitively, their dependencies: what the build server compiles for a compile of `ids`. */
   private def withDependencies(ids: Seq[BuildTargetIdentifier]): Set[BuildTargetIdentifier] = {
-    val dependencies = scalaTargets.map(target => target.getId -> target.getDependencies.asScala.toSeq).toMap
+    val dependencies = importedTargets.map(target => target.getId -> target.getDependencies.asScala.toSeq).toMap
 
     @tailrec
     def collect(found: Set[BuildTargetIdentifier], next: Seq[BuildTargetIdentifier]): Set[BuildTargetIdentifier] =
@@ -206,8 +246,8 @@ final class BuildConnection private[scalaanalyzer] (
     collect(Set.empty, ids)
   }
 
-  /** Finds a cached Scala target by its URI, rejecting unknown ones. */
-  private def scalaTarget(uri: String): BuildTarget = scalaTargets.find(_.getId.getUri == uri)
+  /** Finds a cached imported target by its URI, rejecting unknown ones. */
+  private def importedTarget(uri: String): BuildTarget = importedTargets.find(_.getId.getUri == uri)
     .getOrElse(throw new BspImport.UnknownTarget(uri))
 
   /**
@@ -218,7 +258,7 @@ final class BuildConnection private[scalaanalyzer] (
    * target's JDK, or to the host's running JVM when BSP omits it. An unknown target URI is rejected with
    * `BspImport.UnknownTarget`.
    *
-   * @param target BSP target URI of an imported Scala target
+   * @param target BSP target URI of an imported target
    * @return the server's environment item and the `bin/java` executable to run it with
    */
   def testEnvironment(target: String): TestRun.Environment = {
@@ -236,7 +276,7 @@ final class BuildConnection private[scalaanalyzer] (
    * an environment for the target; otherwise `IllegalStateException` is thrown. An unknown target URI is rejected
    * with `BspImport.UnknownTarget`.
    *
-   * @param target BSP target URI of an imported Scala target
+   * @param target BSP target URI of an imported target
    * @return the server's environment item and the `bin/java` executable to run it with
    */
   def runEnvironment(target: String): TestRun.Environment = {
@@ -258,20 +298,31 @@ final class BuildConnection private[scalaanalyzer] (
       request: BuildTargetIdentifier => Iterable[JvmEnvironmentItem]): TestRun.Environment = {
     if (!supported) throw new IllegalStateException(s"the build server does not support $method")
 
-    val found = scalaTarget(target)
+    val found = importedTarget(target)
     val environment = request(found.getId).find(_.getTarget == found.getId)
       .getOrElse(throw new IllegalStateException(s"build server sent no JVM environment for $target"))
-    // Same cast as in `modules`: `scalaTarget` only returns targets whose data kind is `scala`.
-    val scala = gson.fromJson(found.getData.asInstanceOf[JsonElement], classOf[ScalaBuildTarget])
     // BSP may omit the target JDK. Use the host's running JVM deliberately, never an arbitrary java on PATH.
-    val javaHome = Option(scala.getJvmBuildTarget).flatMap(jvm => Option(jvm.getJavaHome))
+    val javaHome = jvmBuildTarget(found).flatMap(jvm => Option(jvm.getJavaHome))
       .map(uri => Path.of(URI.create(uri))).getOrElse(Path.of(System.getProperty("java.home")))
 
     TestRun.Environment(javaHome.resolve("bin").resolve("java"), environment)
   }
 
+  /** The JVM data of a target: inside a Scala target's data, or the data of a `jvm` target; none when it has none. */
+  private def jvmBuildTarget(target: BuildTarget): Option[JvmBuildTarget] = {
+    // Same cast as in `modules`: the data of a target with a data kind is a JSON element.
+    def data = target.getData.asInstanceOf[JsonElement]
+
+    target.getDataKind match {
+      case BuildTargetDataKind.SCALA =>
+        Option(gson.fromJson(data, classOf[ScalaBuildTarget]).getJvmBuildTarget)
+      case BuildTargetDataKind.JVM => Option(gson.fromJson(data, classOf[JvmBuildTarget]))
+      case _ => None
+    }
+  }
+
   /**
-   * Shuts down the BSP connection and terminates its client process.
+   * Shuts down the BSP connection, terminates its client process and releases its transport.
    *
    * Closing is idempotent. The handshake has a short deadline and process cleanup runs even when it fails.
    * A build server shared by other clients remains running.
@@ -287,7 +338,10 @@ final class BuildConnection private[scalaanalyzer] (
         HostLog.warn("interrupted while shutting down the build server", e)
         Thread.currentThread().interrupt()
       case NonFatal(e) => HostLog.warn("build server shutdown failed", e)
-    } finally BspImport.destroyProcess(process)
+    } finally {
+      BspImport.destroyProcess(process)
+      release()
+    }
   }
 }
 
@@ -300,27 +354,83 @@ object BspImport {
   private val BspVersion = "2.1.0"
 
   /** The build server's interfaces the host calls. */
-  trait HostBuildServer extends BuildServer with ScalaBuildServer with JvmBuildServer
+  trait HostBuildServer extends BuildServer with ScalaBuildServer with JavaBuildServer with JvmBuildServer
+
+  /** How an import treats a build target. */
+  enum TargetKind {
+    /** A Scala target: a module with a Scala SDK and a document compiler. */
+    case Scala
+    /** A Java-only target: a module without a Scala SDK. */
+    case Java
+    /** A target that is no module: sbt's build definition, or another language. */
+    case NotImported
+  }
 
   /**
-   * A target URI that names no imported Scala target, so callers can answer it as a bad request.
+   * The options a build server reports for a target, whether through `buildTarget/scalacOptions` or
+   * `buildTarget/javacOptions`.
+   *
+   * @param options compiler options
+   * @param classpath compile classpath, including output directories of other targets
+   * @param classDirectory URI of the target's class output
+   */
+  private[build] final case class TargetOptions(options: Seq[String], classpath: Seq[Path], classDirectory: String)
+
+  /**
+   * Decides how an import treats a build target.
+   *
+   * Data kind `scala` is a Scala target. Data kind `jvm` (Gradle servers) or no data kind (Bloop's Java targets) with
+   * `java` among the language ids is a Java target. Any other data kind (sbt's own build definition is `sbt`) or
+   * language is not imported.
+   *
+   * @param target a target of `workspace/buildTargets`
+   * @return the kind of module the target becomes, or `NotImported`
+   */
+  def classify(target: BuildTarget): TargetKind = target.getDataKind match {
+    case BuildTargetDataKind.SCALA => TargetKind.Scala
+    case BuildTargetDataKind.JVM | null if target.getLanguageIds.contains("java") => TargetKind.Java
+    case _ => TargetKind.NotImported
+  }
+
+  /** Whether the server announced that it supports `workspace/reload`. */
+  private[build] def canReload(capabilities: BuildServerCapabilities): Boolean =
+    Option(capabilities.getCanReload).exists(_.booleanValue)
+
+  /**
+   * A target URI that names no imported target, so callers can answer it as a bad request.
    *
    * @param uri the requested target URI
    */
-  final class UnknownTarget(uri: String) extends IllegalArgumentException(s"unknown Scala build target: $uri")
+  final class UnknownTarget(uri: String) extends IllegalArgumentException(s"unknown build target: $uri")
 
   /**
-   * Starts and initializes the BSP client process selected from a workspace's connection files.
+   * Connects to the workspace's build server and initializes the session.
+   *
+   * A workspace with `.bsp` connection files (or an explicit `connection`) starts the client process one names. One
+   * without them whose root holds a Maven or Gradle build writes Bloop's configuration with the build tool and
+   * connects to a Bloop server over a Unix socket (see [[BloopBuild]]). Any other workspace is rejected for its
+   * missing connection file. A root holding both a Maven and a Gradle build is rejected as ambiguous.
    *
    * Initialization includes a build reload so an already running server sees the current definition.
    * Startup failures terminate the new client process; the caller owns the returned connection.
    *
-   * @param projectDir workspace directory containing `.bsp` connection files
+   * @param projectDir workspace directory containing `.bsp` connection files, or a Maven or Gradle build
    * @param connection the connection file's name (e.g. `sbt`) when `.bsp` has several; with one it may be omitted
-   * @param timeoutMinutes deadline for each initialization, import or compile request
+   * @param timeoutMinutes deadline for each initialization, import or compile request, and for the build tool's
+   *                       install step
    * @return an initialized connection ready to import modules
    */
-  def connect(projectDir: Path, connection: Option[String] = None, timeoutMinutes: Long = 10): BuildConnection = {
+  def connect(projectDir: Path, connection: Option[String] = None, timeoutMinutes: Long = 10): BuildConnection =
+    if (connection.isDefined || connectionFiles(projectDir).nonEmpty)
+      connectWithClientProcess(projectDir, connection, timeoutMinutes)
+    else BloopBuild.detect(projectDir) match {
+      case Some(tool) => connectThroughBloop(projectDir, tool, timeoutMinutes)
+      // Reports the missing connection file.
+      case None => connectWithClientProcess(projectDir, connection, timeoutMinutes)
+    }
+
+  /** Starts the client process a `.bsp` connection file names and speaks BSP over its standard streams. */
+  private def connectWithClientProcess(projectDir: Path, connection: Option[String], timeoutMinutes: Long): BuildConnection = {
     val details = connectionDetails(projectDir, connection)
     val log = Files.createTempFile("scala-analyzer-bsp", ".log")
 
@@ -331,40 +441,90 @@ object BspImport {
       .directory(projectDir.toFile)
       .redirectError(ProcessBuilder.Redirect.to(log.toFile))
       .start()
-    // SIGTERM can arrive during initialization, before a ProjectSession owns this process.
-    val shutdownHook = new Thread(() => destroyProcess(process), s"scala-analyzer-bsp-${process.pid()}")
 
     try {
-      Runtime.getRuntime.addShutdownHook(shutdownHook)
-      process.onExit().thenRun(() => {
-        try Runtime.getRuntime.removeShutdownHook(shutdownHook)
-        catch { case e: IllegalStateException => HostLog.debug(s"build server exited during JVM shutdown: $e") }
-      })
-
-      val client = new DiagnosticsClient
-      val launcher = new Launcher.Builder[HostBuildServer]()
-        .setRemoteInterface(classOf[HostBuildServer])
-        .setInput(process.getInputStream)
-        .setOutput(process.getOutputStream)
-        .setLocalService(client)
-        .create()
-
-      launcher.startListening()
-      val server = launcher.getRemoteProxy
-      val initialized = await(process, log, server.buildInitialize(new InitializeBuildParams(
-        "scala-analyzer", "0.1", BspVersion, projectDir.toUri.toString,
-        new BuildClientCapabilities(java.util.List.of("scala")))), timeoutMinutes)
-      server.onBuildInitialized()
-      // A build server that was already running (sbt keeps its server between clients) may hold an older build
-      // definition: reload it, as IDEs do on import.
-      await(process, log, server.workspaceReload(), timeoutMinutes)
-
-      new BuildConnection(process, server, initialized.getCapabilities, client, log, timeoutMinutes)
+      guardShutdown(process)
+      initialize(projectDir, process, log, process.getInputStream, process.getOutputStream, timeoutMinutes)
     } catch {
       case e: Throwable =>
         destroyProcess(process)
         throw e
     }
+  }
+
+  /**
+   * Writes Bloop's configuration with the workspace's build tool, starts Bloop and speaks BSP over its socket.
+   *
+   * The connection's reload runs the install step again, since Bloop reads the configuration it wrote.
+   */
+  private def connectThroughBloop(projectDir: Path, tool: BloopBuild.Tool, timeoutMinutes: Long): BuildConnection = {
+    def install(): Unit = BloopBuild.install(tool, projectDir, timeoutMinutes)
+
+    install()
+    val server = BloopBuild.serve(projectDir, timeoutMinutes)
+
+    try {
+      initialize(projectDir, server.process, server.log, Channels.newInputStream(server.channel),
+        Channels.newOutputStream(server.channel), timeoutMinutes, release = () => server.close(),
+        regenerate = Some(() => install()))
+    } catch {
+      case e: Throwable =>
+        destroyProcess(server.process)
+        server.close()
+        throw e
+    }
+  }
+
+  /**
+   * Ends the client process when the JVM shuts down, and stops watching for that once the process has exited.
+   *
+   * SIGTERM can arrive during initialization, before a ProjectSession owns the process.
+   */
+  private[build] def guardShutdown(process: Process): Unit = {
+    val shutdownHook = new Thread(() => destroyProcess(process), s"scala-analyzer-bsp-${process.pid()}")
+
+    Runtime.getRuntime.addShutdownHook(shutdownHook)
+    process.onExit().thenRun(() => {
+      try Runtime.getRuntime.removeShutdownHook(shutdownHook)
+      catch { case e: IllegalStateException => HostLog.debug(s"build server exited during JVM shutdown: $e") }
+    })
+  }
+
+  /**
+   * Initializes BSP over the given streams, reloading the build when the server can, and wraps the session.
+   *
+   * The caller ends `process` and frees what it holds when this throws.
+   *
+   * @param process the client process, watched for early exit
+   * @param log the process's output file
+   * @param input the stream the server's messages arrive on
+   * @param output the stream requests are written to
+   * @param release see [[BuildConnection]]
+   * @param regenerate see [[BuildConnection]]
+   */
+  private def initialize(
+      projectDir: Path, process: Process, log: Path, input: InputStream, output: OutputStream, timeoutMinutes: Long,
+      release: () => Unit = () => (), regenerate: Option[() => Unit] = None): BuildConnection = {
+    val client = new DiagnosticsClient
+    val launcher = new Launcher.Builder[HostBuildServer]()
+      .setRemoteInterface(classOf[HostBuildServer])
+      .setInput(input)
+      .setOutput(output)
+      .setLocalService(client)
+      .create()
+
+    launcher.startListening()
+    val server = launcher.getRemoteProxy
+    val initialized = await(process, log, server.buildInitialize(new InitializeBuildParams(
+      "scala-analyzer", "0.1", BspVersion, projectDir.toUri.toString,
+      new BuildClientCapabilities(java.util.List.of("scala", "java")))), timeoutMinutes)
+    server.onBuildInitialized()
+    // A build server that was already running (sbt keeps its server between clients) may hold an older build
+    // definition: reload it, as IDEs do on import. A server that cannot reload (Bloop) re-reads its own
+    // configuration.
+    if (canReload(initialized.getCapabilities)) await(process, log, server.workspaceReload(), timeoutMinutes)
+
+    new BuildConnection(process, server, initialized.getCapabilities, client, log, timeoutMinutes, release, regenerate)
   }
 
   /**
@@ -407,7 +567,7 @@ object BspImport {
     catch { case NonFatal(e) => HostLog.warn(s"could not kill build server ${process.pid()}", e) }
 
   /**
-   * Imports Scala modules using a temporary BSP connection.
+   * Imports the build's Scala and Java modules using a temporary BSP connection.
    *
    * The connection is closed after import, including on failure.
    *
@@ -477,21 +637,29 @@ object BspImport {
     ordered.values.toSeq
   }
 
+  /** The `.bsp` connection files of a workspace, sorted by path; none when it has no `.bsp` directory. */
+  private def connectionFiles(projectDir: Path): Seq[Path] = {
+    val bspDir = projectDir.resolve(".bsp")
+
+    if (!Files.isDirectory(bspDir)) Seq.empty
+    else Using.resource(Files.list(bspDir)) {
+      _.iterator().asScala.filter(_.toString.endsWith(".json")).toSeq.sortBy(_.toString)
+    }
+  }
+
   /** Reads the selected `.bsp` connection file, requiring an explicit name when several files are present. */
   private def connectionDetails(projectDir: Path, connection: Option[String]): BspConnectionDetails = {
     val bspDir = projectDir.resolve(".bsp")
-    val files =
-      if (!Files.isDirectory(bspDir)) Seq.empty
-      else Using.resource(Files.list(bspDir)) {
-        _.iterator().asScala.filter(_.toString.endsWith(".json")).toSeq.sortBy(_.toString)
-      }
+    val files = connectionFiles(projectDir)
     val chosen = connection match {
       case Some(name) => files.find(_.getFileName.toString == s"$name.json")
         .getOrElse(throw new IllegalArgumentException(s"no BSP connection file $name.json in $bspDir"))
       case None => files match {
         case Seq(only) => only
         case Seq() =>
-          throw new IllegalArgumentException(s"no BSP connection file in $bspDir (for sbt: run `sbt bspConfig`)")
+          throw new IllegalArgumentException(
+            s"no BSP connection file in $bspDir (for sbt: run `sbt bspConfig`; a Maven or Gradle build opens through " +
+              "Bloop when its root has a pom.xml or a Gradle settings or build file)")
         case several => throw new IllegalArgumentException(
           s"several BSP connection files in $bspDir, choose one: ${several.map(_.getFileName).mkString(", ")}")
       }

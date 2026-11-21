@@ -48,7 +48,7 @@ object ParameterInfoOracle {
     ))
     host.addJdk(Path.of(System.getProperty("java.home")))
     host.addLibrary(Path.of(sys.props("scalaanalyzer.fixture.scalaLibrary")))
-    val module = host.addModule(ModuleSpec("parameter-info-oracle", "2.13.18", Seq.empty,
+    val module = host.addModule(ModuleSpec("parameter-info-oracle", Some("2.13.18"), Seq.empty,
       Seq(Path.of(sys.props("scalaanalyzer.fixture.scalaLibrary")))))
     val only = flags.collectFirst { case f if f.startsWith("--only=") => f.stripPrefix("--only=").split(',').toSet }
     val cases = collect(pluginRoot).filter(c => only.forall(_.contains(c.name)))

@@ -46,7 +46,7 @@ class DiagnosticsTest extends munit.FunSuite {
   test("Java diagnostics resolve names, types and access against the current PSI") {
     val host = TestHost.host
     TestHost.libraryReport
-    val module = host.addModule(ModuleSpec("java-diagnostics", "2.13.18", Seq.empty, Seq.empty))
+    val module = host.addModule(ModuleSpec("java-diagnostics", Some("2.13.18"), Seq.empty, Seq.empty))
     val text = "class JavaErrors { private int secret; void use() { int n = \"wrong\"; missing(); } } class Other { int n = new JavaErrors().secret; }"
     val file = host.openFile(java.nio.file.Path.of("/java-diagnostics/JavaErrors.java"), text, module) match {
       case f: com.intellij.psi.PsiJavaFile => f
@@ -69,7 +69,7 @@ class DiagnosticsTest extends munit.FunSuite {
     val host = TestHost.host
     TestHost.libraryReport
     val scalaLibrary = Path.of(sys.props("scalaanalyzer.fixture.scalaLibrary"))
-    val module = host.addModule(ModuleSpec("java-clean", "2.13.18", Seq.empty, Seq(scalaLibrary)))
+    val module = host.addModule(ModuleSpec("java-clean", Some("2.13.18"), Seq.empty, Seq(scalaLibrary)))
     val greeter = host.openFile(Path.of("/java-clean/Greeter.scala"),
       "package clean\nobject Greeter { def hi(): String = \"hi\" }\n", module)
     val cases = Seq(

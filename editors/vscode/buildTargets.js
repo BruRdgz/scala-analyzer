@@ -6,7 +6,7 @@ const path = require('path');
 const vscode = require('vscode');
 
 /**
- * @typedef {{ id: string, name: string, scalaVersion: string, dependsOn: string[], libraries: string[], sourceFileCount: number }} BuildTarget
+ * @typedef {{ id: string, name: string, scalaVersion: string | null, dependsOn: string[], libraries: string[], sourceFileCount: number }} BuildTarget
  * @typedef {{ roots: vscode.TreeItem[], children: Map<vscode.TreeItem, vscode.TreeItem[]> }} Snapshot
  */
 
@@ -32,7 +32,7 @@ function snapshotOf(targets) {
   const library = jar => item(path.basename(jar), 'file-binary', { description: path.basename(path.dirname(jar)), tooltip: jar });
 
   const roots = targets.map(({ id, name, scalaVersion, dependsOn, libraries, sourceFileCount }) => {
-    const root = item(name, 'package', { id, description: `Scala ${scalaVersion}`, tooltip: id, collapsibleState: collapsed, contextValue: 'target' });
+    const root = item(name, 'package', { id, description: scalaVersion ? `Scala ${scalaVersion}` : 'Java', tooltip: id, collapsibleState: collapsed, contextValue: 'target' });
     const parts = [];
     if (dependsOn.length > 0) parts.push(group('Depends on', 'references', dependsOn.map(dependency)));
     // The server keeps classpath order; by file name, as IntelliJ's External Libraries, a jar is easier to find.

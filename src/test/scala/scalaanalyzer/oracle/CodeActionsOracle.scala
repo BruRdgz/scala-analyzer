@@ -32,7 +32,7 @@ object CodeActionsOracle {
     TestHost.libraryReport
     val library = Path.of(sys.props("scalaanalyzer.fixture.scalaLibrary"))
     val modules = Seq("2.13.18", "3.9.0").map(version =>
-      host.addModule(ModuleSpec(s"actions-$version", version, Seq.empty, Seq(library))))
+      host.addModule(ModuleSpec(s"actions-$version", Some(version), Seq.empty, Seq(library))))
     val root = Path.of(repo).resolve("scala/scala-impl/testdata/surroundWith/data")
     val paths = Using.resource(Files.walk(root))(_.iterator.asScala.filter(_.toString.endsWith(".test")).toVector.sorted)
     val surroundResults = paths.map { path =>

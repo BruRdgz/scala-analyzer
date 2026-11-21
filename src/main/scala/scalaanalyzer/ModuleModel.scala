@@ -16,19 +16,20 @@ import scala.compiletime.uninitialized
 import scala.jdk.CollectionConverters.*
 
 /**
- * A build target as a build server describes it (BSP `buildTarget/scalacOptions`): the Scala version, the compiler
- * options and the compile classpath (which includes scala-library), and the targets it depends on.
+ * A build target as a build server describes it (BSP `buildTarget/scalacOptions` or `buildTarget/javacOptions`): the
+ * Scala version of a Scala target, the compiler options and the compile classpath (which includes scala-library for
+ * a Scala target), and the targets it depends on.
  *
  * @param name display name; several modules may share it when they have distinct identities
- * @param scalaVersion Scala version of the target
- * @param scalacOptions compiler options reported by the build
+ * @param scalaVersion Scala version of the target; none for a Java module, which has no Scala SDK
+ * @param scalacOptions compiler options reported by the build; empty for a Java module
  * @param classpath compile classpath jars; the host mounts and indexes each one
  * @param dependsOn stable identities of the modules this one depends on, which must be added to the host first
  * @param identity stable build identity, or none to use `name`
  */
 final case class ModuleSpec(
   name: String,
-  scalaVersion: String,
+  scalaVersion: Option[String],
   scalacOptions: Seq[String],
   classpath: Seq[Path],
   dependsOn: Seq[String] = Seq.empty,

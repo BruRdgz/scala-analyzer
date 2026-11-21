@@ -39,7 +39,7 @@ class EditingTest extends munit.FunSuite {
 
   private lazy val module = {
     TestHost.libraryReport // the JDK
-    host.addModule(ModuleSpec("editing", "2.13.18", Seq.empty, Seq(Path.of(sys.props("scalaanalyzer.fixture.scalaLibrary")))))
+    host.addModule(ModuleSpec("editing", Some("2.13.18"), Seq.empty, Seq(Path.of(sys.props("scalaanalyzer.fixture.scalaLibrary")))))
   }
 
   private def errors(file: ScalaFile): Seq[String] =
@@ -47,7 +47,7 @@ class EditingTest extends munit.FunSuite {
 
   // The platform picks a physical file's language; for a module on Scala 3 the plugin's substitutor makes it Scala 3.
   test("a source of a Scala 3 module is Scala 3") {
-    val scala3 = host.addModule(ModuleSpec("editing3", "3.3.4", Seq.empty, Seq(Path.of(sys.props("scalaanalyzer.fixture.scalaLibrary")))))
+    val scala3 = host.addModule(ModuleSpec("editing3", Some("3.3.4"), Seq.empty, Seq(Path.of(sys.props("scalaanalyzer.fixture.scalaLibrary")))))
     val file = host.openFile(Path.of("/editing3/C.scala"), "object C:\n  def f(b: Boolean): Int = if b then 1 else 2\n", scala3)
     try {
       assertEquals(host.read(file.getLanguage), org.jetbrains.plugins.scala.Scala3Language.INSTANCE)
@@ -1197,7 +1197,7 @@ class EditingTest extends munit.FunSuite {
 
     // The plugin fails to put a method after the last member of a body without braces: only there is it withheld.
     val scala3 = host.addModule(
-      ModuleSpec("extract3", "3.3.4", Seq.empty, Seq(Path.of(sys.props("scalaanalyzer.fixture.scalaLibrary")))))
+      ModuleSpec("extract3", Some("3.3.4"), Seq.empty, Seq(Path.of(sys.props("scalaanalyzer.fixture.scalaLibrary")))))
     for ((member, offered) <- Seq(
         "the last member" -> Seq("Extract to val"),
         "a member before another" -> Seq("Extract to val", "Extract method"))) {

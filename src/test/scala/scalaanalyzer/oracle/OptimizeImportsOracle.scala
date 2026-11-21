@@ -19,11 +19,11 @@ object OptimizeImportsOracle {
     val Seq(repo, report) = args.toSeq
     val host = TestHost.host
     TestHost.libraryReport
-    val module = host.addModule(ModuleSpec("optimize-oracle", "2.13.18", Seq.empty,
+    val module = host.addModule(ModuleSpec("optimize-oracle", Some("2.13.18"), Seq.empty,
       Seq(Path.of(sys.props("scalaanalyzer.fixture.scalaLibrary")))))
     val library212 = Path.of(sys.props("scalaanalyzer.fixture.scalaLibrary212"))
     host.addLibrary(library212)
-    val module212 = host.addModule(ModuleSpec("optimize-oracle-212", "2.12.21", Seq.empty, Seq(library212)))
+    val module212 = host.addModule(ModuleSpec("optimize-oracle-212", Some("2.12.21"), Seq.empty, Seq(library212)))
     val root = Path.of(repo).resolve("scala/scala-impl/testdata/optimize")
     val paths = Using.resource(Files.walk(root))(_.iterator.asScala.filter(_.toString.endsWith(".scala")).toVector.sorted)
     val results = paths.map { path =>

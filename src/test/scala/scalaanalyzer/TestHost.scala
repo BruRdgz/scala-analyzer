@@ -52,7 +52,7 @@ object TestHost {
     host.openSource(scenarioSource)
   }
 
-  private lazy val completionModule = host.addModule(ModuleSpec("surface-completion", "2.13.18", Seq.empty,
+  private lazy val completionModule = host.addModule(ModuleSpec("surface-completion", Some("2.13.18"), Seq.empty,
     Seq(Path.of(property("scalaanalyzer.fixture.scalaLibrary")))))
 
   def scenarioFile(): ScalaFile = scenario

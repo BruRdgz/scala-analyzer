@@ -149,7 +149,7 @@ final class ScalaLanguageServer(
   /** Runs build compiles away from the documents thread. */
   private val builds = Executors.newSingleThreadExecutor(daemon("scala-analyzer-builds"))
 
-  /** At most one compile waits behind the running one; every compile includes all Scala targets. */
+  /** At most one compile waits behind the running one; every compile includes all targets. */
   private val compileQueued = new AtomicBoolean()
 
   /** Runs the test selections and main classes started from code lenses. */
@@ -529,10 +529,10 @@ final class ScalaLanguageServer(
 
     if (watchesFiles) {
       val changes = WatchKind.Create | WatchKind.Change | WatchKind.Delete
-      val watchers = Seq(
-        BuildDefinition.SbtFiles -> changes, BuildDefinition.ProjectFiles -> changes, BuildDefinition.BuildProperties -> changes,
-        "**/*.{scala,java}" -> changes,
-      ).map((glob, kind) => new FileSystemWatcher(LspEither.forLeft[String, RelativePattern](glob), kind))
+      val globs = Seq(
+        BuildDefinition.SbtFiles, BuildDefinition.ProjectFiles, BuildDefinition.BuildProperties, BuildDefinition.MavenFiles,
+      ) ++ BuildDefinition.GradleFiles :+ "**/*.{scala,java}"
+      val watchers = globs.map(glob => new FileSystemWatcher(LspEither.forLeft[String, RelativePattern](glob), changes))
 
       client.registerCapability(new RegistrationParams(java.util.List.of(new Registration(
         "scala-analyzer-build-files", "workspace/didChangeWatchedFiles", new DidChangeWatchedFilesRegistrationOptions(watchers.asJava)))))
@@ -677,7 +677,7 @@ final class ScalaLanguageServer(
         new HostProtocol.BuildTarget(
           target.id,
           target.name,
-          target.scalaVersion,
+          target.scalaVersion.orNull,
           target.dependsOn.asJava,
           target.libraries.map(_.toAbsolutePath.toString).asJava,
           target.sourceFileCount,
@@ -1032,7 +1032,7 @@ final class ScalaLanguageServer(
      *
      * The compile runs on the builds thread, then schedules diagnostics for each path it reports.
      *
-     * @param params the saved document, which is ignored: every compile includes all Scala targets
+     * @param params the saved document, which is ignored: every compile includes all targets
      */
     override def didSave(params: DidSaveTextDocumentParams): Unit = onDocuments("didSave") { s =>
       if (compileQueued.compareAndSet(false, true)) {

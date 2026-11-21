@@ -18,9 +18,9 @@ class ModuleTest extends munit.FunSuite {
   private lazy val (scala213, scala212, noPredef) = {
     TestHost.libraryReport // the JDK
     (
-      host.addModule(ModuleSpec("scala213", "2.13.18", Seq.empty, Seq(library213))),
-      host.addModule(ModuleSpec("scala212", "2.12.21", Seq.empty, Seq(library212))),
-      host.addModule(ModuleSpec("noPredef", "2.13.18", Seq("-Yno-predef"), Seq(library213))),
+      host.addModule(ModuleSpec("scala213", Some("2.13.18"), Seq.empty, Seq(library213))),
+      host.addModule(ModuleSpec("scala212", Some("2.12.21"), Seq.empty, Seq(library212))),
+      host.addModule(ModuleSpec("noPredef", Some("2.13.18"), Seq("-Yno-predef"), Seq(library213))),
     )
   }
 
@@ -58,8 +58,8 @@ class ModuleTest extends munit.FunSuite {
   }
 
   test("a module sees the sources of the modules it depends on, and no others") {
-    val lib = host.addModule(ModuleSpec("lib", "2.13.18", Seq.empty, Seq(library213)))
-    val client = host.addModule(ModuleSpec("client", "2.13.18", Seq.empty, Seq(library213), dependsOn = Seq("lib")))
+    val lib = host.addModule(ModuleSpec("lib", Some("2.13.18"), Seq.empty, Seq(library213)))
+    val client = host.addModule(ModuleSpec("client", Some("2.13.18"), Seq.empty, Seq(library213), dependsOn = Seq("lib")))
     val libFile = host.openFile(Path.of("/lib/lib/Lib.scala"), "package lib\nobject Lib { val answer: Int = 42 }", lib)
     try {
       val clientSource = "object Client { val n: Int = lib.Lib.answer }"
@@ -69,7 +69,7 @@ class ModuleTest extends munit.FunSuite {
   }
 
   test("a package in an unrelated module does not shadow a library package") {
-    val unrelated = host.addModule(ModuleSpec("unrelated-package", "2.13.18", Seq.empty, Seq(library213)))
+    val unrelated = host.addModule(ModuleSpec("unrelated-package", Some("2.13.18"), Seq.empty, Seq(library213)))
     val hidden = host.openFile(Path.of("/unrelated/Hidden.scala"),
       "package visibility.scala.child\nclass Hidden", unrelated)
     try assertEquals(errorsIn(scala213, "package visibility\nobject Client { val xs = scala.List(1) }"), Seq.empty)
@@ -91,7 +91,7 @@ class ModuleTest extends munit.FunSuite {
 
   test("a module's compile classpath replaces dependency library versions") {
     val dependency = scala212
-    val client = host.addModule(ModuleSpec("resolved-classpath", "2.13.18", Seq.empty, Seq(library213),
+    val client = host.addModule(ModuleSpec("resolved-classpath", Some("2.13.18"), Seq.empty, Seq(library213),
       dependsOn = Seq(dependency.spec.name)))
     host.read {
       val cache = ScalaShortNamesCacheManager.getInstance(using host.project)
@@ -105,13 +105,13 @@ class ModuleTest extends munit.FunSuite {
     val firstId = "bsp://identity-test/first"
     val secondId = "bsp://identity-test/second"
     val clientId = "bsp://identity-test/client"
-    val first = host.addModule(ModuleSpec("shared-display-name", "2.13.18", Seq.empty, Seq(library213), identity = Some(firstId)))
+    val first = host.addModule(ModuleSpec("shared-display-name", Some("2.13.18"), Seq.empty, Seq(library213), identity = Some(firstId)))
     var second: Option[HostModule] = None
     var client: Option[HostModule] = None
     var source: Option[com.intellij.psi.PsiFile] = None
     try {
-      second = Some(host.addModule(ModuleSpec("shared-display-name", "2.13.18", Seq.empty, Seq(library213), identity = Some(secondId))))
-      client = Some(host.addModule(ModuleSpec("identity-client", "2.13.18", Seq.empty, Seq(library213),
+      second = Some(host.addModule(ModuleSpec("shared-display-name", Some("2.13.18"), Seq.empty, Seq(library213), identity = Some(secondId))))
+      client = Some(host.addModule(ModuleSpec("identity-client", Some("2.13.18"), Seq.empty, Seq(library213),
         dependsOn = Seq(firstId), identity = Some(clientId))))
 
       assertEquals(host.modules.byId(firstId), Some(first))
@@ -136,8 +136,8 @@ class ModuleTest extends munit.FunSuite {
     def sourceFiles(classes: Array[com.intellij.psi.PsiClass]): Set[com.intellij.psi.PsiFile] =
       classes.iterator.map(_.getContainingFile).filter(_.getVirtualFile.isInstanceOf[scalaanalyzer.platform.SourceFile]).toSet
 
-    val first = host.addModule(ModuleSpec("java-lookup-first", "2.13.18", Seq.empty, Seq(library213)))
-    val second = host.addModule(ModuleSpec("java-lookup-second", "2.13.18", Seq.empty, Seq(library213)))
+    val first = host.addModule(ModuleSpec("java-lookup-first", Some("2.13.18"), Seq.empty, Seq(library213)))
+    val second = host.addModule(ModuleSpec("java-lookup-second", Some("2.13.18"), Seq.empty, Seq(library213)))
     val text = "package hostjava.deep; public class Widget { public void ping() {} public static class Nested { public void ping() {} } }"
     val a = host.openFile(Path.of("/java-lookup-first/Widget.java"), text, first)
     val b = host.openFile(Path.of("/java-lookup-second/Widget.java"), text, second)

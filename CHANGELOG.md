@@ -20,6 +20,15 @@
   As for Scala declarations, text occurrences in comments and strings are left out.
 - Implementations and subtypes of a Java class or interface include its Java inheritors.
 - Auto-import and class-name completion find the member classes of Java libraries and of the JDK (`Map.Entry`).
+- Maven and Gradle projects open without a BSP connection file, through [Bloop](https://scalacenter.github.io/bloop/)
+  on the `PATH`: the server runs the build tool's Bloop install step (`./mvnw` or `mvn`, `./gradlew` or `gradle`,
+  without editing the build files), connects to `bloop bsp` over a Unix socket, and runs the step again when a
+  `pom.xml` or a Gradle file changes. `SCALA_ANALYZER_BUILD_JAVA_HOME`, or the VS Code setting
+  `scalaAnalyzer.buildJavaHome`, chooses the JDK the build tool runs on; by default the extension passes the
+  `JAVA_HOME` VS Code was started with, since older Gradle versions cannot run on JDK 25.
+- Build targets with Java sources only become modules, without a Scala SDK; the build target view shows them as Java.
+  A build server that cannot reload (Bloop) is no longer asked to.
+- The VS Code extension also starts for Java files and in Maven and Gradle workspaces.
 
 ## 0.4.0 — 2026-11-18
 
