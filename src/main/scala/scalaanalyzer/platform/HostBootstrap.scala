@@ -557,6 +557,14 @@ private[scalaanalyzer] object HostBootstrap {
     /** Module metadata that the project, file-index, module and scope services answer from. */
     private lazy val moduleModel = new ModuleModel(project)
 
+    /**
+     * The Java language level of a project source: its module's, or the highest when the build gives none (the
+     * syntax of every release then parses). None for a file that is not a project source. The module is known
+     * before the file is first parsed: `ScalaPsiHost.openFile` maps the source to it first.
+     */
+    private def sourceLanguageLevel(file: VirtualFile): Option[LanguageLevel] =
+      moduleModel.ofFile(file).map(_.javaLanguageLevel.getOrElse(LanguageLevel.HIGHEST))
+
     /** The project object: a proxy for Project. */
     private lazy val project: Project = tableProxy(classOf[Project], "Project") {
       case ("getService", Array(c: Class[?])) => projectServices.get(c)
@@ -1512,11 +1520,11 @@ private[scalaanalyzer] object HostBootstrap {
       }
       projectServices.register(classOf[ProjectFileIndex])(fileIndex)
       // Java stub eligibility reads a persisted level as the source-content marker. The host owns source membership,
-      // and uses the same highest Java level here as in JavaPsiImplementationHelper, without persisting VFS attributes.
+      // and gives the level of `sourceLanguageLevel`, the same as JavaPsiImplementationHelper: a stub tree built at
+      // another level than its PSI would not pair with it. Nothing is persisted in VFS attributes.
       appServices.register(classOf[InternalPersistentJavaLanguageLevelReaderService])(
         tableProxy(classOf[InternalPersistentJavaLanguageLevelReaderService], "JavaLanguageLevelReader") {
-          case ("getPersistedLanguageLevel", Array(f: VirtualFile)) =>
-            if (moduleModel.ofFile(f).isDefined) LanguageLevel.HIGHEST else null
+          case ("getPersistedLanguageLevel", Array(f: VirtualFile)) => sourceLanguageLevel(f).orNull
         })
       // The same answers through the platform's facade (ClassFileViewProvider asks it before building Java PSI).
       projectServices.register(classOf[FileIndexFacade])(new Host_FileIndexFacade(project, dispatch {
@@ -1655,8 +1663,9 @@ private[scalaanalyzer] object HostBootstrap {
         override def getPackageNameByDirectory(dir: VirtualFile): String = null
       })
       projectServices.register(classOf[JavaResolveCache])(new JavaResolveCache(project))
-      // The project's Java language level, which a class's declarations are processed at (the highest, as the files'
-      // own).
+      // The project's default Java language level, which a class's declarations are processed at: the highest, the
+      // level of a file with no module. A module's sources have their own (see `sourceLanguageLevel`), which
+      // PsiJavaFile.getLanguageLevel reads through JavaPsiImplementationHelper, so this stays the project's.
       projectServices.register(classOf[LanguageLevelProjectExtension])(new LanguageLevelProjectExtension {
         override def getLanguageLevel: LanguageLevel = LanguageLevel.HIGHEST
         /** Unsupported: recorded and rejected by `CallLog`. */
@@ -1715,9 +1724,9 @@ private[scalaanalyzer] object HostBootstrap {
         // A class of a file that is not a copy is its own original.
         case ("JavaPsiImplementationHelper.getOriginalClass", Array(c: PsiClass))
             if c.getContainingFile.getOriginalFile eq c.getContainingFile => c
-        // Java sources parse at the highest language level: it accepts the syntax of every Java release the build may
-        // target (the build's own release is not read yet).
-        case ("JavaPsiImplementationHelper.getEffectiveLanguageLevel", _) => LanguageLevel.HIGHEST
+        // A project source is at its module's level; a library source and a file with no module at the highest.
+        case ("JavaPsiImplementationHelper.getEffectiveLanguageLevel", args) =>
+          args.collectFirst { case f: VirtualFile => f }.flatMap(sourceLanguageLevel).getOrElse(LanguageLevel.HIGHEST)
         case ("JavaPsiImplementationHelper.getDefaultImportAnchor",
               Array(list: PsiImportList, statement: PsiImportStatementBase)) =>
           new ImportHelper(

@@ -29,6 +29,9 @@
 - Build targets with Java sources only become modules, without a Scala SDK; the build target view shows them as Java.
   A build server that cannot reload (Bloop) is no longer asked to.
 - The VS Code extension also starts for Java files and in Maven and Gradle workspaces.
+- Java sources are parsed and checked at their module's language level, from the build's javac options (`--release`,
+  else `-source`; `--enable-preview` selects the preview level), as in the IDE: a record in a module released for
+  Java 11 is reported. A build that reports no javac options, as sbt does over BSP, keeps the highest level.
 
 ## 0.4.0 — 2026-11-18
 

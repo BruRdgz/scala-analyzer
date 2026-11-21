@@ -100,4 +100,27 @@ class DiagnosticsTest extends munit.FunSuite {
     }
   }
 
+  test("a Java source is checked at its module's language level") {
+    val host = TestHost.host
+    TestHost.libraryReport
+    val record = "record Point(int x) {}"
+    val cases = Seq("11", "17").map { release =>
+      host.addModule(ModuleSpec(s"java-level-$release", None, Seq.empty, Seq.empty, javacOptions = Seq("--release", release)))
+    }
+
+    /** The problems of the record in a module's file, as messages. */
+    def messages(module: HostModule): Seq[String] =
+      host.openFile(Path.of(s"/${module.spec.name}/Point.java"), record, module) match {
+        case file: PsiJavaFile =>
+          try host.diagnostics(file).map(_.message)
+          finally host.closeSource(file)
+        case other => fail(s"not Java: $other")
+      }
+
+    try {
+      val found = cases.map(messages)
+      assert(found.head.exists(_.contains("level")), found.head.toString)
+      assertEquals(found(1), Seq.empty)
+    } finally cases.foreach(module => host.removeModule(module.spec.stableId))
+  }
 }

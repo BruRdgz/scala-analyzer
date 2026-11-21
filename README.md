@@ -224,6 +224,10 @@ partial, indexes are kept in memory, and each process serves one workspace.
   Java constructor callers can be missed.
 - CI exercises ordinary source-member navigation through the packaged server and installed extension.
 - JDK symbols come from the JDK running the server.
+- A module's Java sources are read at the language level of the build's javac options (`--release`, else `-source`;
+  `--enable-preview` selects the preview level). A module whose build reports none, or a version the server does not
+  know, is read at the highest level the server supports, so a feature newer than the build's release goes unreported.
+  sbt does not report javac options over BSP, so the Java sources of sbt modules are always read at that level.
 - Native inspections cover deprecation, selected redundancies, explicit unused imports, unannotated
   declarations confined to the file, and the collection inspections that the IDE enables by default.
   Wildcard/given import warnings and whole-project dead-code analysis are outside this scope. Inspect Code

@@ -3,6 +3,7 @@ package scalaanalyzer
 import com.intellij.openapi.module.Module
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.vfs.VirtualFile
+import com.intellij.pom.java.LanguageLevel
 import com.intellij.psi.search.GlobalSearchScope
 
 import scalaanalyzer.platform.LibraryFile
@@ -26,6 +27,9 @@ import scala.jdk.CollectionConverters.*
  * @param classpath compile classpath jars; the host mounts and indexes each one
  * @param dependsOn stable identities of the modules this one depends on, which must be added to the host first
  * @param identity stable build identity, or none to use `name`
+ * @param javacOptions javac options reported by the build; empty when the build reports none, as for a Scala target
+ *                     whose server does not answer `buildTarget/javacOptions`. The host derives the module's Java
+ *                     language level from them (see `HostModule.javaLanguageLevel`).
  */
 final case class ModuleSpec(
   name: String,
@@ -34,6 +38,7 @@ final case class ModuleSpec(
   classpath: Seq[Path],
   dependsOn: Seq[String] = Seq.empty,
   identity: Option[String] = None,
+  javacOptions: Seq[String] = Seq.empty,
 ) {
   /**
    * The key under which the host registers this module.
@@ -61,6 +66,48 @@ final class HostModule private[scalaanalyzer] (val spec: ModuleSpec, val library
 
   /** The project source files currently mapped to this module; `ModuleModel.addSource` and `removeSource` change it. */
   private[scalaanalyzer] val sources = ConcurrentHashMap.newKeySet[VirtualFile]()
+
+  /**
+   * The Java language level of this module's sources, from its javac options; none when they give no usable level
+   * (see the companion's `javaLanguageLevel`).
+   */
+  val javaLanguageLevel: Option[LanguageLevel] = HostModule.javaLanguageLevel(spec.javacOptions)
+}
+
+object HostModule {
+  /** The javac options for the target release; `-release` is the spelling some tools pass. */
+  private val ReleaseOptions = Set("--release", "-release")
+  /** The javac options for the source level, which `--release` overrides. */
+  private val SourceOptions = Set("-source", "--source")
+
+  /**
+   * Derives a module's Java language level from its javac options, as the IDE does from the build's settings.
+   *
+   * The last `--release` (or `-release`, which some tools pass) decides; without one, the last `-source` /
+   * `--source`. javac rejects both together, so this order only keeps the answer deterministic. `--enable-preview`
+   * selects the preview level of that release, or the release's own level when it has no preview level. A value is
+   * `8`, `1.8`, `17`, ... in either `--release 17` or `--release=17` form.
+   *
+   * @param javacOptions the options the build reports for the module
+   * @return the level, or none when no release option is given, its value is not a Java version, or it is newer
+   *         than the platform knows (`LanguageLevel.parse` gives none): the host then uses `LanguageLevel.HIGHEST`
+   *         for the module, as javac's default is the JDK's own release, which the host does not know
+   */
+  def javaLanguageLevel(javacOptions: Seq[String]): Option[LanguageLevel] = {
+    val options = javacOptions.toVector
+    val value = valuesOf(options, ReleaseOptions).lastOption.orElse(valuesOf(options, SourceOptions).lastOption)
+    val level = value.flatMap(version => Option(LanguageLevel.parse(version)))
+
+    if (options.contains("--enable-preview")) level.map(l => Option(l.getPreviewLevel).getOrElse(l)) else level
+  }
+
+  /** The values given to any of `names`, in order, both as `name value` and as `name=value`. */
+  private def valuesOf(options: Vector[String], names: Set[String]): Seq[String] =
+    options.indices.flatMap { i =>
+      val option = options(i)
+      if (names(option)) options.lift(i + 1)
+      else names.collectFirst { case name if option.startsWith(s"$name=") => option.drop(name.length + 1) }
+    }
 }
 
 /**

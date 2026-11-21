@@ -84,6 +84,7 @@ final class BuildConnection private[scalaanalyzer] (
     val buildTargets = importedTargets
     val ids = buildTargets.map(_.getId).asJava
     val optionsById = scalacOptionsById(buildTargets) ++ javacOptionsById(buildTargets)
+    val scalaTargetsJavacOptions = javacOptionsOfScalaTargets(buildTargets)
     val sourcesById = await(server.buildTargetSources(new SourcesParams(ids))).getItems.asScala
       .map(item => item.getTarget -> item).toMap
     val nameById = buildTargets.map(t => t.getId -> BspImport.moduleName(t)).toMap
@@ -105,6 +106,8 @@ final class BuildConnection private[scalaanalyzer] (
         // Dependencies on targets that are not imported have no module.
         dependsOn = target.getDependencies.asScala.toSeq.flatMap(identityById.get),
         identity = Some(identityById(target.getId)),
+        javacOptions =
+          if (scala.isDefined) scalaTargetsJavacOptions.getOrElse(target.getId, Seq.empty) else options.options,
       )
       // The document compiler serves Scala only.
       val compile = scala.map { scalaTarget =>
@@ -149,6 +152,21 @@ final class BuildConnection private[scalaanalyzer] (
         item.getOptions.asScala.toSeq, item.getClasspath.asScala.toSeq.map(uri => Path.of(URI.create(uri))),
         item.getClassDirectory)
     }.toMap
+  }
+
+  /**
+   * Asks for the Java options of the Scala targets among `targets`, which may hold Java sources (mixed modules); sends
+   * no request when there are none, or when the server does not announce that it compiles Java.
+   *
+   * sbt announces Scala only, and never answers `buildTarget/javacOptions` (measured with sbt 1.13): its mixed modules
+   * get no Java options, which the host reads as the highest Java level.
+   */
+  private def javacOptionsOfScalaTargets(targets: Seq[BuildTarget]): Map[BuildTargetIdentifier, Seq[String]] = {
+    val ids = targets.filter(BspImport.classify(_) == BspImport.TargetKind.Scala).map(_.getId)
+
+    if (ids.isEmpty || !BspImport.compilesJava(capabilities)) Map.empty
+    else await(server.buildTargetJavacOptions(new JavacOptionsParams(ids.asJava))).getItems.asScala
+      .map(item => item.getTarget -> item.getOptions.asScala.toSeq).toMap
   }
 
   /**
@@ -391,6 +409,11 @@ object BspImport {
     case BuildTargetDataKind.JVM | null if target.getLanguageIds.contains("java") => TargetKind.Java
     case _ => TargetKind.NotImported
   }
+
+  /** Whether the server announced that it compiles Java sources (its compile provider lists the `java` language). */
+  private[build] def compilesJava(capabilities: BuildServerCapabilities): Boolean =
+    Option(capabilities.getCompileProvider).flatMap(provider => Option(provider.getLanguageIds))
+      .exists(_.contains("java"))
 
   /** Whether the server announced that it supports `workspace/reload`. */
   private[build] def canReload(capabilities: BuildServerCapabilities): Boolean =

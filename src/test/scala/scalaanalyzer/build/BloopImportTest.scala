@@ -107,6 +107,7 @@ class BloopImportTest extends munit.FunSuite {
           assertEquals(module.spec.scalaVersion, None, module.spec.name)
           assertEquals(module.compile, None, module.spec.name)
         }
+        assert(core.spec.javacOptions.sliding(2).contains(Seq("--release", "17")), core.spec.javacOptions)
         assert(jarNames(app).exists(_.startsWith("commons-lang3")), jarNames(app))
         assert(app.spec.dependsOn.contains(core.spec.stableId), app.spec.dependsOn)
         assertEquals(core.sources.map(_.toRealPath()), Seq(copy.resolve("core/src/main/java/demo/core/Greeter.java")))

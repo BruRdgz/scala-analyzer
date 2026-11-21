@@ -1,6 +1,7 @@
 package scalaanalyzer
 
 import com.intellij.lang.annotation.HighlightSeverity
+import com.intellij.pom.java.LanguageLevel
 import org.jetbrains.plugins.scala.caches.ScalaShortNamesCacheManager
 import org.jetbrains.plugins.scala.lang.psi.impl.ScalaPsiElementFactory
 
@@ -195,4 +196,26 @@ class ModuleTest extends munit.FunSuite {
     }
   }
 
+  test("a module's Java language level comes from its javac options") {
+    val cases = Seq(
+      Seq("--release", "17") -> Some(LanguageLevel.JDK_17),
+      Seq("--release=21") -> Some(LanguageLevel.JDK_21),
+      Seq("-release", "11") -> Some(LanguageLevel.JDK_11),
+      Seq("-source", "1.8", "-target", "1.8") -> Some(LanguageLevel.JDK_1_8),
+      Seq("--source", "11") -> Some(LanguageLevel.JDK_11),
+      Seq("--source=8") -> Some(LanguageLevel.JDK_1_8),
+      Seq("--release", "21", "--enable-preview") -> Some(LanguageLevel.JDK_21_PREVIEW),
+      Seq("-source", "8", "--release", "17") -> Some(LanguageLevel.JDK_17),
+      Seq("--release", "11", "--release", "17") -> Some(LanguageLevel.JDK_17),
+      Seq("-Xlint", "-parameters") -> None,
+      Seq.empty -> None,
+      Seq("--release", "banana") -> None,
+      Seq("--release") -> None,
+      Seq("--release", "99") -> None,
+    )
+
+    cases.foreach { (options, expected) =>
+      assertEquals(HostModule.javaLanguageLevel(options), expected, options.mkString(" "))
+    }
+  }
 }
