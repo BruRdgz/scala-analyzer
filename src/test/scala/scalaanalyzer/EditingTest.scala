@@ -1507,6 +1507,37 @@ class EditingTest extends munit.FunSuite {
     } finally host.closeSource(file)
   }
 
+  test("IntelliJ formatting of a Java file applies the request's indentation") {
+    final case class Case(indentSize: Int, useTabs: Boolean, formatted: String)
+    val text = "class FormatMe {\nint n=1+2;\nint m=3;\n}\n"
+    val cases = Seq(
+      Case(4, useTabs = false, "class FormatMe {\n    int n = 1 + 2;\n    int m = 3;\n}\n"),
+      Case(2, useTabs = false, "class FormatMe {\n  int n = 1 + 2;\n  int m = 3;\n}\n"),
+      Case(4, useTabs = true, "class FormatMe {\n\tint n = 1 + 2;\n\tint m = 3;\n}\n"),
+    )
+    val file = host.openFile(Path.of("/editing/FormatMe.java"), text, module)
+    try for (c <- cases) {
+      val result = ChangeEngine.format(file, None, c.indentSize, c.useTabs)
+      assertEquals(result.text, c.formatted, s"indent ${c.indentSize}, tabs ${c.useTabs}")
+      assertEquals(applyEdits(text, result.edits), result.text)
+      assertEquals(host.read(file.getText), text)
+    } finally host.closeSource(file)
+  }
+
+  test("Extend Selection in a Java file grows through the expression and its statement") {
+    val marked = "class Sample {\n  int twice(int n) {\n    return n |* 2;\n  }\n}\n"
+    val text = marked.replace("|", "")
+    val file = host.openFile(Path.of("/editing/Selection.java"), text, module)
+    try {
+      val chain = host.selectionRanges(file, marked.indexOf('|') - 1)
+      val texts = chain.map(r => text.substring(r.getStartOffset, r.getEndOffset))
+      assertEquals(texts.head, "n")
+      assert(texts.containsSlice(Seq("n * 2", "return n * 2;")), texts.toString)
+      assert(chain.sliding(2).forall { case Seq(inner, outer) => outer.contains(inner) && outer != inner; case _ => true },
+        chain.toString)
+    } finally host.closeSource(file)
+  }
+
   test("formatting a copy completes while another thread holds a read") {
     val text = "object Concurrent { val n=1+2 }\n"
     val file = scalaFile("Concurrent", text)

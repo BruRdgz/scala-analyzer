@@ -32,6 +32,8 @@
 - Java sources are parsed and checked at their module's language level, from the build's javac options (`--release`,
   else `-source`; `--enable-preview` selects the preview level), as in the IDE: a record in a module released for
   Java 11 is reported. A build that reports no javac options, as sbt does over BSP, keeps the highest level.
+- Java files have Extend Selection ranges, with the Java plugin's selectioners, and IntelliJ formatting of the whole
+  file or a range, with the request's indentation.
 
 ## 0.4.0 — 2026-11-18
 

@@ -4,6 +4,7 @@ import com.intellij.codeInsight.javadoc.{DocumentationDelegateProvider, JavaDocI
 import com.intellij.codeInsight.hints.settings.ParameterNameHintsSettings
 import com.intellij.codeInsight.hints.{InlayParameterHintsExtension, InlayParameterHintsProvider}
 import com.intellij.codeInsight.editorActions.ExtendWordSelectionHandler
+import com.intellij.codeInsight.editorActions.wordSelection.JavaBasicWordSelectionFilter
 import com.intellij.codeInsight.intention.preview.IntentionPreviewUtils
 import com.intellij.core.{CoreApplicationEnvironment, CoreFileTypeRegistry}
 import com.intellij.ide.highlighter.HtmlFileHighlighter
@@ -630,12 +631,19 @@ private[scalaanalyzer] object HostBootstrap {
           s"no extension points declared by the Scala plugin jars ${config.scalaPluginJars.mkString(", ")}; " +
             "are they on the classpath?")
       pluginEps.foreach(d => declare(d.name))
-      // The base handlers in intellij.platform.lang.impl.xml also run for Scala, before the plugin's handlers.
+      // The base handlers in intellij.platform.lang.impl.xml also run for Scala, before the plugin's handlers. The
+      // Java handlers of intellij.java.frontback.impl.xml follow; they are listed here because that descriptor is not
+      // one of the Scala plugin's. Each tests `canSelect` and Java PSI only, so Scala's results do not change.
       declare(ExtendWordSelectionHandler.EP_NAME.getName)
       val selectioners = area.getExtensionPoint[ExtendWordSelectionHandler](ExtendWordSelectionHandler.EP_NAME.getName)
       val baseSelectioners = Seq(
         "PlainTextLineSelectioner", "NaturalLanguageTextSelectioner", "WordSelectioner", "LineCommentSelectioner",
         "BlockCommentSelectioner", "InjectedFileReferenceSelectioner",
+        "MethodCallSelectioner", "AntLikePropertySelectionHandler", "CaseStatementsSelectioner",
+        "StatementGroupSelectioner", "JavaTokenSelectioner", "TypeCastSelectioner", "IfStatementSelectioner",
+        "ForStatementHeaderSelectioner", "DocTagSelectioner", "ReferenceSelectioner", "FieldSelectioner",
+        "MethodOrClassSelectioner", "FinallyBlockSelectioner", "CodeBlockOrInitializerSelectioner", "ListSelectioner",
+        "DocCommentSelectioner", "LiteralSelectioner", "JavaWordSelectioner",
       ).map("com.intellij.codeInsight.editorActions.wordSelection." + _) :+
         "com.intellij.ide.highlighter.custom.impl.CustomFileTypeSelectWordHandler"
       for (name <- baseSelectioners) {
@@ -652,6 +660,7 @@ private[scalaanalyzer] object HostBootstrap {
       declare("com.intellij.basicWordSelectionFilter")
       val wordFilters = area.getExtensionPoint[Condition[PsiElement]]("com.intellij.basicWordSelectionFilter")
       wordFilters.registerExtension(new DummyBlockWordSelectionFilter, root)
+      wordFilters.registerExtension(new JavaBasicWordSelectionFilter, root)
       // Searches ask for use scope enlargers. The plugin's only one widens the scope to the IDE's sbt shared-source
       // modules, which a build server never reports, and it needs the IDE's module types; the host registers none.
       declare("com.intellij.useScopeEnlarger")

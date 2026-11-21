@@ -322,15 +322,18 @@ class LanguageServerTest extends munit.FunSuite {
   test("scopes Scala providers while sharing supported features with Java") {
     val capabilities = initialize(server, fixture, scoped = true).getCapabilities
     val gson = new com.google.gson.Gson
-    def scalaSelector(options: AnyRef): Unit = {
-      val selector = gson.toJsonTree(options).getAsJsonObject.getAsJsonArray("documentSelector")
-      assertEquals(selector.size(), 1)
-      assertEquals(selector.get(0).getAsJsonObject.get("language").getAsString, "scala")
-      assertEquals(selector.get(0).getAsJsonObject.get("scheme").getAsString, "file")
+    def selector(options: AnyRef, languages: String*): Unit = {
+      val filters = gson.toJsonTree(options).getAsJsonObject.getAsJsonArray("documentSelector").asScala.toSeq
+        .map(_.getAsJsonObject)
+      assertEquals(filters.map(_.get("language").getAsString), languages)
+      assertEquals(filters.map(_.get("scheme").getAsString), languages.map(_ => "file"))
     }
+    def scalaSelector(options: AnyRef): Unit = selector(options, "scala")
+    // Features already shared with Java files; the others follow as their Java support lands.
+    val scalaAndJava = Set("textDocument/formatting", "textDocument/rangeFormatting")
     scalaSelector(capabilities.getInlayHintProvider.getRight)
     assert(capabilities.getInlayHintProvider.getRight.getResolveProvider)
-    scalaSelector(capabilities.getSelectionRangeProvider.getRight)
+    selector(capabilities.getSelectionRangeProvider.getRight, "scala", "java")
     scalaSelector(capabilities.getImplementationProvider.getRight)
     scalaSelector(capabilities.getCallHierarchyProvider.getRight)
     scalaSelector(capabilities.getTypeHierarchyProvider.getRight)
@@ -353,7 +356,8 @@ class LanguageServerTest extends munit.FunSuite {
     val registered = Client.registrations.poll(30, TimeUnit.SECONDS)
     assert(registered != null)
     val methods = registered.getRegistrations.asScala.map { registration =>
-      scalaSelector(registration.getRegisterOptions)
+      if (scalaAndJava(registration.getMethod)) selector(registration.getRegisterOptions, "scala", "java")
+      else scalaSelector(registration.getRegisterOptions)
       registration.getMethod -> gson.toJsonTree(registration.getRegisterOptions).getAsJsonObject
     }.toMap
     assertEquals(methods.keySet, Set("textDocument/codeLens", "textDocument/signatureHelp",
@@ -1451,6 +1455,22 @@ class LanguageServerTest extends munit.FunSuite {
     assertEquals(word.getParent.getParent.getRange, new Range(new Position(16, 0), new Position(17, 0)))
   }
 
+  test("selection ranges of a Java buffer follow successive Extend Selection steps") {
+    val javaFile = fixture.resolve("core/src/main/java/core/Shout.java")
+    val original = Files.readString(javaFile)
+    val text = "package core;\nclass Shout {\n  int twice(int n) {\n    return n * 2;\n  }\n}\n"
+    val service = server.getTextDocumentService
+    try {
+      service.didOpen(new DidOpenTextDocumentParams(new TextDocumentItem(javaFile.toUri.toString, "java", 170, text)))
+      val selected = service.selectionRange(new SelectionRangeParams(document(javaFile), JavaList.of(new Position(3, 11))))
+        .get(1, TimeUnit.MINUTES).asScala.toSeq
+      assertEquals(selected.size, 1)
+      assertEquals(selected.head.getRange, new Range(new Position(3, 11), new Position(3, 12)))
+      assertEquals(selected.head.getParent.getRange, new Range(new Position(3, 11), new Position(3, 16)))
+    } finally service.didChange(new DidChangeTextDocumentParams(
+      new VersionedTextDocumentIdentifier(javaFile.toUri.toString, 171), JavaList.of(new TextDocumentContentChangeEvent(original))))
+  }
+
   test("type info shows the type of the identifier under the caret or of the selected expression, and nothing else") {
     val text = """package app
                  |object TypeInfo {
@@ -1800,6 +1820,29 @@ class LanguageServerTest extends munit.FunSuite {
         .get(1, TimeUnit.MINUTES).asScala.toSeq
       assertEquals(applyEdits(selected), "package app\nobject FormatFixture {\nval emoji=\"😀\"\n  val n = 1 + 2\n}\n")
     } finally change(original, 31)
+  }
+
+  test("formats a Java buffer and a selected range using the request's tab options") {
+    val javaFile = fixture.resolve("core/src/main/java/core/Shout.java")
+    val original = Files.readString(javaFile)
+    val text = "package core;\nclass Shout {\nint n=1+2;\nint m=3;\n}\n"
+    val service = server.getTextDocumentService
+    def applyEdits(edits: Seq[TextEdit]): String = {
+      val snapshot = new com.intellij.openapi.editor.impl.DocumentImpl(text, true)
+      def offset(p: Position) = snapshot.getLineStartOffset(p.getLine) + p.getCharacter
+      edits.reverse.foldLeft(text)((current, edit) =>
+        current.substring(0, offset(edit.getRange.getStart)) + edit.getNewText + current.substring(offset(edit.getRange.getEnd)))
+    }
+    try {
+      service.didOpen(new DidOpenTextDocumentParams(new TextDocumentItem(javaFile.toUri.toString, "java", 172, text)))
+      val whole = service.formatting(new DocumentFormattingParams(document(javaFile), new FormattingOptions(4, false)))
+        .get(1, TimeUnit.MINUTES).asScala.toSeq
+      assertEquals(applyEdits(whole), "package core;\n\nclass Shout {\n\tint n = 1 + 2;\n\tint m = 3;\n}\n")
+      val selected = service.rangeFormatting(new DocumentRangeFormattingParams(document(javaFile),
+        new FormattingOptions(2, true), new Range(new Position(2, 0), new Position(2, 10)))).get(1, TimeUnit.MINUTES).asScala.toSeq
+      assertEquals(applyEdits(selected), "package core;\nclass Shout {\n  int n = 1 + 2;\nint m=3;\n}\n")
+    } finally service.didChange(new DidChangeTextDocumentParams(
+      new VersionedTextDocumentIdentifier(javaFile.toUri.toString, 173), JavaList.of(new TextDocumentContentChangeEvent(original))))
   }
 
   test("a newer edit cancels a queued formatting request") {

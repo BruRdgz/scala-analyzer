@@ -298,7 +298,7 @@ final class ProjectSession private (
   /**
    * Builds successive selection expansions for each caret.
    *
-   * A Scala caret with no expansion keeps its empty range. Non-Scala sources return an empty outer sequence.
+   * A caret with no expansion keeps its empty range. Sources that are neither Scala nor Java return an empty outer sequence.
    *
    * @param path registered project-source path
    * @param positions carets in zero-based lines and UTF-16 columns, in the desired result order
@@ -371,7 +371,7 @@ final class ProjectSession private (
    * @param range optional range in zero-based lines and UTF-16 columns; `None` selects the whole file
    * @param indentSize positive indentation size used by the IntelliJ formatter
    * @param useTabs whether the IntelliJ formatter should indent with tabs
-   * @return the changes against the current buffer; empty for a source that is not Scala
+   * @return the changes against the current buffer; empty for a source that is neither Scala nor Java
    */
   def formatting(path: Path, range: Option[LineRange], indentSize: Int, useTabs: Boolean): Seq[TextChange] =
     language.formatting(path, range, indentSize, useTabs)

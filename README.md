@@ -38,10 +38,10 @@ It exposes editor features through the **Language Server Protocol (LSP)** and im
 | Navigation | Definitions (through the plugin's Go to Declaration), type definitions, references, implementations, go to super, go to test (from a class to its tests and back), call/type hierarchies and workspace symbols; library sources and decompiled classes. |
 | Documentation | Markdown hover with declaration context, parameters, return values and linked references. |
 | Editing | Rename, organize imports, previewable quick fixes, intentions, surround and unwrap actions; implement and override members; split/join lists and flip comma; Inline for `val`s, `def`s and type aliases; Extract to val and Extract method. |
-| Formatting | Whole-file scalafmt or IntelliJ formatting; range formatting through IntelliJ. |
+| Formatting | Whole-file scalafmt or IntelliJ formatting; range formatting through IntelliJ. Java files always use the IntelliJ formatter. |
 | Tests | Run ScalaTest, specs2 and MUnit suites/tests, and uTest suites, from code lenses; readable output and a result summary. |
 | Run | Run objects with a `main` method, `App` objects and Scala 3 `@main` methods from code lenses; output and an exit summary. |
-| Code structure | Semantic tokens, document highlights (including a method's exit points, companions and implicit usages), outlines, folding and selection ranges. |
+| Code structure | Semantic tokens, document highlights (including a method's exit points, companions and implicit usages), outlines, folding and selection ranges (also in Java files). |
 
 See [known limitations](#known-limitations) for the supported boundaries of these features.
 
@@ -174,7 +174,7 @@ changed sources, and imports the build again when sources are created or deleted
 
 Whole-file formatting uses the nearest `.scalafmt.conf` between the source file and workspace root. The configuration
 must declare a formatter version; missing dependencies are downloaded from Maven Central and cached locally.
-Project exclusion filters apply. Without a config, and for range requests, the IntelliJ formatter is used.
+Project exclusion filters apply. Without a config, for range requests and for Java files, the IntelliJ formatter is used.
 
 When the client supports dynamic file watchers, changes to build definitions (sbt files, `pom.xml`, Gradle scripts,
 `gradle.properties` and `gradle/libs.versions.toml`) and source-file creation or deletion trigger a reimport. Unsaved source text is preserved.

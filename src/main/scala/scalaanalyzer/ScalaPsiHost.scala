@@ -159,11 +159,11 @@ final class ScalaPsiHost private[scalaanalyzer] (
    *
    * Takes read access itself.
    *
-   * @param file Scala source being queried
+   * @param file Scala or Java source being queried
    * @param offset caret offset in UTF-16 code units
    * @return the strict expansions from innermost to outermost, excluding the initial empty range
    */
-  def selectionRanges(file: ScalaFile, offset: Int): Seq[TextRange] = SelectionRanges.at(file, offset)
+  def selectionRanges(file: PsiFile, offset: Int): Seq[TextRange] = SelectionRanges.at(file, offset)
 
   /**
    * What the insert handler of a chosen suggestion changes (see [[Completion.insert]]).
@@ -213,14 +213,14 @@ final class ScalaPsiHost private[scalaanalyzer] (
    *
    * Takes read access itself.
    *
-   * @param file Scala source to format
+   * @param file Scala or Java source to format
    * @param range UTF-16 range to format, or none for the whole file
    * @param indentSize positive indentation width in spaces
    * @param useTabs whether indentation may use tab characters
    * @return the edits against the current text of `file`; empty when formatting changes nothing
    * @throws IllegalArgumentException when `indentSize` is not positive
    */
-  def formatting(file: ScalaFile, range: Option[TextRange], indentSize: Int, useTabs: Boolean): Seq[ChangeEngine.Edit] =
+  def formatting(file: PsiFile, range: Option[TextRange], indentSize: Int, useTabs: Boolean): Seq[ChangeEngine.Edit] =
     ChangeEngine.format(file, range, indentSize, useTabs).edits
 
   /**

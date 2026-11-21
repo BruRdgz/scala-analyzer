@@ -272,10 +272,10 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
    * @param path registered project-source path
    * @param positions carets, in the desired result order
    * @return one chain per caret, in the order of `positions`, each of ranges smallest first; empty for a file that is
-   *         not Scala
+   *         neither Scala nor Java
    */
   def selectionRanges(path: Path, positions: Seq[LineColumn]): Seq[Seq[LineRange]] = file(path) match {
-    case sourceFile: ScalaFile => host.read {
+    case sourceFile: (ScalaFile | PsiJavaFile) => host.read {
       val sourceDocument = document(sourceFile)
 
       positions.map { at =>
@@ -365,25 +365,26 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
   }
 
   /**
-   * Computes the changes that format a range of the file (all of it without one). Only Scala files are formatted.
+   * Computes the changes that format a range of the file (all of it without one). Scala and Java files are formatted.
    *
    * The buffer is unchanged. A whole-file request uses scalafmt when a configuration is found for the path; every
-   * other request uses the host's IntelliJ formatter. Formatter failures propagate.
+   * other request, and every Java file, uses the host's IntelliJ formatter. Formatter failures propagate.
    *
    * @param path registered project-source path
    * @param range start and end of the range to format, or `None` to format the whole file
    * @param indentSize indentation size of the IntelliJ formatter; scalafmt ignores it
    * @param useTabs whether the IntelliJ formatter indents with tabs; scalafmt ignores it
-   * @return the changes against the current buffer; empty for a file that is not Scala
+   * @return the changes against the current buffer; empty for a file that is neither Scala nor Java
    */
   def formatting(path: Path, range: Option[LineRange], indentSize: Int, useTabs: Boolean): Seq[TextChange] =
     file(path) match {
-      case sourceFile: ScalaFile =>
+      case sourceFile: (ScalaFile | PsiJavaFile) =>
         val selected = host.read(range.map { r =>
           new TextRange(offset(document(sourceFile), r.start), offset(document(sourceFile), r.end))
         })
         // The plugin defaults to the IntelliJ formatter for range requests even when scalafmt is selected.
-        val config = if (range.isEmpty) ScalafmtFormatting.configFor(root, path) else None
+        val wholeScalaFile = range.isEmpty && sourceFile.isInstanceOf[ScalaFile]
+        val config = if (wholeScalaFile) ScalafmtFormatting.configFor(root, path) else None
 
         val edits = config match {
           case Some(configFile) =>

@@ -388,11 +388,19 @@ final class ScalaLanguageServer(
       }
     }
 
-    /** Selects only Scala documents on the `file` scheme in the registration options, and returns them. */
-    def scalaOnly[T <: AbstractTextDocumentRegistrationAndWorkDoneProgressOptions](options: T): T = {
-      options.setDocumentSelector(java.util.List.of(new DocumentFilter("scala", "file", null)))
+    /** Selects only documents of the given languages on the `file` scheme in the registration options. */
+    def selecting[T <: AbstractTextDocumentRegistrationAndWorkDoneProgressOptions](options: T, languages: String*): T = {
+      options.setDocumentSelector(languages.map(new DocumentFilter(_, "file", null)).asJava)
       options
     }
+
+    /** Selects only Scala documents on the `file` scheme in the registration options, and returns them. */
+    def scalaOnly[T <: AbstractTextDocumentRegistrationAndWorkDoneProgressOptions](options: T): T =
+      selecting(options, "scala")
+
+    /** Selects Scala and Java documents on the `file` scheme in the registration options, and returns them. */
+    def scalaAndJava[T <: AbstractTextDocumentRegistrationAndWorkDoneProgressOptions](options: T): T =
+      selecting(options, "scala", "java")
 
     watchesFiles = workspaceCapabilities.flatMap(w => Option(w.getDidChangeWatchedFiles))
       .flatMap(w => Option(w.getDynamicRegistration)).exists(_.booleanValue)
@@ -447,7 +455,7 @@ final class ScalaLanguageServer(
       val lenses = scalaOnly(new CodeLensRegistrationOptions)
       lenses.setResolveProvider(false)
       capabilities.setInlayHintProvider(scalaOnly(inlayHints))
-      capabilities.setSelectionRangeProvider(scalaOnly(new SelectionRangeRegistrationOptions))
+      capabilities.setSelectionRangeProvider(scalaAndJava(new SelectionRangeRegistrationOptions))
       capabilities.setImplementationProvider(scalaOnly(new ImplementationRegistrationOptions))
       capabilities.setCallHierarchyProvider(scalaOnly(new CallHierarchyRegistrationOptions))
       capabilities.setTypeHierarchyProvider(scalaOnly(new TypeHierarchyRegistrationOptions))
@@ -461,8 +469,8 @@ final class ScalaLanguageServer(
       actions.setResolveProvider(true)
       languageRegistrations = Seq(
         "codeLens" -> lenses, "signatureHelp" -> signatures,
-        "formatting" -> scalaOnly(new DocumentFormattingRegistrationOptions),
-        "rangeFormatting" -> scalaOnly(new DocumentRangeFormattingRegistrationOptions),
+        "formatting" -> scalaAndJava(new DocumentFormattingRegistrationOptions),
+        "rangeFormatting" -> scalaAndJava(new DocumentRangeFormattingRegistrationOptions),
         "references" -> scalaOnly(new ReferenceRegistrationOptions), "codeAction" -> actions,
       ).map { (method, options) => new Registration(s"scala-analyzer-$method", s"textDocument/$method", options) }
     } else {

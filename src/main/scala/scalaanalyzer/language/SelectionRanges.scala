@@ -7,7 +7,6 @@ import com.intellij.openapi.util.TextRange
 import com.intellij.openapi.util.text.StringUtil
 import com.intellij.psi.{PsiElement, PsiFile, PsiWhiteSpace}
 import com.intellij.psi.templateLanguages.OuterLanguageElement
-import org.jetbrains.plugins.scala.lang.psi.api.ScalaFile
 
 import scalaanalyzer.platform.{HostLock, RequestEditor}
 
@@ -29,11 +28,11 @@ object SelectionRanges {
    *
    * Runs under a cancellable host read with a temporary editor, released before returning.
    *
-   * @param file Scala source being queried
+   * @param file Scala or Java source being queried
    * @param offset caret offset in UTF-16 code units
    * @return strict expansions from innermost to outermost, excluding the initial empty range
    */
-  def at(file: ScalaFile, offset: Int): Seq[TextRange] = HostLock.query {
+  def at(file: PsiFile, offset: Int): Seq[TextRange] = HostLock.query {
     Using.resource(new RequestEditor(file.getViewProvider.getDocument, file.getProject, offset)) { request =>
       val editor = request.editor
       val caret = editor.getCaretModel.getCurrentCaret
@@ -47,7 +46,7 @@ object SelectionRanges {
   }
 
   /** The next Extend Selection step from `selection`: the smallest handler range strictly containing it. */
-  private def next(file: ScalaFile, editor: Editor, caret: Caret, selection: TextRange): Option[TextRange] = {
+  private def next(file: PsiFile, editor: Editor, caret: Caret, selection: TextRange): Option[TextRange] = {
     ProgressManager.checkCanceled()
     val offset = adjustedOffset(editor.getDocument.getCharsSequence, caret)
     startElement(file, editor, caret, offset).flatMap { start =>
@@ -57,7 +56,7 @@ object SelectionRanges {
   }
 
   /** Starts at the caret's leaf or preceding token, skipping whitespace that cannot expand. */
-  private def startElement(file: ScalaFile, editor: Editor, caret: Caret, offset: Int): Option[StartPoint] = {
+  private def startElement(file: PsiFile, editor: Editor, caret: Caret, offset: Int): Option[StartPoint] = {
     val leaf = elementAt(file, offset)
     val element = leaf match {
       case _: PsiWhiteSpace if offset > 0 && !elementAt(file, offset - 1).isInstanceOf[PsiWhiteSpace] => elementAt(file, offset - 1)
@@ -104,7 +103,7 @@ object SelectionRanges {
   }
 
   /** Gets the leaf at `offset`, using the final character when the caret is at end of file. */
-  private def elementAt(file: ScalaFile, offset: Int): PsiElement =
+  private def elementAt(file: PsiFile, offset: Int): PsiElement =
     file.findElementAt(if (offset > 0 && offset == file.getTextLength) offset - 1 else offset)
 
   /** Skips whitespace and file boundaries to the next PSI content, if one exists. */
@@ -130,7 +129,7 @@ object SelectionRanges {
     }
 
   /** Template leaves can belong to another PSI tree; the action starts at that tree's first sibling at the caret. */
-  private def otherTree(file: ScalaFile, element: PsiElement, offset: Int): PsiElement = element match {
+  private def otherTree(file: PsiFile, element: PsiElement, offset: Int): PsiElement = element match {
     case _: OuterLanguageElement =>
       val other = file.getViewProvider.findElementAt(element.getTextOffset, element.getLanguage)
       if (other == null || other.getContainingFile == element.getContainingFile) element

@@ -3,6 +3,7 @@ package scalaanalyzer.language
 import com.intellij.codeInsight.intention.impl.preview.IntentionPreviewEditor
 import com.intellij.codeInsight.intention.preview.IntentionPreviewUtils
 import com.intellij.diff.comparison.{ByCharRt, ByWordRt, CancellationChecker, ComparisonPolicy}
+import com.intellij.lang.java.JavaLanguage
 import com.intellij.openapi.editor.Editor
 import com.intellij.openapi.progress.ProgressManager
 import com.intellij.openapi.util.{Computable, TextRange}
@@ -211,13 +212,13 @@ object ChangeEngine {
    * Settings are cloned for this request, leaving project settings unchanged. Configured whole-file scalafmt
    * requests are handled by the workspace before reaching this entry point.
    *
-   * @param file Scala file to copy and format
+   * @param file Scala or Java file to copy and format; a Java file takes the request's indentation as well
    * @param range range to format, or none for the whole file
    * @param indentSize positive indentation width in spaces
    * @param useTabs whether indentation may use tab characters
    * @return formatted text and edits against the original
    */
-  def format(file: ScalaFile, range: Option[TextRange], indentSize: Int, useTabs: Boolean): Result = HostLock.query {
+  def format(file: PsiFile, range: Option[TextRange], indentSize: Int, useTabs: Boolean): Result = HostLock.query {
     require(indentSize > 0, "the indent size must be positive")
 
     val manager = CodeStyleSettingsManager.getInstance(file.getProject)
@@ -225,7 +226,11 @@ object ChangeEngine {
 
     // Configured whole-file scalafmt requests are handled before this IntelliJ-formatter entry point.
     settings.getCustomSettings(classOf[ScalaCodeStyleSettings]).FORMATTER = ScalaCodeStyleSettings.INTELLIJ_FORMATTER
-    val indent = settings.getCommonSettings(ScalaLanguage.INSTANCE).getIndentOptions
+    val language = file match {
+      case _: ScalaFile => ScalaLanguage.INSTANCE
+      case _ => JavaLanguage.INSTANCE
+    }
+    val indent = settings.getCommonSettings(language).getIndentOptions
     indent.TAB_SIZE = indentSize
     indent.INDENT_SIZE = indentSize
     indent.USE_TAB_CHARACTER = useTabs
