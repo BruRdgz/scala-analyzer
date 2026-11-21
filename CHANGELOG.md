@@ -37,6 +37,9 @@
 - Java files have signature help, from the Java plugin's parameter info (each overload's signature, the active one and
   the parameter at the caret), and the IDE's parameter-name hints at its defaults (`name:` before a literal argument,
   none where the argument is named like the parameter).
+- Java files have semantic tokens from the Java plugin's name highlighting: classes, interfaces, enums, annotations,
+  type parameters, methods and their declarations, fields (final ones read-only), parameters and locals, with the
+  same token types as the Scala names of the same kind.
 - Scala parameter-name hints follow the IDE's default exclusion list, which the Scala filter shares with Java: calls
   such as setters (`*.set*(*)`), `Math` methods or `println` no longer show parameter names.
 

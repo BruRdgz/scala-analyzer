@@ -13,6 +13,7 @@ import com.intellij.ide.highlighter.HtmlFileHighlighter
 import com.intellij.lang.documentation.{ClientDocumentationSettings, DocumentationSettings}
 import com.intellij.lang.html.HTMLLanguage
 import com.intellij.lang.java.JavaLanguage
+import com.intellij.packageDependencies.{DependencyValidationManager, DependencyValidationManagerImpl}
 import com.intellij.psi.{PsiErrorElement, PsiFile, PsiParserFacade}
 import com.intellij.psi.codeStyle.FileIndentOptionsProvider
 import com.intellij.psi.impl.source.tree.TreeCopyHandler
@@ -41,6 +42,7 @@ import com.intellij.psi.stubs.{LanguageStubDefinition, StubElementRegistryServic
 import com.intellij.psi.impl.java.stubs.index.JavaStubIndexKeys
 import com.intellij.psi.impl.cache.impl.id.{IdIndex, IdIndexEntry}
 import com.intellij.psi.search.GlobalSearchScope
+import com.intellij.psi.search.scope.packageSet.NamedScopeManager
 import com.intellij.psi.util.PsiModificationTracker
 import com.intellij.psi.impl.source.resolve.FileContextUtil
 import com.intellij.util.Processor
@@ -1145,6 +1147,11 @@ private[scalaanalyzer] object HostBootstrap {
           case ("getCurrentSnapshot", _) => ImmutableEntityStorage.Companion.empty()
         })
       projectServices.register(classOf[GuessManager])(new GuessManagerImpl(project))
+      // The named scopes the IDE colors names by (Settings | Appearance | Scopes), which Java's name highlighting reads
+      // to merge their colors. The real managers hold no scope until a state is loaded, and the host loads none: the
+      // answer for a project without custom scopes.
+      projectServices.register(classOf[NamedScopeManager])(new NamedScopeManager(project))
+      projectServices.register(classOf[DependencyValidationManager])(new DependencyValidationManagerImpl(project))
       // Problem descriptors for the local inspections and their suppress actions; the host has no global inspection run.
       projectServices.register(classOf[InspectionManager])(new InspectionManagerBase(project) {
         override def createNewGlobalContext(): GlobalInspectionContext = CallLog.unsupported("InspectionManager.globalContext")

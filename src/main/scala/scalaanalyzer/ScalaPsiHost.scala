@@ -1,8 +1,10 @@
 package scalaanalyzer
 
 import com.intellij.codeInsight.daemon.impl.{AnnotationHolderImpl, AnnotationSessionImpl}
+import com.intellij.codeInsight.daemon.impl.analysis.{HighlightInfoHolder, HighlightNamesUtil}
 import com.intellij.lang.annotation.{Annotation, Annotator, HighlightSeverity}
 import com.intellij.openapi.editor.RangeMarker
+import com.intellij.openapi.editor.colors.TextAttributesKey
 import com.intellij.openapi.fileTypes.FileTypeRegistry
 import com.intellij.openapi.module.Module
 import com.intellij.openapi.progress.ProcessCanceledException
@@ -10,7 +12,10 @@ import com.intellij.openapi.project.Project
 import com.intellij.openapi.util.{Key, TextRange, UserDataHolderBase}
 import com.intellij.openapi.util.text.StringUtil
 import com.intellij.openapi.vfs.VirtualFile
-import com.intellij.psi.{PsiDocumentManager, PsiElement, PsiErrorElement, PsiFile, PsiJavaFile, PsiManager, SyntaxTraverser}
+import com.intellij.psi.{
+  JavaElementVisitor, PsiDocumentManager, PsiElement, PsiErrorElement, PsiFile, PsiJavaCodeReferenceElement, PsiJavaFile,
+  PsiManager, PsiPackage, SyntaxTraverser,
+}
 import com.intellij.psi.impl.PsiManagerEx
 import com.intellij.psi.util.{CachedValue, CachedValueProvider, CachedValuesManager, PsiModificationTracker}
 import org.jetbrains.plugins.scala.lang.psi.api.ScalaFile
@@ -951,16 +956,13 @@ final class ScalaPsiHost private[scalaanalyzer] (
    * @return UTF-16 ranges with their text attribute keys: the visitor's first, then the annotator's, each in the
    *         order its pass produced them
    */
-  def textAttributes(file: ScalaFile): Seq[(TextRange, com.intellij.openapi.editor.colors.TextAttributesKey)] = HostLock.query {
+  def textAttributes(file: ScalaFile): Seq[(TextRange, TextAttributesKey)] = HostLock.query {
     val elements = SyntaxTraverser.psiTraverser(file).asScala.toSeq
-    val holder = new com.intellij.codeInsight.daemon.impl.analysis.HighlightInfoHolder(file)
+    val holder = new HighlightInfoHolder(file)
     val visitor = new org.jetbrains.plugins.scala.highlighter.ScalaSyntaxHighlightingVisitor
 
     visitor.analyze(file, /* updateWholeFile = */ true, holder, () => elements.foreach(visitor.visit))
-    val fromVisitor = (0 until holder.size).map(holder.get).flatMap { info =>
-      Option(info.forcedTextAttributesKey).orElse(Option(info.`type`.getAttributesKey))
-        .map(new TextRange(info.getStartOffset, info.getEndOffset) -> _)
-    }
+    val fromVisitor = attributesOf(holder)
 
     val annotations = annotate(file, new org.jetbrains.plugins.scala.highlighter.ScalaColorSchemeAnnotator, elements.asJava)
 
@@ -968,6 +970,37 @@ final class ScalaPsiHost private[scalaanalyzer] (
       Option(a.getTextAttributes).map(new TextRange(a.getStartOffset, a.getEndOffset) -> _)
     }
   }
+
+  /**
+   * The colors the IDE gives a Java file's names (classes, methods, fields, variables, annotations) and soft keywords:
+   * the Java plugin's names highlighter, whose hard keywords, literals and comments the lexer colors instead.
+   *
+   * Takes read access itself.
+   *
+   * @param file Java source to color
+   * @return UTF-16 ranges with the Java plugin's text attribute keys (`JavaHighlightingColors`), in the order the
+   *         highlighter produced them; a package qualifier is left out, as no Java key says "package"
+   */
+  def javaTextAttributes(file: PsiJavaFile): Seq[(TextRange, TextAttributesKey)] = HostLock.query {
+    // The highlighter colors a package qualifier with the class-name key, only to merge named-scope colors into it.
+    def isPackageReference(element: PsiElement): Boolean = element match {
+      case reference: PsiJavaCodeReferenceElement => reference.resolve.isInstanceOf[PsiPackage]
+      case _ => false
+    }
+
+    val elements = SyntaxTraverser.psiTraverser(file).asScala.toSeq.filterNot(isPackageReference)
+    val holder = new HighlightInfoHolder(file)
+
+    HighlightNamesUtil.highlight(file, holder, (visitor: JavaElementVisitor) => elements.foreach(_.accept(visitor)))
+    attributesOf(holder)
+  }
+
+  /** The text attribute key of each info the holder collected: the info's forced key, else its type's. */
+  private def attributesOf(holder: HighlightInfoHolder): Seq[(TextRange, TextAttributesKey)] =
+    (0 until holder.size).map(holder.get).flatMap { info =>
+      Option(info.forcedTextAttributesKey).orElse(Option(info.`type`.getAttributesKey))
+        .map(new TextRange(info.getStartOffset, info.getEndOffset) -> _)
+    }
 }
 
 /**

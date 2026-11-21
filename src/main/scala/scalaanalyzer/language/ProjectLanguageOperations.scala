@@ -2,6 +2,7 @@ package scalaanalyzer.language
 
 import com.intellij.codeInsight.TargetElementUtil
 import com.intellij.codeInsight.highlighting.{JavaReadWriteAccessDetector, ReadWriteAccessDetector}
+import com.intellij.ide.highlighter.JavaHighlightingColors as J
 import com.intellij.ide.util.treeView.smartTree.TreeElement
 import com.intellij.lang.annotation.HighlightSeverity
 import com.intellij.lang.folding.CustomFoldingBuilder
@@ -1337,20 +1338,25 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
   }
 
   /**
-   * Classifies the file's identifiers and soft keywords as the IDE colors them (see [[ScalaPsiHost.textAttributes]]).
+   * Classifies the file's identifiers and soft keywords as the IDE colors them (see [[ScalaPsiHost.textAttributes]]
+   * and [[ScalaPsiHost.javaTextAttributes]]).
    *
    * Only single-line classifications that this class maps to a token kind are returned.
    *
    * @param path registered project-source path
    * @return the tokens with their start position, length, kind and modifiers, in the order the host returns the
-   *         attributes; empty for a file that is not Scala
+   *         attributes; empty for a file that is neither Scala nor Java
    */
   def semanticTokens(path: Path): Seq[SemanticToken] = file(path) match {
-    case scalaFile: ScalaFile =>
+    case sourceFile: (ScalaFile | PsiJavaFile) =>
       host.read {
-        val sourceDocument = document(scalaFile)
+        val sourceDocument = document(sourceFile)
+        val attributes = sourceFile match {
+          case scalaFile: ScalaFile => host.textAttributes(scalaFile)
+          case javaFile: PsiJavaFile => host.javaTextAttributes(javaFile)
+        }
 
-        host.textAttributes(scalaFile).flatMap { (range, key) =>
+        attributes.flatMap { (range, key) =>
           if (range.isEmpty ||
               sourceDocument.getLineNumber(range.getStartOffset) != sourceDocument.getLineNumber(range.getEndOffset))
             None
@@ -1422,6 +1428,41 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
       case H.METHOD_DECLARATION => Some(TokenStyle(Method, Set(Declaration)))
       case H.ANNOTATION => Some(TokenStyle(Decorator, Set.empty))
       case H.ANNOTATION_ATTRIBUTE => Some(TokenStyle(Property, Set.empty))
+      case _ => javaSemanticToken(key)
+    }
+  }
+
+  /**
+   * Maps the Java plugin's highlighting keys to the same token categories as the Scala keys of the same kind.
+   *
+   * The IDE gives an enum constant the static-final-field key, so it is a read-only property, not an enum member. A
+   * constructor call is colored by the class it names, as a Scala `new` is.
+   */
+  private def javaSemanticToken(key: TextAttributesKey): Option[TokenStyle] = {
+    import SemanticTokenKind.*
+    import SemanticTokenModifier.*
+    key match {
+      case J.KEYWORD => Some(TokenStyle(Keyword, Set.empty))
+      case J.CLASS_NAME_ATTRIBUTES | J.RECORD_NAME_ATTRIBUTES | J.ANONYMOUS_CLASS_NAME_ATTRIBUTES |
+          J.CONSTRUCTOR_CALL_ATTRIBUTES => Some(TokenStyle(Class, Set.empty))
+      case J.ABSTRACT_CLASS_NAME_ATTRIBUTES => Some(TokenStyle(Class, Set(Abstract)))
+      case J.INTERFACE_NAME_ATTRIBUTES => Some(TokenStyle(Interface, Set.empty))
+      case J.ENUM_NAME_ATTRIBUTES => Some(TokenStyle(Enum, Set.empty))
+      case J.TYPE_PARAMETER_NAME_ATTRIBUTES => Some(TokenStyle(TypeParameter, Set.empty))
+      case J.ANNOTATION_NAME_ATTRIBUTES => Some(TokenStyle(Decorator, Set.empty))
+      case J.ANNOTATION_ATTRIBUTE_NAME_ATTRIBUTES => Some(TokenStyle(Property, Set.empty))
+      case J.LOCAL_VARIABLE_ATTRIBUTES => Some(TokenStyle(Variable, Set.empty))
+      case J.PARAMETER_ATTRIBUTES | J.LAMBDA_PARAMETER_ATTRIBUTES | J.IMPLICIT_ANONYMOUS_CLASS_PARAMETER_ATTRIBUTES =>
+        Some(TokenStyle(Parameter, Set.empty))
+      case J.INSTANCE_FIELD_ATTRIBUTES | J.STATIC_FIELD_ATTRIBUTES | J.STATIC_FIELD_IMPORTED_ATTRIBUTES =>
+        Some(TokenStyle(Property, Set.empty))
+      case J.INSTANCE_FINAL_FIELD_ATTRIBUTES | J.STATIC_FINAL_FIELD_ATTRIBUTES |
+          J.STATIC_FINAL_FIELD_IMPORTED_ATTRIBUTES | J.RECORD_COMPONENT_ATTRIBUTES =>
+        Some(TokenStyle(Property, Set(Readonly)))
+      case J.METHOD_CALL_ATTRIBUTES | J.STATIC_METHOD_ATTRIBUTES | J.STATIC_METHOD_CALL_IMPORTED_ATTRIBUTES |
+          J.INHERITED_METHOD_ATTRIBUTES | J.ABSTRACT_METHOD_ATTRIBUTES => Some(TokenStyle(Method, Set.empty))
+      case J.METHOD_DECLARATION_ATTRIBUTES | J.CONSTRUCTOR_DECLARATION_ATTRIBUTES =>
+        Some(TokenStyle(Method, Set(Declaration)))
       case _ => None
     }
   }

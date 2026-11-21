@@ -41,7 +41,7 @@ It exposes editor features through the **Language Server Protocol (LSP)** and im
 | Formatting | Whole-file scalafmt or IntelliJ formatting; range formatting through IntelliJ. Java files always use the IntelliJ formatter. |
 | Tests | Run ScalaTest, specs2 and MUnit suites/tests, and uTest suites, from code lenses; readable output and a result summary. |
 | Run | Run objects with a `main` method, `App` objects and Scala 3 `@main` methods from code lenses; output and an exit summary. |
-| Code structure | Semantic tokens, document highlights (including a method's exit points, companions and implicit usages), outlines, folding and selection ranges (also in Java files). |
+| Code structure | Semantic tokens and selection ranges (also in Java files), document highlights (including a method's exit points, companions and implicit usages), outlines and folding. |
 
 See [known limitations](#known-limitations) for the supported boundaries of these features.
 

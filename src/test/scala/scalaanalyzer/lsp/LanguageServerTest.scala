@@ -338,7 +338,7 @@ class LanguageServerTest extends munit.FunSuite {
     scalaSelector(capabilities.getCallHierarchyProvider.getRight)
     scalaSelector(capabilities.getTypeHierarchyProvider.getRight)
     scalaSelector(capabilities.getRenameProvider.getRight)
-    scalaSelector(capabilities.getSemanticTokensProvider)
+    selector(capabilities.getSemanticTokensProvider, "scala", "java")
     assertEquals(capabilities.getCompletionProvider.getTriggerCharacters.asScala.toSeq, Seq("."))
     assertEquals(capabilities.getCompletionProvider.getResolveProvider, java.lang.Boolean.FALSE)
     assertEquals(capabilities.getCodeLensProvider, null)
@@ -1275,13 +1275,12 @@ class LanguageServerTest extends munit.FunSuite {
     assertEquals(symbols.head.getSelectionRange, new Range(new Position(8, 6), new Position(8, 13)))
   }
 
-  // Line 13, `    count = count + 1`: the assigned and the read variable; line 20, `  def zero: Counter = new Counter(0)`.
-  test("colors identifiers by what they declare or refer to") {
-    val data = server.getTextDocumentService.semanticTokensFull(new SemanticTokensParams(document(counter)))
+  /** The file's semantic tokens, decoded: (line, column) -> (token type, modifiers). */
+  private def decodedTokens(path: Path): Map[(Int, Int), (String, Set[String])] = {
+    val data = server.getTextDocumentService.semanticTokensFull(new SemanticTokensParams(document(path)))
       .get(1, TimeUnit.MINUTES).getData.asScala.map(_.toInt).toSeq
     val legend = SemanticColoring.legend
-    // Decoded: (line, column) -> (type, modifiers).
-    val tokens = data.grouped(5).foldLeft((Map.empty[(Int, Int), (String, Set[String])], 0, 0)) {
+    data.grouped(5).foldLeft((Map.empty[(Int, Int), (String, Set[String])], 0, 0)) {
       case ((found, line, column), Seq(deltaLine, deltaColumn, _, tokenType, bits)) =>
         val l = line + deltaLine
         val c = if (deltaLine == 0) column + deltaColumn else deltaColumn
@@ -1289,10 +1288,38 @@ class LanguageServerTest extends munit.FunSuite {
         (found + ((l, c) -> (legend.getTokenTypes.get(tokenType), modifiers)), l, c)
       case (state, _) => state
     }._1
+  }
+
+  // Line 13, `    count = count + 1`: the assigned and the read variable; line 20, `  def zero: Counter = new Counter(0)`.
+  test("colors identifiers by what they declare or refer to") {
+    val tokens = decodedTokens(counter)
     assertEquals(tokens.get((13, 4)).map(_._1), Some(SemanticTokenTypes.Variable))
     assertEquals(tokens.get((13, 12)).map(_._1), Some(SemanticTokenTypes.Variable))
     assertEquals(tokens.get((20, 6)), Some(SemanticTokenTypes.Method -> Set(SemanticTokenModifiers.Declaration)))
     assertEquals(tokens.get((20, 12)).map(_._1), Some(SemanticTokenTypes.Class))
+  }
+
+  test("colors the names of a Java buffer as the IDE does") {
+    val javaFile = fixture.resolve("core/src/main/java/core/Shout.java")
+    val original = Files.readString(javaFile)
+    val text = "package core;\nclass Shout {\n  static final int TIMES = 2;\n" +
+      "  static String greet(String name) { return name; }\n" +
+      "  static String call(String who) { int n = TIMES; return greet(who); }\n}\n"
+    val lines = text.split("\n")
+    def at(line: Int, name: String, from: Int = 0) = (line, lines(line).indexOf(name, from))
+    val service = server.getTextDocumentService
+    try {
+      service.didOpen(new DidOpenTextDocumentParams(new TextDocumentItem(javaFile.toUri.toString, "java", 210, text)))
+      val tokens = decodedTokens(javaFile)
+      assertEquals(tokens.get(at(1, "Shout")), Some(SemanticTokenTypes.Class -> Set.empty[String]))
+      assertEquals(tokens.get(at(2, "TIMES")), Some(SemanticTokenTypes.Property -> Set(SemanticTokenModifiers.Readonly)))
+      assertEquals(tokens.get(at(3, "greet")), Some(SemanticTokenTypes.Method -> Set(SemanticTokenModifiers.Declaration)))
+      assertEquals(tokens.get(at(3, "name", from = 20)), Some(SemanticTokenTypes.Parameter -> Set.empty[String]))
+      assertEquals(tokens.get(at(4, "n =")), Some(SemanticTokenTypes.Variable -> Set.empty[String]))
+      assertEquals(tokens.get(at(4, "TIMES")), Some(SemanticTokenTypes.Property -> Set(SemanticTokenModifiers.Readonly)))
+      assertEquals(tokens.get(at(4, "greet")), Some(SemanticTokenTypes.Method -> Set.empty[String]))
+    } finally service.didChange(new DidChangeTextDocumentParams(
+      new VersionedTextDocumentIdentifier(javaFile.toUri.toString, 211), JavaList.of(new TextDocumentContentChangeEvent(original))))
   }
 
   test("inlay hints show inferred method types within the requested range") {

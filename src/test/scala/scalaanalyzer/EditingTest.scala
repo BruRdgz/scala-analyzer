@@ -1,6 +1,8 @@
 package scalaanalyzer
 
 import com.intellij.lang.annotation.HighlightSeverity
+import com.intellij.ide.highlighter.JavaHighlightingColors as J
+import com.intellij.openapi.editor.colors.TextAttributesKey
 import com.intellij.openapi.editor.impl.DocumentImpl
 import com.intellij.openapi.progress.ProcessCanceledException
 import com.intellij.openapi.util.TextRange
@@ -1569,6 +1571,60 @@ class EditingTest extends munit.FunSuite {
         Seq(text.indexOf("\"Ann\"") -> "name:", text.indexOf("3);") -> "times:", text.lastIndexOf("3)") -> "times:"))
       assertEquals(hintsIn(new TextRange(literalCall, text.indexOf("\n", literalCall))),
         Seq(text.indexOf("\"Ann\"") -> "name:", text.indexOf("3);") -> "times:"))
+    } finally host.closeSource(file)
+  }
+
+  test("a Java file's names get the Java plugin's highlighting keys, and a package qualifier none") {
+    val text = """package app;
+                 |abstract class Base<T> {
+                 |  static final int LIMIT = 3;
+                 |  int count;
+                 |  static String shout(String text) { return text; }
+                 |  abstract void run();
+                 |  String call(int times) {
+                 |    int local = times;
+                 |    java.lang.String s = shout("x");
+                 |    return s + local + LIMIT + count + helper();
+                 |  }
+                 |  String helper() { return ""; }
+                 |}
+                 |interface Api {}
+                 |enum Color { RED }
+                 |""".stripMargin
+    val file = host.openFile(Path.of("/editing/Base.java"), text, module) match {
+      case java: PsiJavaFile => java
+      case other => fail(s"not Java: $other")
+    }
+    // (text that holds the name, the name, the key the IDE colors it with). Keys marked "guess" were not confirmed
+    // against a run: the order in which the highlighter checks a declaration's modifiers.
+    val expected: Seq[(String, String, TextAttributesKey)] = Seq(
+      ("abstract class Base", "Base", J.ABSTRACT_CLASS_NAME_ATTRIBUTES),
+      ("<T>", "T", J.TYPE_PARAMETER_NAME_ATTRIBUTES),
+      ("interface Api", "Api", J.INTERFACE_NAME_ATTRIBUTES),
+      ("enum Color", "Color", J.ENUM_NAME_ATTRIBUTES),
+      ("int LIMIT", "LIMIT", J.STATIC_FINAL_FIELD_ATTRIBUTES),
+      ("int count;", "count", J.INSTANCE_FIELD_ATTRIBUTES),
+      ("RED", "RED", J.STATIC_FINAL_FIELD_ATTRIBUTES), // guess: an enum constant is a static final field
+      ("String shout(", "shout", J.METHOD_DECLARATION_ATTRIBUTES), // guess: a declaration wins over static
+      ("= shout(", "shout", J.STATIC_METHOD_ATTRIBUTES),
+      ("+ helper(", "helper", J.METHOD_CALL_ATTRIBUTES),
+      ("(int times)", "times", J.PARAMETER_ATTRIBUTES),
+      ("= times;", "times", J.PARAMETER_ATTRIBUTES),
+      ("int local", "local", J.LOCAL_VARIABLE_ATTRIBUTES),
+      ("+ local", "local", J.LOCAL_VARIABLE_ATTRIBUTES),
+      ("+ LIMIT", "LIMIT", J.STATIC_FINAL_FIELD_ATTRIBUTES),
+      ("java.lang.String", "String", J.CLASS_NAME_ATTRIBUTES),
+    )
+    try {
+      val colored = host.javaTextAttributes(file).toMap
+      val found = expected.map { (context, name, _) =>
+        val start = text.indexOf(context) + context.indexOf(name)
+        name -> colored.get(new TextRange(start, start + name.length))
+      }
+      assertEquals(found, expected.map((_, name, key) => name -> Some(key)))
+      val qualifier = text.indexOf("java.lang")
+      assertEquals(colored.keys.filter(r => r.getStartOffset >= qualifier && r.getEndOffset <= qualifier + "java.lang".length).toSeq,
+        Seq.empty)
     } finally host.closeSource(file)
   }
 

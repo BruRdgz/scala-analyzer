@@ -460,7 +460,7 @@ final class ScalaLanguageServer(
       capabilities.setCallHierarchyProvider(scalaOnly(new CallHierarchyRegistrationOptions))
       capabilities.setTypeHierarchyProvider(scalaOnly(new TypeHierarchyRegistrationOptions))
       scalaOnly(rename)
-      scalaOnly(tokens)
+      scalaAndJava(tokens)
       val signatures = scalaAndJava(new SignatureHelpRegistrationOptions)
       signatures.setTriggerCharacters(signatureTriggers)
       signatures.setRetriggerCharacters(signatureRetriggers)
