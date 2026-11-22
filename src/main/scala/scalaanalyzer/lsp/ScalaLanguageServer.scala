@@ -1160,31 +1160,48 @@ final class ScalaLanguageServer(
      *
      * @param params the document whose lenses are requested
      * @return one lens per test suite or test, titled "Run suite" or "Run test", whose command carries the run's
-     *         target, framework, suite and optional test name; then one per main class, titled "Run main", whose
-     *         command carries the target and the class. Empty when the document is not a project source, or while
+     *         target, framework, suite and optional test name, each followed by a "Debug suite" or "Debug test" lens at
+     *         the same range, whose client command `scalaAnalyzer.debug` carries the same object with `kind` `test`; then
+     *         one per main class, titled "Run main", whose command carries the target and the class, each followed by
+     *         a "Debug main" lens with the same object and `kind` `main`. Empty when the document is not a project source, or while
      *         the project is still opening for a client that refreshes lenses
      */
     override def codeLens(params: CodeLensParams): CompletableFuture[JavaList[? <: CodeLens]] =
       if (refreshesCodeLenses && !session.isDone) CompletableFuture.completedFuture(JavaList.of[CodeLens]())
       else onRead("codeLens", params.getTextDocument, JavaList.of[CodeLens]()) { (s, path) =>
-        val tests = s.testLenses(path).map { lens =>
+        val tests = s.testLenses(path).flatMap { lens =>
           val arguments = new JsonObject
           arguments.addProperty("target", lens.target)
           arguments.addProperty("framework", lens.framework)
           arguments.addProperty("suite", lens.suite)
           lens.testName.foreach(arguments.addProperty("testName", _))
-          val title = if (lens.testName.isDefined) "Run test" else "Run suite"
-          new CodeLens(range(lens.range), new Command(title, RunTest, JavaList.of[Object](arguments)), null)
+          val noun = if (lens.testName.isDefined) "test" else "suite"
+          runAndDebugLenses(lens.range, s"Run $noun", RunTest, s"Debug $noun", "test", arguments)
         }
-        val mains = s.mainLenses(path).map { lens =>
+        val mains = s.mainLenses(path).flatMap { lens =>
           val arguments = new JsonObject
           arguments.addProperty("target", lens.target)
           arguments.addProperty("mainClass", lens.mainClass)
-          new CodeLens(range(lens.range), new Command("Run main", RunMain, JavaList.of[Object](arguments)), null)
+          runAndDebugLenses(lens.range, "Run main", RunMain, "Debug main", "main", arguments)
         }
 
         (tests ++ mains).asJava
       }
+
+    /**
+     * The lenses of one runnable: its run, then its debugging at the same range. Running is the server's command;
+     * debugging is the client's, which starts a session of the client's own debug type, so its argument also names
+     * the `kind` of selection that `arguments` holds, as the server's debug command asks.
+     */
+    private def runAndDebugLenses(at: LineRange, runTitle: String, runCommand: String, debugTitle: String,
+                                  kind: String, arguments: JsonObject): Seq[CodeLens] = {
+      val debugArguments = arguments.deepCopy()
+      debugArguments.addProperty("kind", kind)
+
+      Seq(
+        new CodeLens(range(at), new Command(runTitle, runCommand, JavaList.of[Object](arguments)), null),
+        new CodeLens(range(at), new Command(debugTitle, DebugLens, JavaList.of[Object](debugArguments)), null))
+    }
 
     /**
      * Returns the signatures and active parameter at the requested call position.
@@ -1954,7 +1971,7 @@ final class ScalaLanguageServer(
     }
 
   /** Starts the run of a lens's selection; the request completes when the run ends. */
-  private def executeTest(params: ExecuteCommandParams): CompletableFuture[AnyRef] = testSelection(params) match {
+  private def executeTest(params: ExecuteCommandParams): CompletableFuture[AnyRef] = objectArgument(params).flatMap(testSelection) match {
     case None => CompletableFuture.failedFuture(requestError(ResponseErrorCode.InvalidParams,
       s"$RunTest: expected one object with target, framework (${TestRun.Frameworks.mkString(", ")}), suite and an optional testName"))
     case Some(selection) =>
@@ -1963,13 +1980,50 @@ final class ScalaLanguageServer(
   }
 
   /** Starts the run of a lens's main class; the request completes when the program exits. */
-  private def executeMain(params: ExecuteCommandParams): CompletableFuture[AnyRef] = mainSelection(params) match {
+  private def executeMain(params: ExecuteCommandParams): CompletableFuture[AnyRef] = objectArgument(params).flatMap(mainSelection) match {
     case None => CompletableFuture.failedFuture(requestError(ResponseErrorCode.InvalidParams,
       s"$RunMain: expected one object with target and mainClass"))
     case Some(selection) =>
       startRun(testRuns.startMain(selection, () => session.join().prepareMainRun(selection.target, _.foreach(scheduleDiagnostics)),
         logRunLine, showRunResult))
   }
+
+  /**
+   * Compiles the selection's target and starts a debug session for it, answering with the address of the session's DAP
+   * server. The request does not wait for the session: the program starts when the client connects, and the session
+   * does not take the single active run of the run commands.
+   */
+  private def executeDebug(params: ExecuteCommandParams): CompletableFuture[AnyRef] = debugSelection(params) match {
+    case None => CompletableFuture.failedFuture(requestError(ResponseErrorCode.InvalidParams,
+      s"$StartDebugSession: expected one object with kind (main or test) and the members of $RunMain or $RunTest"))
+    case Some(selection) =>
+      answered[AnyRef]("debug", builds.execute) { s =>
+        val changed: Set[Path] => Unit = _.foreach(scheduleDiagnostics)
+        val uri =
+          try withProgress("scala-analyzer: starting the debug session") { _ =>
+            selection.fold(main => s.startMainDebugSession(main.target, main.mainClass, changed),
+              s.startTestDebugSession(_, changed))
+          } catch {
+            // A target that does not compile, or a runner the classpath cannot start: the user's to fix, as for a run.
+            case e: IllegalStateException => throw requestError(ResponseErrorCode.RequestFailed, e.getMessage)
+          }
+        val answer = new JsonObject
+        answer.addProperty("uri", uri.toString)
+        answer
+      }
+  }
+
+  /** Reads the debug request: a main class or a test selection, by its `kind`. */
+  private def debugSelection(params: ExecuteCommandParams): Option[Either[TestRun.MainSelection, TestRun.Selection]] =
+    for {
+      json <- objectArgument(params)
+      kind <- stringMember(json, "kind")
+      selection <- kind match {
+        case "main" => mainSelection(json).map(Left(_))
+        case "test" => testSelection(json).map(Right(_))
+        case _ => None
+      }
+    } yield selection
 
   /** Evaluates the start of a run, answering a start while another run is in progress as `RequestFailed`. */
   private def startRun(start: => CompletableFuture[AnyRef]): CompletableFuture[AnyRef] =
@@ -1978,19 +2032,17 @@ final class ScalaLanguageServer(
       case e: IllegalStateException => CompletableFuture.failedFuture(requestError(ResponseErrorCode.RequestFailed, e.getMessage))
     }
 
-  /** Reads the test selection argument the code lens gave; lsp4j hands it over as JSON. */
-  private def testSelection(params: ExecuteCommandParams): Option[TestRun.Selection] =
+  /** Reads the test selection a code lens gave, or a debug request carries; lsp4j hands it over as JSON. */
+  private def testSelection(json: JsonObject): Option[TestRun.Selection] =
     for {
-      json <- objectArgument(params)
       target <- stringMember(json, "target")
       framework <- stringMember(json, "framework").filter(TestRun.Frameworks.contains)
       suite <- stringMember(json, "suite")
     } yield TestRun.Selection(target, framework, suite, stringMember(json, "testName"))
 
-  /** Reads the main class argument the code lens gave; lsp4j hands it over as JSON. */
-  private def mainSelection(params: ExecuteCommandParams): Option[TestRun.MainSelection] =
+  /** Reads the main class a code lens gave, or a debug request carries; lsp4j hands it over as JSON. */
+  private def mainSelection(json: JsonObject): Option[TestRun.MainSelection] =
     for {
-      json <- objectArgument(params)
       target <- stringMember(json, "target")
       mainClass <- stringMember(json, "mainClass")
     } yield TestRun.MainSelection(target, mainClass)
@@ -2047,8 +2099,12 @@ final class ScalaLanguageServer(
       if (readsConfiguration) readInlayHintSettings()
 
     /**
-     * Executes a test selection, a main class, a completion insert handler, an override of members or an extraction;
-     * unknown commands are invalid parameters.
+     * Executes a test selection, a main class, a debug session, a completion insert handler, an override of members or
+     * an extraction; unknown commands are invalid parameters.
+     *
+     * A debug session is started on the builds thread, after compiling the target, and the request completes with
+     * `{"uri": "tcp://host:port"}`, the address of the session's DAP server; a target that does not compile fails
+     * it with `RequestFailed`. It does not wait for the program, and runs beside a run.
      *
      * A test selection or main class runs on the run thread and the request completes when the run ends; starting
      * one while another is in progress fails with `RequestFailed`. A completion insertion or an override runs on the
@@ -2057,7 +2113,8 @@ final class ScalaLanguageServer(
      * the documents thread too, sends its edit as `workspace/applyEdit`, and completes once the client has answered,
      * with the position of the name it introduced in the edited document, or `null` when the plugin's handler refuses
      * or the client does not apply the edit; it is cancelled as the override is. A malformed test
-     * selection or main class, a completion insertion without six primitive arguments (the second and the third
+     * selection or main class, a debug request without a `kind` of `main` or `test` and the matching members, a
+     * completion insertion without six primitive arguments (the second and the third
      * numbers), an override without the document, the position, the identifiers and the version, an override of a
      * member the class does not offer, an extraction without the document, the range, the version and a refactoring
      * the server knows, and an unknown command fail with `InvalidParams`.
@@ -2068,6 +2125,7 @@ final class ScalaLanguageServer(
     override def executeCommand(params: ExecuteCommandParams): CompletableFuture[AnyRef] = params.getCommand match {
       case RunTest => executeTest(params)
       case RunMain => executeMain(params)
+      case StartDebugSession => executeDebug(params)
       case CompleteInsertion =>
         // lsp4j hands the arguments over as JSON: the ones completionItem gave.
         // The protocol lets a client leave `arguments` out; the line and the column are the two numbers.
@@ -2154,6 +2212,18 @@ private val RunTest = "scalaAnalyzer.runTest"
 
 /** The command that runs the main class carried by a code lens. */
 private val RunMain = "scalaAnalyzer.runMain"
+
+/**
+ * The command that starts a debug session. Its argument is the object of [[RunMain]] or [[RunTest]] with a `kind`
+ * member, `main` or `test`; it answers `{"uri": "tcp://127.0.0.1:port"}`, the address a DAP client connects to.
+ */
+private val StartDebugSession = "scalaAnalyzer.startDebugSession"
+
+/**
+ * The command of the debug code lenses. The server does not execute it and does not list it: the client contributes
+ * it, and starts a debug session with [[StartDebugSession]] when it runs it.
+ */
+private val DebugLens = "scalaAnalyzer.debug"
 
 /**
  * The command that overrides chosen members of a class, listed by `scalaAnalyzer/overridableMembers`. Its arguments

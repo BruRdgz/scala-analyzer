@@ -41,6 +41,7 @@ It exposes editor features through the **Language Server Protocol (LSP)** and im
 | Formatting | Whole-file scalafmt or IntelliJ formatting; range formatting through IntelliJ. Java files always use the IntelliJ formatter. |
 | Tests | Run ScalaTest, specs2 and MUnit suites/tests, uTest suites, and JUnit 4 and 5 classes and methods in Java files, from code lenses; readable output and a result summary. |
 | Run | Run objects with a `main` method, `App` objects, Scala 3 `@main` methods and Java main classes from code lenses; output and an exit summary. |
+| Debugging | Debug main classes and test suites or tests from code lenses or launch configurations (VS Code): breakpoints, stepping, variables and expression evaluation in Scala and Java, through Scala Center's debug adapter. |
 | Code structure | Semantic tokens and selection ranges (also in Java files), document highlights (including a method's exit points, companions and implicit usages), outlines and folding. |
 
 See [known limitations](#known-limitations) for the supported boundaries of these features.
@@ -209,6 +210,41 @@ JVM options, environment variables and working directory of BSP's `buildTarget/j
 server must support. The output goes to the editor's output channel and a notification tells how the program exited.
 The program gets no arguments and no standard input, and shares the single active run with the tests, so a program
 that keeps running blocks the next run until it is cancelled. Worksheets and scripts have no lenses.
+
+### Debugging
+
+Each Run lens has a **Debug** lens beside it (Debug main, Debug suite, Debug test). It compiles the target, launches
+the program or the test runner exactly as the run does, with a JDWP agent added, and connects the editor to the
+debug adapter the server runs for it (Scala Center's scala-debug-adapter, as Metals uses it when its build server
+cannot debug). Breakpoints, stepping, the stack, variables and expression evaluation work in Scala and Java sources,
+and the library frames show their sources when a source archive is known. A debug session does not take the single
+active run: it ends when the editor disconnects or the program exits, and the server ends the ones that are left when
+it stops. The program's output goes to the editor's debug console.
+
+In VS Code, the lenses start the `scala-analyzer` debugger ("Scala (scala-analyzer)"), which a `launch.json`
+configuration can start as well. Its attributes:
+
+| Attribute | Meaning |
+| --- | --- |
+| `buildTarget` | Required. The target to compile and debug, as the server names it: the workspace's file URI and the target id, such as `file:///project#app/Compile` for a main class and `file:///project#core/Test` for tests. |
+| `mainClass` | The class with the main method, by its JVM name. |
+| `testClass`, `framework`, `testName` | A test suite (for JUnit, the class's binary name), its framework (`junit4`, `junit5`, `munit`, `scalatest`, `specs2`, `utest`) and optionally the test, as the Run test lens names it. Use these or `mainClass`. |
+
+Other editors start a session with the server command `scalaAnalyzer.startDebugSession`. Its one argument is the
+object of `scalaAnalyzer.runMain` (`target`, `mainClass`) or `scalaAnalyzer.runTest` (`target`, `framework`, `suite`,
+and optionally `testName`) with a `kind` member, `"main"` or `"test"`. The request compiles the target and answers
+`{"uri": "tcp://127.0.0.1:<port>"}`, the address of a Debug Adapter Protocol server that takes one client; a target
+that does not compile fails it with `RequestFailed`, and an invalid argument with `InvalidParams`. The Debug lenses
+carry the same object as the argument of the command `scalaAnalyzer.debug`, which the server does not execute: the
+client implements it, as the VS Code extension does, by starting a debug session of its own for that selection.
+
+The adapter downloads its expression compiler (and, for Scala 3, its TASTy decoder) for the project's Scala version the
+first time a session evaluates a Scala expression that needs it, and keeps them under the state directory, so that
+evaluation needs network access once per Scala version. Simple expressions (a variable, a field, a method call
+without lambdas) are evaluated without it. Limitations: there is no attach to a running JVM, so a debug session always
+starts the program; Java frames evaluate simple expressions only; the source of a library is shown only when the
+build gives its source archive; and VS Code has no launch configuration provider yet, so a `launch.json` entry is
+written by hand.
 
 ### Troubleshooting
 

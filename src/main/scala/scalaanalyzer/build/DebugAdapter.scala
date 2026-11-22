@@ -66,21 +66,23 @@ object DebugAdapter {
   private val JavaTargetScalaVersion = ScalaVersion.`2.13`
 
   /**
-   * Starts a debug server for a main class, ready for a client to connect; the program starts when it does.
+   * Starts a debug server for a program, ready for a client to connect; the program starts when it does.
    *
-   * The caller owns the result and closes it. The program is the one `TestRun.startMain` would run: the same classpath,
-   * JVM options, environment and working directory.
+   * The caller owns the result and closes it. The program is the command a run would launch, which the caller builds
+   * with `TestRun.mainCommand` or `TestRun.testCommand`: the same classpath, JVM options, environment and working
+   * directory, plus the JDWP agent.
    *
-   * @param main the main class and the target that holds it
-   * @param target the imported target of `main`, which names it and gives its Scala version and sources
+   * @param subject what the session debugs, such as the main class or the suite; the adapter shows it after the target's name
+   * @param command the JVM command line of the program, as `java` followed by its arguments
+   * @param target the imported target that holds the program, which names it and gives its Scala version and sources
    * @param modules every imported module: the output directories of the classpath are matched with them to find their
    *                sources
-   * @param environment the target's run environment, as prepared after compiling it
+   * @param environment the environment `command` was built for, as prepared after compiling the target
    * @param librarySources asks the build for the source archives of jars, which it pairs with them
    * @param toolsCache directory that keeps the expression compilers and decoders downloaded for Scala versions
    * @return the running server; its `uri` is where a DAP client connects
    */
-  def start(main: TestRun.MainSelection, target: ImportedModule, modules: Seq[ImportedModule],
+  def start(subject: String, command: Seq[String], target: ImportedModule, modules: Seq[ImportedModule],
             environment: TestRun.Environment, librarySources: Set[Path] => Map[Path, Path], toolsCache: Path): DebugAdapter = {
     val executor = Executors.newCachedThreadPool(new ThreadFactory {
       override def newThread(task: Runnable): Thread = {
@@ -92,7 +94,7 @@ object DebugAdapter {
     given ExecutionContext = ExecutionContext.fromExecutor(executor)
 
     try {
-      val debuggee = mainClassDebuggee(main, target, modules, environment, librarySources)
+      val debuggee = describe(subject, command, target, modules, environment, librarySources)
       val server = DebugServer(debuggee, new ToolsResolver(toolsCache), HostLogger)
 
       new DebugAdapter(server, server.run(), executor)
@@ -149,8 +151,8 @@ object DebugAdapter {
    * The adapter's description of the program: what it is made of, so that the adapter finds the source of a class that
    * a breakpoint or a frame names, and how to start it.
    */
-  private def mainClassDebuggee(main: TestRun.MainSelection, target: ImportedModule, modules: Seq[ImportedModule],
-                                environment: TestRun.Environment, librarySources: Set[Path] => Map[Path, Path]): Debuggee = {
+  private def describe(subject: String, command: Seq[String], target: ImportedModule, modules: Seq[ImportedModule],
+                       environment: TestRun.Environment, librarySources: Set[Path] => Map[Path, Path]): Debuggee = {
     val classpath = environment.item.getClasspath.asScala.toSeq.map(TestRun.path(_).toAbsolutePath.normalize())
     val (directories, jars) = classpath.partition(Files.isDirectory(_))
     val sourcesByJar = librarySources(jars.toSet)
@@ -158,7 +160,7 @@ object DebugAdapter {
     val (projectModules, otherDirectories) = directories.partition(modulesByClasses.contains)
 
     new Debuggee {
-      override val name: String = s"${target.spec.name}: ${main.mainClass}"
+      override val name: String = s"${target.spec.name}: $subject"
       override val scalaVersion: ScalaVersion = target.spec.scalaVersion.fold(JavaTargetScalaVersion)(ScalaVersion(_))
       override val modules: Seq[Module] = projectModules.map { classes =>
         val module = modulesByClasses(classes)
@@ -175,7 +177,7 @@ object DebugAdapter {
       // Hot code replace is a later wave; as in Metals, no class update is ever observed.
       override def observeClassUpdates(onClassUpdate: Seq[String] => Unit): Closeable = () => ()
 
-      override def run(listener: DebuggeeListener): CancelableFuture[Unit] = launch(main, environment, listener)
+      override def run(listener: DebuggeeListener): CancelableFuture[Unit] = launch(command, environment, listener)
     }
   }
 
@@ -210,9 +212,8 @@ object DebugAdapter {
    * @return a future that completes when the program has exited and its output has been read, and fails when it exited
    *         with an error, unless it was cancelled; cancelling ends it and its child processes
    */
-  private def launch(main: TestRun.MainSelection, environment: TestRun.Environment,
+  private def launch(command: Seq[String], environment: TestRun.Environment,
                      listener: DebuggeeListener): CancelableFuture[Unit] = {
-    val command = TestRun.jvmCommand(environment, Seq.empty, main.mainClass, Seq.empty)
     val builder = new ProcessBuilder((command.head +: Agent +: command.tail).asJava)
       .directory(TestRun.path(environment.item.getWorkingDirectory).toFile)
     builder.environment().putAll(environment.item.getEnvironmentVariables)

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Main classes and tests can be debugged. Every Run lens has a Debug lens beside it; it compiles the target, starts the
+  program or the test runner of the same selection with a JDWP agent, and connects the editor to Scala Center's debug
+  adapter, which the server runs: breakpoints, stepping, variables and expression evaluation in Scala and Java. The
+  server command `scalaAnalyzer.startDebugSession` starts a session and answers with the adapter's address, for any
+  DAP client; the VS Code extension adds the `scala-analyzer` debugger and its launch configurations (see "Debugging"
+  in the README). No attach yet.
 - JUnit 4 and 5 test classes and methods in Java files have run lenses, found as the IDE's run markers find them and
   run through the IDE's JUnit runner. JUnit 5 runs need `junit-platform-launcher` on the test classpath (see "Running
   tests" in the README). The JUnit plugin's frameworks also make Go to Test know JUnit classes.

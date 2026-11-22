@@ -236,7 +236,7 @@ object TestRun {
   /** The job of a test selection: the runner's command, and its TeamCity output read as test outcomes. */
   private def testJob(selection: Selection): Job = Job(
     s"${selection.suite}: test run",
-    command(selection, _),
+    testCommand(selection, _),
     log => {
       val report = new Report(log)
 
@@ -260,14 +260,33 @@ object TestRun {
 
     Job(
       s"${main.mainClass}: run",
-      jvmCommand(_, Seq.empty, main.mainClass, Seq.empty),
+      mainCommand(main, _),
       log => Interpreter(log, exit =>
         if (exit == 0) Result(s"$name: finished")
         else Result(s"$name: exited with code $exit", failed = true)))
   }
 
-  /** Builds the runner's command line: the JVM, its options and classpath, then the runner's arguments. */
-  private def command(selection: Selection, environment: Environment): Seq[String] =
+  /**
+   * Builds the command line of a main class: the JVM, its options and classpath, then the class, without arguments.
+   * A run and a debug session launch this same command.
+   *
+   * @param main main class to launch
+   * @param environment the target's run environment
+   * @return the program and its arguments, `java` first
+   */
+  def mainCommand(main: MainSelection, environment: Environment): Seq[String] =
+    jvmCommand(environment, Seq.empty, main.mainClass, Seq.empty)
+
+  /**
+   * Builds the runner's command line for a test selection: the JVM, its options and classpath, then the runner's
+   * arguments. A run and a debug session launch this same command.
+   *
+   * @param selection suite, and optionally tests, to run
+   * @param environment the target's test environment
+   * @return the program and its arguments, `java` first
+   * @throws IllegalStateException when the selection's runner cannot run on the test classpath (JUnit 5 without the launcher)
+   */
+  def testCommand(selection: Selection, environment: Environment): Seq[String] =
     JUnitRunners.get(selection.framework).fold(scalaCommand(selection, environment))(junitCommand(selection, environment, _))
 
   /**

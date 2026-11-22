@@ -331,10 +331,14 @@ Debugging over DAP, for Scala and Java, in sbt, Maven and Gradle projects alike.
      (`ProjectSession.startMainDebugSession`, `build/DebugAdapter.scala`). The plugin's scalameta 4.5 jars are left off
      the class path: the adapter's runtime evaluator needs scalameta 4.17, and the plugin uses scalameta only for its
      legacy `scala.meta` macro annotations.
-  2. Debug main classes and tests: a Debug code lens beside each Run lens (Scala and Java), a server command that
+  2. Done: debug main classes and tests: a Debug code lens beside each Run lens (Scala and Java), a server command that
      starts a session and answers with the DAP address, and in VS Code a debugger type with a descriptor factory and
      launch configurations (`mainClass`, `testClass`, `buildTarget`, `args`, `jvmOptions`, `env`). A test session
-     debugs the same runner command a test run uses.
+     debugs the same runner command a test run uses. Built as the LSP command `scalaAnalyzer.startDebugSession`
+     (`kind` `main` or `test`, plus the selection of Run main or Run test; answers `{"uri": "tcp://..."}`), the client
+     command `scalaAnalyzer.debug` of the lenses, and a debugger type `scala-analyzer` in the VS Code extension whose
+     descriptor factory calls the server command. Left for later: a `DebugConfigurationProvider` that discovers main
+     classes and tests (`launch.json` is written by hand today), and the `args`, `jvmOptions` and `env` attributes.
   3. Attach to a running JVM; library frames shown from the sources the host already materializes.
   4. The host's Scala knowledge: breakpoints verified and moved to valid lines by the plugin's rule, lambda
      breakpoints (DAP `breakpointLocations`), hot code replace after a compile.

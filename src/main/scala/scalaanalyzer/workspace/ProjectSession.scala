@@ -1042,11 +1042,38 @@ final class ProjectSession private (
    * @throws IllegalStateException when the target does not compile, or the session is closed or unavailable
    */
   def startMainDebugSession(target: String, mainClass: String, changed: Set[Path] => Unit): URI = buildLock.synchronized {
+    val main = TestRun.MainSelection(target, mainClass)
     val environment = prepareMainRun(target, changed)
+
+    debugSession(target, mainClass, TestRun.mainCommand(main, environment), environment)
+  }
+
+  /**
+   * Compiles a target and starts a debug session for a test selection: a DAP server, which launches the command a test
+   * run of the same selection would launch, with the debugger's agent added, when a client connects to it. The
+   * environment is the one `prepareTestRun` captures.
+   *
+   * The session runs until its client disconnects or the runner exits, or until this session closes. It does not share
+   * `TestRun`'s single active run.
+   *
+   * @param selection the suite, and optionally the tests, to debug
+   * @param changed receives the sources that may need their diagnostics republished, as in `prepareTestRun`
+   * @return the `tcp://host:port` address of the DAP server
+   * @throws IllegalStateException when the target does not compile, the selection's runner cannot run on the test
+   *                               classpath, or the session is closed or unavailable
+   */
+  def startTestDebugSession(selection: TestRun.Selection, changed: Set[Path] => Unit): URI = buildLock.synchronized {
+    val environment = prepareTestRun(selection.target, changed)
+
+    debugSession(selection.target, selection.suite, TestRun.testCommand(selection, environment), environment)
+  }
+
+  /** Starts the adapter for `command` in the environment of `target`, and keeps it until its session ends. */
+  private def debugSession(target: String, subject: String, command: Seq[String], environment: TestRun.Environment): URI = {
     val module = imported.find(_.spec.stableId == target)
       .getOrElse(throw new IllegalStateException(s"$target is not an imported target"))
-    val adapter = DebugAdapter.start(TestRun.MainSelection(target, mainClass), module, imported, environment,
-      build.librarySources, host.stateDir.resolve("debug-tools"))
+    val adapter = DebugAdapter.start(subject, command, module, imported, environment, build.librarySources,
+      host.stateDir.resolve("debug-tools"))
 
     debugAdapters.add(adapter)
     adapter.finished.onComplete(_ => debugAdapters.remove(adapter))(using ExecutionContext.parasitic)

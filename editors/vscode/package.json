@@ -21,6 +21,7 @@
   "activationEvents": [
     "onLanguage:scala",
     "onLanguage:java",
+    "onDebugResolve:scala-analyzer",
     "workspaceContains:pom.xml",
     "workspaceContains:build.gradle",
     "workspaceContains:build.gradle.kts",
@@ -99,6 +100,61 @@
         "editor.defaultFormatter": "brurdgz.scala-analyzer"
       }
     },
+    "breakpoints": [
+      {
+        "language": "scala"
+      },
+      {
+        "language": "java"
+      }
+    ],
+    "debuggers": [
+      {
+        "type": "scala-analyzer",
+        "label": "Scala (scala-analyzer)",
+        "languages": [
+          "scala",
+          "java"
+        ],
+        "configurationAttributes": {
+          "launch": {
+            "required": [
+              "buildTarget"
+            ],
+            "properties": {
+              "buildTarget": {
+                "type": "string",
+                "description": "The build target to compile and debug, as the server names it: the workspace's file URI and the target's id, such as file:///project#app/Compile for a main class and file:///project#core/Test for a test suite (the Scala Build view lists the ids)."
+              },
+              "mainClass": {
+                "type": "string",
+                "description": "The class with the main method to debug, by its JVM name (app.Main). Use this or testClass."
+              },
+              "testClass": {
+                "type": "string",
+                "description": "The test suite to debug, by its class name (core.ExampleSuite); for JUnit, its binary name. Use this or mainClass."
+              },
+              "testName": {
+                "type": "string",
+                "description": "The test of the suite to debug, as the Run test lens names it; every test of the suite when empty."
+              },
+              "framework": {
+                "type": "string",
+                "enum": [
+                  "junit4",
+                  "junit5",
+                  "munit",
+                  "scalatest",
+                  "specs2",
+                  "utest"
+                ],
+                "description": "The test framework of testClass, which picks the runner."
+              }
+            }
+          }
+        }
+      }
+    ],
     "taskDefinitions": [
       {
         "type": "scala-analyzer",

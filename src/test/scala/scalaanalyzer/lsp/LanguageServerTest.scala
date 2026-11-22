@@ -7,7 +7,7 @@ import org.eclipse.lsp4j.*
 import org.eclipse.lsp4j.jsonrpc.ResponseErrorException
 import org.eclipse.lsp4j.jsonrpc.messages.ResponseErrorCode
 
-import scalaanalyzer.TestHost
+import scalaanalyzer.{DapClient, TestHost}
 import scalaanalyzer.language.{ChangeEngine}
 import scalaanalyzer.platform.{HostLock, HostLog}
 import scalaanalyzer.workspace.{ProjectSession}
@@ -375,6 +375,23 @@ class LanguageServerTest extends munit.FunSuite {
     assertEquals(methods("textDocument/codeAction").get("resolveProvider").getAsBoolean, true)
   }
 
+  /**
+   * Checks that every run lens has a debug lens at its range: the client's command `scalaAnalyzer.debug`, titled
+   * "Debug" and the run title's noun, whose argument is the run's, with the `kind` of the selection.
+   */
+  private def assertDebugLenses(name: String, runLenses: Seq[CodeLens], debugLenses: Seq[CodeLens], kind: String): Unit = {
+    def argumentOf(lens: CodeLens): JsonObject = new Gson().toJsonTree(lens.getCommand.getArguments.get(0)).getAsJsonObject
+
+    assertEquals(debugLenses.map(_.getRange), runLenses.map(_.getRange), name)
+    assertEquals(debugLenses.map(_.getCommand.getCommand).distinct, if (runLenses.isEmpty) Nil else Seq("scalaAnalyzer.debug"), name)
+    assertEquals(debugLenses.map(_.getCommand.getTitle), runLenses.map(_.getCommand.getTitle.replace("Run", "Debug")), name)
+    runLenses.zip(debugLenses).foreach { (run, debug) =>
+      val expected = argumentOf(run).deepCopy()
+      expected.addProperty("kind", kind)
+      assertEquals(argumentOf(debug), expected, name)
+    }
+  }
+
   test("discovers suite and test code lenses with plugin runner selections and BSP target identities") {
     case class Expected(line: Int, title: String, name: Option[String])
     val cases = Seq(
@@ -413,7 +430,9 @@ class LanguageServerTest extends munit.FunSuite {
     val target = fixture.toFile.toURI.toString + "#core/Test"
     val actualByFile = cases.map { (name, framework, _) =>
       val path = fixture.resolve(s"core/src/test/scala/core/$name.scala")
-      val lenses = server.getTextDocumentService.codeLens(new CodeLensParams(document(path))).get(2, TimeUnit.MINUTES).asScala.toSeq
+      val all = server.getTextDocumentService.codeLens(new CodeLensParams(document(path))).get(2, TimeUnit.MINUTES).asScala.toSeq
+      val (lenses, debugLenses) = all.partition(_.getCommand.getCommand == "scalaAnalyzer.runTest")
+      assertDebugLenses(name, lenses, debugLenses, "test")
       val actual = lenses.map { lens =>
         assertEquals(lens.getRange.getEnd.getLine, lens.getRange.getStart.getLine, name)
         val command = lens.getCommand
@@ -445,7 +464,10 @@ class LanguageServerTest extends munit.FunSuite {
         Expected(6, "core3.Entry3", root + "#core3/Compile")),
     )
     val actual = cases.map { (path, _) =>
-      val lenses = server.getTextDocumentService.codeLens(new CodeLensParams(document(path))).get(2, TimeUnit.MINUTES).asScala.toSeq
+      val all = server.getTextDocumentService.codeLens(new CodeLensParams(document(path))).get(2, TimeUnit.MINUTES).asScala.toSeq
+      val (lenses, debugLenses) = all.partition(_.getCommand.getCommand == "scalaAnalyzer.runMain")
+      assertDebugLenses(path.toString, lenses, debugLenses, "main")
+      assert(debugLenses.forall(_.getCommand.getTitle == "Debug main"), path.toString)
       path -> lenses.map { lens =>
         val command = lens.getCommand
         assertEquals(command.getCommand, "scalaAnalyzer.runMain", path.toString)
@@ -478,7 +500,9 @@ class LanguageServerTest extends munit.FunSuite {
     val target = fixture.toFile.toURI.toString + "#core/Compile"
     try {
       change(text, 190)
-      val lenses = service.codeLens(new CodeLensParams(document(javaFile))).get(2, TimeUnit.MINUTES).asScala.toSeq
+      val all = service.codeLens(new CodeLensParams(document(javaFile))).get(2, TimeUnit.MINUTES).asScala.toSeq
+      val (lenses, debugLenses) = all.partition(_.getCommand.getCommand == "scalaAnalyzer.runMain")
+      assertDebugLenses("a Java buffer", lenses, debugLenses, "main")
       val found = lenses.map { lens =>
         val command = lens.getCommand
         assertEquals((command.getCommand, command.getTitle), ("scalaAnalyzer.runMain", "Run main"))
@@ -591,6 +615,58 @@ class LanguageServerTest extends munit.FunSuite {
       "a test without a target" -> command("scalaAnalyzer.runTest", "suite" -> "core.ExampleFunSuite"),
       "a main without a class" -> command("scalaAnalyzer.runMain", "target" -> "file:///project#app/Compile"),
       "a main with a blank class" -> command("scalaAnalyzer.runMain", "target" -> "file:///project#app/Compile", "mainClass" -> " "),
+    )
+    invalid.foreach { (name, params) =>
+      val error = intercept[ExecutionException] {
+        server.getWorkspaceService.executeCommand(params).get(30, TimeUnit.SECONDS)
+      }
+      error.getCause match {
+        case response: ResponseErrorException => assertEquals(response.getResponseError.getCode, ResponseErrorCode.InvalidParams.getValue, name)
+        case other => fail(s"$name: unexpected command failure: $other")
+      }
+    }
+  }
+
+  test("starts a debug session of a main class and a test suite, and answers the address of its DAP server") {
+    val root = fixture.toFile.toURI.toString
+    val main = new JsonObject
+    main.addProperty("kind", "main")
+    main.addProperty("target", root + "#app/Compile")
+    main.addProperty("mainClass", "app.Main")
+    val test = new JsonObject
+    test.addProperty("kind", "test")
+    test.addProperty("target", root + "#core/Test")
+    test.addProperty("framework", "munit")
+    test.addProperty("suite", "core.ExampleMUnit")
+    test.addProperty("testName", "adds numbers")
+
+    Seq(main -> "HELLO, WORLD!", test -> "adds numbers").foreach { (argument, printed) =>
+      val answer = server.getWorkspaceService.executeCommand(new ExecuteCommandParams("scalaAnalyzer.startDebugSession", JavaList.of(argument)))
+        .get(3, TimeUnit.MINUTES)
+      val uri = java.net.URI.create(new Gson().toJsonTree(answer).getAsJsonObject.get("uri").getAsString)
+      assertEquals(uri.getScheme, "tcp", argument.toString)
+      Using.resource(new DapClient(uri)) { client =>
+        // No breakpoint: the program runs to its end.
+        client.run(client.start())
+        val end = client.awaitEnd()
+        assert(Set("terminated", "exited 0")(end), end)
+        assert(client.output.contains(printed), client.output)
+      }
+    }
+  }
+
+  test("rejects malformed startDebugSession arguments as InvalidParams, as the run commands do") {
+    def command(members: (String, String)*): ExecuteCommandParams = {
+      val argument = new JsonObject
+      members.foreach((member, value) => argument.addProperty(member, value))
+      new ExecuteCommandParams("scalaAnalyzer.startDebugSession", JavaList.of(argument))
+    }
+
+    val invalid = Seq(
+      "no kind" -> command("target" -> "file:///project#app/Compile", "mainClass" -> "app.Main"),
+      "an unknown kind" -> command("kind" -> "attach", "target" -> "file:///project#app/Compile", "mainClass" -> "app.Main"),
+      "a main kind with a test's members" -> command("kind" -> "main", "target" -> "file:///project#core/Test", "suite" -> "core.ExampleMUnit"),
+      "a test kind without a framework" -> command("kind" -> "test", "target" -> "file:///project#core/Test", "suite" -> "core.ExampleMUnit"),
     )
     invalid.foreach { (name, params) =>
       val error = intercept[ExecutionException] {

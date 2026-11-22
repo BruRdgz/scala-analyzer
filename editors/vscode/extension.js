@@ -187,6 +187,13 @@ async function compile() {
 // The commands of the run lenses: the server ends the run when its request is cancelled.
 const runCommands = new Set(['scalaAnalyzer.runTest', 'scalaAnalyzer.runMain']);
 
+// The debugger type of the extension. The Debug lenses run the client command `scalaAnalyzer.debug` (see `debug`), which
+// the server does not list or execute.
+const debugType = 'scala-analyzer';
+
+// The command that asks the server for a debug session, which answers with the address of its DAP server.
+const startDebugSession = 'scalaAnalyzer.startDebugSession';
+
 // The command of the extractions (Extract to val, Extract method): the server sends the edit and answers with the
 // position of the name it introduced, once the edit is applied.
 const extractCommand = 'scalaAnalyzer.extract';
@@ -225,6 +232,46 @@ async function executeCommand(command, args, next) {
       .then(undefined, error => client.handleFailedRequest(ExecuteCommandRequest.type, token, error, undefined)));
 }
 
+/**
+ * Starts a debug session for the selection of a Debug lens, as a launch configuration of the extension's debugger.
+ * @param {{kind: 'main' | 'test', target: string, mainClass?: string, framework?: string, suite?: string, testName?: string}} selection
+ *   the lens's argument: the members of the server's `scalaAnalyzer.startDebugSession`
+ */
+async function debug({ kind, target, mainClass, framework, suite, testName }) {
+  const editor = vscode.window.activeTextEditor;
+  const folder = editor && vscode.workspace.getWorkspaceFolder(editor.document.uri);
+  const configuration = kind === 'main'
+    ? { name: `Debug ${mainClass}`, mainClass }
+    : { name: `Debug ${suite}${testName ? `: ${testName.split('\n')[0]}` : ''}`, testClass: suite, framework, testName };
+  await vscode.debug.startDebugging(folder, { type: debugType, request: 'launch', buildTarget: target, ...configuration });
+}
+
+/**
+ * The server's debug request for a launch configuration: a main class, or a test selection when it has a `testClass`.
+ * @param {vscode.DebugConfiguration} configuration the session's launch configuration
+ */
+function debugRequest({ buildTarget, mainClass, testClass, framework, testName }) {
+  if (mainClass) return { kind: 'main', target: buildTarget, mainClass };
+  if (testClass) return { kind: 'test', target: buildTarget, framework, suite: testClass, testName };
+  throw new Error('a scala-analyzer launch configuration needs a mainClass or a testClass');
+}
+
+/**
+ * Starts the debuggee in the server, which compiles its target first, and connects the editor to the session's DAP server.
+ * @type {vscode.DebugAdapterDescriptorFactory}
+ */
+const debugAdapterFactory = {
+  async createDebugAdapterDescriptor(session) {
+    if (!client.isRunning()) throw new Error('the server is not running');
+    const { uri } = await client.sendRequest(ExecuteCommandRequest.type, {
+      command: startDebugSession,
+      arguments: [debugRequest(session.configuration)],
+    });
+    const { hostname, port } = new URL(uri);
+    return new vscode.DebugAdapterServer(Number(port), hostname);
+  },
+};
+
 // Flips `scalaAnalyzer.inlayHints.xRay`, where the user set it: in the workspace settings when they hold a value, else
 // in the user settings. The server reads the setting again when it changes and asks for the hints.
 async function toggleXRay() {
@@ -255,6 +302,8 @@ function registerCommands(context) {
   register('goToTest', needsServer(goToTest));
   register('chooseMembersToOverride', needsServer(chooseMembersToOverride));
   register('toggleXRay', toggleXRay);
+  register('debug', needsServer(debug));
+  context.subscriptions.push(vscode.debug.registerDebugAdapterDescriptorFactory(debugType, debugAdapterFactory));
   register('showStatus', needsServer(async () => {
     const report = await client.sendRequest('scalaAnalyzer/status');
     client.outputChannel.appendLine(`status: ${JSON.stringify(report, null, 2)}`);

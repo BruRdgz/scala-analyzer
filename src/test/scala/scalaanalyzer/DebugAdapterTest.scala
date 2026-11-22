@@ -1,23 +1,21 @@
 package scalaanalyzer
 
 import org.eclipse.lsp4j.debug.*
-import org.eclipse.lsp4j.debug.launch.DSPLauncher
-import org.eclipse.lsp4j.debug.services.{IDebugProtocolClient, IDebugProtocolServer}
 
+import scalaanalyzer.build.TestRun
 import scalaanalyzer.workspace.ProjectSession
 
 import com.intellij.psi.PsiManager
 
-import java.net.{InetAddress, Socket, URI}
 import java.nio.file.Path
-import java.util.concurrent.{CompletableFuture, LinkedBlockingQueue, TimeUnit}
 
 import scala.concurrent.duration.*
 import scala.jdk.CollectionConverters.*
+import scala.util.Using
 
 /**
- * Debugging a main class of the BSP fixture (`fixtures/bsp-project`) through the embedded debug adapter, with a DAP
- * client in the test. Runs in a JVM of its own (see `Test / testGrouping`): it opens the fixture's modules in the host.
+ * Debugging a main class and a test suite of the BSP fixture (`fixtures/bsp-project`) through the embedded debug
+ * adapter, with a DAP client in the test. Runs in a JVM of its own (see `Test / testGrouping`): it opens the fixture's modules in the host.
  */
 class DebugAdapterTest extends munit.FunSuite {
   override val munitTimeout: Duration = 10.minutes
@@ -26,115 +24,94 @@ class DebugAdapterTest extends munit.FunSuite {
   private val main = fixture.resolve("app/src/main/scala/app/Main.scala")
   /** The line of `println(text)` in `app.Main`, where `text` is assigned. */
   private val printLine = 8
-  /** Every wait of the test is bounded by this. */
-  private val Wait = 2
-
-  /**
-   * What the adapter sends to the client, kept for the test to wait for.
-   *
-   * The client is a proxy of the interface rather than a Scala class: Scala writes forwarders of the interface's default
-   * methods into a class that extends it, with their JSON-RPC annotations, which lsp4j then finds twice.
-   */
-  private final class Events {
-    val ready = new CompletableFuture[Unit]
-    val stops = new LinkedBlockingQueue[StoppedEventArguments]
-    val ended = new CompletableFuture[String]
-    val printed = new LinkedBlockingQueue[String]
-
-    /** The client the launcher answers with; the events the test does not wait for are ignored. */
-    val client: IDebugProtocolClient = java.lang.reflect.Proxy.newProxyInstance(getClass.getClassLoader,
-      Array(classOf[IDebugProtocolClient]), (_, method, arguments) => {
-        (method.getName, Option(arguments).flatMap(_.headOption).orNull) match {
-          case ("initialized", _) => ready.complete(())
-          case ("stopped", stop: StoppedEventArguments) => stops.add(stop)
-          case ("terminated", _) => ended.complete("terminated")
-          case ("exited", exit: ExitedEventArguments) => ended.complete(s"exited ${exit.getExitCode}")
-          case ("output", output: OutputEventArguments) => printed.add(output.getOutput)
-          case _ => ()
-        }
-        null
-      }).asInstanceOf[IDebugProtocolClient]
-  }
+  private val munitSuite = fixture.resolve("core/src/test/scala/core/ExampleMUnit.scala")
+  /** The line of `assertEquals(1 + 1, 2)` in the body of the test `adds numbers` of `core.ExampleMUnit`. */
+  private val testBodyLine = 4
 
   test("debugs a main class: breakpoint, stack, variables, evaluation and exit") {
     val session = ProjectSession.open(TestHost.host, fixture)
-    val events = new Events
-    var socket: Socket = null
     try {
       val uri = session.startMainDebugSession(fixture.toFile.toURI.toString + "#app/Compile", "app.Main", _ => ())
       assertEquals(uri.getScheme, "tcp")
-      socket = new Socket(InetAddress.getByName(uri.getHost), uri.getPort)
-      val launcher = DSPLauncher.createClientLauncher(events.client, socket.getInputStream, socket.getOutputStream)
-      launcher.startListening()
-      val server = launcher.getRemoteProxy
+      Using.resource(new DapClient(uri)) { client =>
+        import client.{await, server}
 
-      def await[T](what: String, future: CompletableFuture[T]): T =
-        try future.get(60, TimeUnit.SECONDS)
-        catch {
-          case failure: Exception => fail(s"$what failed: $failure\noutput: ${events.printed.asScala.mkString}")
+        val launched = client.start()
+        client.breakAt(main, printLine)
+        client.run(launched)
+
+        val stop = client.nextStop()
+        assertEquals(stop.getReason, "breakpoint")
+
+        val traceArguments = new StackTraceArguments
+        traceArguments.setThreadId(stop.getThreadId)
+        val top = await("stackTrace", server.stackTrace(traceArguments)).getStackFrames.head
+        assertEquals(Path.of(top.getSource.getPath), main)
+        assertEquals(top.getLine.intValue, printLine)
+
+        val scopes = new ScopesArguments
+        scopes.setFrameId(top.getId)
+        val locals = await("scopes", server.scopes(scopes)).getScopes.head
+        val variablesArguments = new VariablesArguments
+        variablesArguments.setVariablesReference(locals.getVariablesReference)
+        val variables = await("variables", server.variables(variablesArguments)).getVariables.map(v => v.getName -> v.getValue).toMap
+        assert(variables.get("text").exists(_.contains("HELLO, WORLD!")), variables.toString)
+
+        def evaluate(expression: String): String = {
+          val arguments = new EvaluateArguments
+          arguments.setExpression(expression)
+          arguments.setFrameId(top.getId)
+          arguments.setContext("repl")
+          await(s"evaluate $expression", server.evaluate(arguments)).getResult
         }
+        // The adapter's own evaluator, which reads values through the debugger and downloads nothing.
+        assert(evaluate("text").contains("HELLO, WORLD!"))
+        // A lambda needs the Scala 2.13 expression compiler, which the adapter downloads on its first use: this
+        // assertion needs network access (or a populated `target/host-state/debug-tools`).
+        assert(evaluate("text.map(_.toLower)").contains("hello, world!"))
 
-      val initialize = new InitializeRequestArguments
-      initialize.setAdapterID("scala-analyzer")
-      initialize.setLinesStartAt1(true)
-      initialize.setColumnsStartAt1(true)
-      await("initialize", server.initialize(initialize))
-      // The adapter answers `launch` once it has attached to the program, which waits for the configuration.
-      val launched = server.launch(java.util.Map.of("noDebug", false))
-      await("initialized event", events.ready)
-
-      val source = new Source
-      source.setPath(main.toString)
-      val breakpoints = new SetBreakpointsArguments
-      breakpoints.setSource(source)
-      // A plain instance: Gson writes an anonymous subclass as null.
-      val breakpoint = new SourceBreakpoint
-      breakpoint.setLine(printLine)
-      breakpoints.setBreakpoints(Array(breakpoint))
-      val set = await("setBreakpoints", server.setBreakpoints(breakpoints))
-      assertEquals(set.getBreakpoints.map(_.isVerified).toSeq, Seq(true))
-      await("configurationDone", server.configurationDone(new ConfigurationDoneArguments))
-      await("launch", launched)
-
-      val stop = Option(events.stops.poll(Wait, TimeUnit.MINUTES))
-        .getOrElse(fail(s"no stop at the breakpoint; output: ${events.printed.asScala.mkString}"))
-      assertEquals(stop.getReason, "breakpoint")
-
-      val traceArguments = new StackTraceArguments
-      traceArguments.setThreadId(stop.getThreadId)
-      val top = await("stackTrace", server.stackTrace(traceArguments)).getStackFrames.head
-      assertEquals(Path.of(top.getSource.getPath), main)
-      assertEquals(top.getLine.intValue, printLine)
-
-      val scopes = new ScopesArguments
-      scopes.setFrameId(top.getId)
-      val locals = await("scopes", server.scopes(scopes)).getScopes.head
-      val variablesArguments = new VariablesArguments
-      variablesArguments.setVariablesReference(locals.getVariablesReference)
-      val variables = await("variables", server.variables(variablesArguments)).getVariables.map(v => v.getName -> v.getValue).toMap
-      assert(variables.get("text").exists(_.contains("HELLO, WORLD!")), variables.toString)
-
-      def evaluate(expression: String): String = {
-        val arguments = new EvaluateArguments
-        arguments.setExpression(expression)
-        arguments.setFrameId(top.getId)
-        arguments.setContext("repl")
-        await(s"evaluate $expression", server.evaluate(arguments)).getResult
+        client.resume(stop)
+        val end = client.awaitEnd()
+        assert(Set("terminated", "exited 0")(end), end)
+        assert(client.output.contains("HELLO, WORLD!"), client.output)
       }
-      // The adapter's own evaluator, which reads values through the debugger and downloads nothing.
-      assert(evaluate("text").contains("HELLO, WORLD!"))
-      // A lambda needs the Scala 2.13 expression compiler, which the adapter downloads on its first use: this
-      // assertion needs network access (or a populated `target/host-state/debug-tools`).
-      assert(evaluate("text.map(_.toLower)").contains("hello, world!"))
-
-      val resume = new ContinueArguments
-      resume.setThreadId(stop.getThreadId)
-      await("continue", server.continue_(resume))
-      val end = await("end of the program", events.ended)
-      assert(Set("terminated", "exited 0")(end), end)
-      assert(events.printed.asScala.exists(_.contains("HELLO, WORLD!")), events.printed.asScala.mkString)
     } finally {
-      if (socket != null) socket.close()
+      session.close()
+      releaseModules()
+    }
+  }
+
+  test("debugs a test: the runner of a test run stops at a breakpoint in the test body, then finishes") {
+    val session = ProjectSession.open(TestHost.host, fixture)
+    try {
+      val selection = TestRun.Selection(fixture.toFile.toURI.toString + "#core/Test", "munit", "core.ExampleMUnit",
+        Some("adds numbers"))
+      val uri = session.startTestDebugSession(selection, _ => ())
+      Using.resource(new DapClient(uri)) { client =>
+        val launched = client.start()
+        client.breakAt(munitSuite, testBodyLine)
+        client.run(launched)
+
+        // The line both registers the test, in the suite's constructor, and is its body, in a lambda: the program stops
+        // in each (the IDE would offer one breakpoint per lambda of the line). Each stop is read and resumed until the end.
+        val stopped = Iterator.unfold(()) { _ =>
+          client.nextStopOrEnd().left.toOption.map { stop =>
+            assertEquals(stop.getReason, "breakpoint")
+            val traceArguments = new StackTraceArguments
+            traceArguments.setThreadId(stop.getThreadId)
+            val top = client.await("stackTrace", client.server.stackTrace(traceArguments)).getStackFrames.head
+            client.resume(stop)
+            ((Path.of(top.getSource.getPath), top.getLine.intValue, top.getName), ())
+          }
+        }.toSeq
+        assert(stopped.forall((path, line, _) => path == munitSuite && line == testBodyLine), stopped.toString)
+        // The body's frame is the lambda's (`$anonfun$`), not the constructor's.
+        assert(stopped.exists((_, _, frame) => frame.contains("anonfun")), stopped.toString)
+        val end = client.awaitEnd()
+        assert(Set("terminated", "exited 0")(end), end)
+        assert(client.output.contains("adds numbers"), client.output)
+      }
+    } finally {
       session.close()
       releaseModules()
     }
