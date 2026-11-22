@@ -856,7 +856,8 @@ class LanguageServerTest extends munit.FunSuite {
     filesChanged(closed -> FileChangeType.Deleted)
   }
 
-  // `println` (line 7 of Main.scala) is the library's; `1text` is no identifier.
+  // `println` (line 7 of Main.scala) is the library's; `1text` is no identifier; `class` is a Java keyword, which the
+  // Java plugin's validator refuses as the name of Shout.java's `loud` (line 5).
   test("refuses to rename a library symbol, and to rename to an invalid name") {
     val service = server.getTextDocumentService
     def failure(request: => CompletableFuture[?]) = intercept[java.util.concurrent.ExecutionException](request.get(1, TimeUnit.MINUTES))
@@ -866,6 +867,10 @@ class LanguageServerTest extends munit.FunSuite {
     assertEquals(failure(service.rename(new RenameParams(document(main), new Position(7, 4), "print"))).getCode, ResponseErrorCode.RequestFailed.getValue)
     val invalid = failure(service.rename(new RenameParams(document(main), new Position(6, 50), "1text")))
     assert(invalid.getMessage.contains("'1text' is not a valid name"), invalid.getMessage)
+    val shout = fixture.resolve("core/src/main/java/core/Shout.java")
+    assertEquals(Files.readAllLines(shout).get(5).indexOf("loud"), 25)
+    val keyword = failure(service.rename(new RenameParams(document(shout), new Position(5, 25), "class")))
+    assert(keyword.getMessage.contains("'class' is not a valid name"), keyword.getMessage)
   }
 
   // A Java method that overrides nothing searches for siblings through its subclasses, under a modal progress.

@@ -272,6 +272,14 @@ milestones, not one release; each wave ends with the full suite and its own comm
   - NullableProblems is excluded, and data flow sees no nullability annotations: the host's NullableNotNullManager
     answers none. The real manager plus the Java plugin's annotation-package supports would change how Scala sees
     Java's `@Nullable` too, so it needs the type-inference oracle first.
+  - An audit of the Java plugin's `language="JAVA"` extensions against the host (2026-11-22) found these left out,
+    each a feature that is missing or degraded for Java, not an error: the other Java completion contributors and
+    mod-completion item providers (only JavaCompletionContributor and the keyword provider are registered: no
+    variable-name, javadoc or method-chain suggestions), the Javadoc annotator (Javadoc errors are not reported),
+    surround and unwrap descriptors, split/join list contexts, the type-info provider (Type Info is Scala-only), the
+    reflection reference contributor (`Class.forName("...")` strings), and the delegates of refactorings the host does
+    not offer yet (safe delete, pull up, change signature...). The target-element evaluator and the names validator
+    are registered since.
   - Java error fixes that change the IDE's project model (add a library or module to a classpath) are not offered.
 - Plan to finish the branch (2026-11-22), in order, each step with its tests, the full suite and a commit:
   1. Navigation on Java documents: implementations, call and type hierarchies (the host's operations are already

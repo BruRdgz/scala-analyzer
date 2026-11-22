@@ -42,6 +42,7 @@ import com.intellij.openapi.util.registry.Registry
 import com.intellij.openapi.vfs.{ReadonlyStatusHandler, VirtualFile}
 import com.intellij.featureStatistics.FeatureUsageTracker
 import com.intellij.lang.parameterInfo.{LanguageParameterInfo, ParameterInfoHandler}
+import com.intellij.lang.refactoring.JavaNamesValidator
 import com.intellij.navigation.ItemPresentationProviders
 import com.intellij.psi.{LanguageFileViewProviders, PsiClass, PsiElement, PsiField, PsiManager}
 import com.intellij.psi.presentation.java.{ClassPresentationProvider, FieldPresentationProvider}
@@ -59,8 +60,9 @@ import com.intellij.codeInsight.{
   AnnotationCacheOwnerNormalizer, AutoPopupController, AutoPopupControllerHelper, CodeInsightSettings,
   ConcurrencyAnnotationsManager, ContextNullabilityInfo, CustomExceptionHandler, ExternalAnnotationsManager,
   FileModificationService, ImportFilter, InferredAnnotationsManager, JavaIdeCodeInsightSettings,
-  JavaProjectCodeInsightSettings, NullableNotNullManager, StaticAnalysisAnnotationManager, TailTypeFactory,
-  TargetElementUtil, TargetElementUtilBase, TestFrameworks, TestFrameworksImpl
+  JavaProjectCodeInsightSettings, JavaTargetElementEvaluator, NullableNotNullManager, StaticAnalysisAnnotationManager,
+  TailTypeFactory, TargetElementUtil, TargetElementUtilBase, TargetElementUtilExtender, TestFrameworks,
+  TestFrameworksImpl
 }
 import com.intellij.codeInsight.completion.{
   CompletionService, CompletionType, FrontendFriendlyTailTypeFactory, InternalCompletionSettings,
@@ -1394,6 +1396,8 @@ private[scalaanalyzer] object HostBootstrap {
       }
       // beforeCompletion and lookup escaping must use Scala's operators and keywords, rather than the Java fallback.
       LanguageNamesValidation.INSTANCE.addExplicitExtension(ScalaLanguage.INSTANCE, new ScalaNamesValidator)
+      // Java's: a rename to a keyword (`class`, `_`) is not a valid name, as the Java plugin's validator says.
+      LanguageNamesValidation.INSTANCE.addExplicitExtension(JavaLanguage.INSTANCE, new JavaNamesValidator)
       // Java sources of mixed projects.
       LanguageParserDefinitions.INSTANCE.addExplicitExtension(JavaLanguage.INSTANCE, new JavaParserDefinition)
       // Java's typed leaves (PsiIdentifier, PsiKeyword, ...): Java PSI casts its tokens to them.
@@ -1626,11 +1630,17 @@ private[scalaanalyzer] object HostBootstrap {
                                          showEmptyScopes: Boolean) =
           java.util.List.of()
       })
-      // The element a position stands for, as the editor finds it: the plugin's evaluator decides for Scala.
-      declare("com.intellij.targetElementUtilExtender")
+      // The element a position stands for, as the editor finds it: the plugin's evaluator decides for Scala, and the
+      // Java plugin's for Java, which its descriptor also registers as an extender of the platform's lookups (the
+      // targets of constructors, `this` and `super`, and the implementations Go to Implementation accepts).
+      val javaTargets = new JavaTargetElementEvaluator
+      // The element type is erased; the only extension registered here is the Java plugin's.
+      declare("com.intellij.targetElementUtilExtender").asInstanceOf[ExtensionPointImpl[TargetElementUtilExtender]]
+        .registerExtension(javaTargets, root)
       appServices.register(classOf[TargetElementUtil])(new TargetElementUtil)
       TargetElementUtilBase.TARGET_ELEMENT_EVALUATOR.addExplicitExtension(ScalaLanguage.INSTANCE,
         new ScalaTargetElementEvaluator)
+      TargetElementUtilBase.TARGET_ELEMENT_EVALUATOR.addExplicitExtension(JavaLanguage.INSTANCE, javaTargets)
       // Extension points the reference search and the go-to-class contributor read, with no extensions in the host.
       for (name <- Seq(
              "com.intellij.useScopeOptimizer", "com.intellij.codeUsageScopeOptimizer",
