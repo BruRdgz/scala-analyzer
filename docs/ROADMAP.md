@@ -272,15 +272,14 @@ milestones, not one release; each wave ends with the full suite and its own comm
   - NullableProblems is excluded, and data flow sees no nullability annotations: the host's NullableNotNullManager
     answers none. The real manager plus the Java plugin's annotation-package supports would change how Scala sees
     Java's `@Nullable` too, so it needs the type-inference oracle first.
-  - An audit of the Java plugin's `language="JAVA"` extensions against the host (2026-11-22) found these left out,
-    each a feature that is missing or degraded for Java, not an error: the mod-completion item providers (only the
-    keyword provider is registered), two Java completion contributors that need the IDE's UI (see
-    `HostBootstrap.JavaCompletionContributors`; the others, loaded from java-backend's descriptor since, are exercised
-    by tests only for variable names), the Javadoc annotator (Javadoc errors are not reported),
-    the
-    reflection reference contributor (`Class.forName("...")` strings), and the delegates of refactorings the host does
-    not offer yet (safe delete, pull up, change signature...). The target-element evaluator, the names validator and
-    the type-info provider (Type Info on Java) the surround and unwrap descriptors, and the list contexts and comma flipper are registered or used since.
+  - An audit of the Java plugin's `language="JAVA"` extensions against the host (2026-11-22) found several left out,
+    each a feature missing or degraded for Java rather than an error. Registered or used since: the target-element
+    evaluator, the names validator, the completion contributors (but two that need the IDE's UI, see
+    `HostBootstrap.JavaCompletionContributors`; the others are exercised by tests only for variable names), the
+    type-info provider, the surround and unwrap descriptors, and the list contexts and comma flipper. Still left out:
+    the mod-completion item providers (only the keyword provider is registered), the Javadoc annotator (Javadoc errors
+    are not reported), the reflection reference contributor (`Class.forName("...")` strings), and the delegates of
+    refactorings the host does not offer yet (safe delete, pull up, change signature...).
   - Java error fixes that change the IDE's project model (add a library or module to a classpath) are not offered.
 - Plan to finish the branch (2026-11-22), in order, each step with its tests, the full suite and a commit:
   1. Navigation on Java documents: implementations, call and type hierarchies (the host's operations are already
