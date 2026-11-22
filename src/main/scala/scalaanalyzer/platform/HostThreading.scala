@@ -58,7 +58,8 @@ private[scalaanalyzer] object HostLock {
    */
   def readInParallel(count: Int)(body: Int => Unit): Unit = {
     if (!hasWriteIntent) throw new IllegalStateException("helpers read for an owner of write intent")
-    val helperCount = Runtime.getRuntime.availableProcessors
+    // No more helpers than indexes; a pool needs at least one thread, which finds nothing to do for a count of 0.
+    val helperCount = math.max(1, math.min(Runtime.getRuntime.availableProcessors, count))
     val next = new AtomicInteger()
     val helpers = Executors.newFixedThreadPool(helperCount, runnable => {
       val thread = new Thread(runnable, "scala-analyzer-read-helper")

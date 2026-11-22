@@ -467,12 +467,13 @@ async function activate(context) {
   }
   const javaHome = config.get('javaHome');
   // The editor's own JAVA_HOME, before the override below: the default JDK for Maven and Gradle, which the server
-  // (JDK 25) may be too new to run.
-  const buildJavaHome = config.get('buildJavaHome') || process.env.JAVA_HOME;
+  // (JDK 25) may be too new to run. Always passed, empty when VS Code had none, so the build tool never inherits the
+  // override and finds `java` on the PATH as it would outside the editor.
+  const buildJavaHome = config.get('buildJavaHome') || process.env.JAVA_HOME || '';
   const env = {
     ...process.env,
     ...(javaHome ? { JAVA_HOME: javaHome } : {}),
-    ...(buildJavaHome ? { SCALA_ANALYZER_BUILD_JAVA_HOME: buildJavaHome } : {}),
+    SCALA_ANALYZER_BUILD_JAVA_HOME: buildJavaHome,
     ...(config.get('debugLog') ? { SCALA_ANALYZER_LOG: 'debug' } : {}),
   };
   client = new LanguageClient(

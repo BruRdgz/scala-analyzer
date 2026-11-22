@@ -89,6 +89,14 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
   private final case class PluginReading(general: Seq[FileProblem], previousInspections: Option[Seq[FileProblem]],
     compilerHighlighted: Boolean, text: String, stamp: Long)
 
+  /**
+   * What `problems` reads from a Java file before its inspections run, in one read: the file's errors, the
+   * inspection problems to show meanwhile (none when the current ones are computed already) and the buffer's
+   * modification stamp.
+   */
+  private final case class JavaReading(errors: Seq[FileProblem], previousInspections: Option[Seq[FileProblem]],
+    stamp: Long)
+
   /** The label of the problems of the Scala plugin. */
   private val ScalaSource = "scala-plugin"
 
@@ -172,20 +180,25 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
       val sourceDocument = document(sourceFile)
       val range = new TextRange(offset(sourceDocument, start), offset(sourceDocument, end))
 
-      inlineHints(sourceDocument, host.inlayHints(sourceFile).filter(hint => range.contains(hint.offset)))
+      val numbered = host.inlayHints(sourceFile).zipWithIndex.filter((hint, _) => range.contains(hint.offset))
+
+      inlineHints(sourceDocument, numbered)
     }
     case sourceFile: PsiJavaFile => host.read {
       val sourceDocument = document(sourceFile)
       val range = new TextRange(offset(sourceDocument, start), offset(sourceDocument, end))
 
-      inlineHints(sourceDocument, host.javaInlayHints(sourceFile, range))
+      inlineHints(sourceDocument, host.javaInlayHints(sourceFile, range).zipWithIndex)
     }
     case _ => Seq.empty
   }
 
-  /** Converts the host's hints, which lie within one request's range, to the model; the index is the hint's order. */
-  private def inlineHints(sourceDocument: Document, hints: Seq[InlayHints.InlayHint]): Seq[InlineHint] =
-    hints.zipWithIndex.map { (hint, index) =>
+  /**
+   * Converts the host's hints to the model, each with the index it was given; a Scala file's index is its position
+   * among all the file's hints, not among the ones in the request's range, so `inlayHintTargets` finds it again.
+   */
+  private def inlineHints(sourceDocument: Document, hints: Seq[(InlayHints.InlayHint, Int)]): Seq[InlineHint] =
+    hints.map { (hint, index) =>
       val parts = hint.parts.map(part => HintLabelPart(part.string, InlayHints.target(part).isDefined))
 
       InlineHint(position(sourceDocument, hint.offset), parts, index, hint.annotation)
@@ -457,15 +470,15 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
    * else reuses `lastBuildProblems`. A Java file has the platform's syntax and semantic problems, without javac, and
    * the Java plugin's default inspections of at least weak-warning severity.
    *
-   * The inspections of a large Scala file can take seconds after each edit, so when they have to run, `early` gets
-   * the other problems first, with the previous inspection problems where the edits moved them (see
-   * [[ScalaPsiHost.previousInspectionDiagnostics]]), as the IDE shows its general highlighting before its inspections.
-   * A Java file's problems all come at the end.
+   * The inspections of a large file can take seconds after each edit, so when they have to run, `early` gets
+   * the other problems first (a Java file's errors), with the previous inspection problems where the edits moved them
+   * (see [[ScalaPsiHost.previousInspectionDiagnostics]]), as the IDE shows its general highlighting before its
+   * inspections.
    *
    * @param path registered project-source path
    * @param spec compile settings of the source's module, if it has any
    * @param lastBuildProblems the last build's compiler diagnostics for this source
-   * @param early receives the problems to show while a Scala file's inspections run, in the result's order
+   * @param early receives the problems to show while a file's inspections run, in the result's order
    * @return the plugin's problems, labelled `scala-plugin` or `java-plugin`, then the compiler's, labelled `scalac`;
    *         empty for a file that is neither Scala nor Java
    * @throws com.intellij.openapi.progress.ProcessCanceledException when the buffer is edited meanwhile
@@ -503,11 +516,23 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
         }
 
         reading.general ++ inspected ++ fromCompiler
-      case javaFile: PsiJavaFile => host.read {
-        val sourceDocument = document(javaFile)
+      case javaFile: PsiJavaFile =>
+        val reading = host.read {
+          val sourceDocument = document(javaFile)
 
-        pluginProblems(sourceDocument, host.diagnostics(javaFile) ++ host.inspectionDiagnostics(javaFile), JavaSource)
-      }
+          JavaReading(pluginProblems(sourceDocument, host.diagnostics(javaFile), JavaSource),
+            host.previousInspectionDiagnostics(javaFile).map(pluginProblems(sourceDocument, _, JavaSource)),
+            sourceDocument.getModificationStamp)
+        }
+
+        reading.previousInspections.foreach(previous => early(reading.errors ++ previous))
+
+        host.read {
+          val sourceDocument = document(javaFile)
+          // The errors are of the text read first: with another, the result would mix two versions.
+          if (sourceDocument.getModificationStamp != reading.stamp) throw new ProcessCanceledException()
+          reading.errors ++ pluginProblems(sourceDocument, host.inspectionDiagnostics(javaFile), JavaSource)
+        }
       case _ => Seq.empty
     }
 

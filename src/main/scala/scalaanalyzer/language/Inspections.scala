@@ -240,6 +240,9 @@ final class Inspections(scalaDescriptors: Seq[ExtensionBean], javaDescriptors: S
    */
   private val javaDescriptions: Seq[InspectionDescription] = javaDescriptors.map(describeJava)
 
+  /** The descriptions of `javaDescriptions` by inspection id, which the name providers of each run read. */
+  private val javaDescriptionById: Map[String, InspectionDescription] = javaDescriptions.map(d => d.id -> d).toMap
+
   require(scalaDescriptions.map(_.id).toSet.intersect(javaDescriptions.map(_.id).toSet).isEmpty,
     "a Scala and a Java inspection share an id")
 
@@ -313,7 +316,7 @@ final class Inspections(scalaDescriptors: Seq[ExtensionBean], javaDescriptors: S
    * them in `getDisplayName` and the like, some while reporting a problem, and log an error when they have none.
    */
   private def nameProvider(bean: ExtensionBean): InspectionProfileEntry.DefaultNameProvider = {
-    val description = describeJava(bean)
+    val description = javaDescriptionById(inspectionId(bean))
 
     new InspectionProfileEntry.DefaultNameProvider {
       override def getDefaultShortName: String = shortName(bean)

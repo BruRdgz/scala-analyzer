@@ -36,7 +36,11 @@ private[build] object BloopBuild {
       "Gradle", Seq("settings.gradle", "settings.gradle.kts", "build.gradle", "build.gradle.kts"), "gradlew", "gradle")
   }
 
-  /** Environment variable naming the JDK that runs the build tools, whose versions can be too old for the server's. */
+  /**
+   * Environment variable naming the JDK that runs the build tools, whose versions can be too old for the server's.
+   * The extension always sets it, to the `JAVA_HOME` VS Code had (empty when none), because the server's own
+   * `JAVA_HOME` is the extension's override.
+   */
   val BuildJavaHomeVariable = "SCALA_ANALYZER_BUILD_JAVA_HOME"
 
   /** Maven goal that writes Bloop's configuration; the plugin is fetched by Maven, so the pom stays untouched. */
@@ -111,15 +115,32 @@ private[build] object BloopBuild {
   def gradleCommand(root: Path, initScript: Path): Seq[String] =
     Seq(executable(Tool.Gradle, root), "--init-script", initScript.toString, "bloopInstall")
 
+  /** What the build tools get as `JAVA_HOME`, as [[BuildJavaHomeVariable]] selects it. */
+  enum BuildJdk {
+
+    /** The variable is unset: the tool keeps the server's own `JAVA_HOME`. */
+    case Inherit
+
+    /** The variable is empty: the tool runs without `JAVA_HOME` and finds `java` on the `PATH`. */
+    case Unset
+
+    /** The variable is a path: the tool runs on that JDK. */
+    case Home(path: String)
+  }
+
   /**
    * The JDK the build tools run on, as the environment selects it.
    *
    * @param environment the server's environment
-   * @return the value of [[BuildJavaHomeVariable]] when it is set and not empty; `None` leaves the tool's own
-   *         `JAVA_HOME` lookup untouched
+   * @return [[BuildJdk.Inherit]] when [[BuildJavaHomeVariable]] is unset, [[BuildJdk.Unset]] when it is empty and
+   *         [[BuildJdk.Home]] otherwise
    */
-  def buildJavaHome(environment: collection.Map[String, String]): Option[String] =
-    environment.get(BuildJavaHomeVariable).filter(_.nonEmpty)
+  def buildJdk(environment: collection.Map[String, String]): BuildJdk =
+    environment.get(BuildJavaHomeVariable) match {
+      case None => BuildJdk.Inherit
+      case Some("") => BuildJdk.Unset
+      case Some(path) => BuildJdk.Home(path)
+    }
 
   /**
    * Runs the tool's Bloop install step in the workspace root, so `.bloop/` describes the build as it is now.
@@ -151,7 +172,11 @@ private[build] object BloopBuild {
       .directory(root.toFile)
       .redirectErrorStream(true)
       .redirectOutput(log.toFile)
-    buildJavaHome(System.getenv.asScala).foreach(builder.environment().put("JAVA_HOME", _))
+    buildJdk(System.getenv.asScala) match {
+      case BuildJdk.Inherit =>
+      case BuildJdk.Unset => builder.environment().remove("JAVA_HOME")
+      case BuildJdk.Home(path) => builder.environment().put("JAVA_HOME", path)
+    }
 
     HostLog.info(s"writing Bloop's configuration: $shown (its output: $log)")
     val process =

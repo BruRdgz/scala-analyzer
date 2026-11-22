@@ -161,14 +161,16 @@ class LanguageServerTest extends munit.FunSuite {
   }
 
   /**
-   * The diagnostics a source ends with at `version`. A Scala source can publish twice, before and after its inspections
-   * run; its last publication is awaited, so that no computation of a test outlives it.
+   * The diagnostics a source ends with at `version`. A source can publish twice, before and after its inspections run;
+   * its last publication is awaited, so that no computation of a test outlives it.
    */
   private def diagnosticsOf(path: Path, version: Int): Seq[Diagnostic] =
-    if (path.toString.endsWith(".java")) firstDiagnosticsOf(path, version)
-    else publicationsOf(path, version).lastOption.getOrElse(fail(s"no diagnostics for $path version $version"))
+    publicationsOf(path, version).lastOption.getOrElse(fail(s"no diagnostics for $path version $version"))
 
-  /** The first diagnostics published for `path` at `version`; a Java source publishes them once. */
+  /**
+   * The first diagnostics published for `path` at `version`: all of them for a new source, which has no earlier
+   * inspections to show first.
+   */
   private def firstDiagnosticsOf(path: Path, version: Int): Seq[Diagnostic] = {
     val deadline = System.nanoTime() + 5.minutes.toNanos
     var found: Option[PublishDiagnosticsParams] = None
@@ -185,25 +187,29 @@ class LanguageServerTest extends munit.FunSuite {
 
   /**
    * Every publication for `path` at `version`, in order. The diagnostics thread computes one source at a time, in the
-   * order they were scheduled, and a Java source's diagnostics are published once, at the end of their computation:
-   * once those of Shout.java, reopened after, arrive, the computations scheduled before it are over. A computation that
-   * a write cancelled is scheduled again, behind the barrier, so barriers follow until one arrives alone.
+   * order they were scheduled: once a barrier source, reopened after, publishes anything (its early problems or its
+   * last), the computations scheduled before it are over. The barrier is Shout.java, or Greeting.scala when `path` is
+   * Shout.java, whose buffer the barrier must not replace. A barrier's own later publications are not computations of
+   * the test; any other publication can be one that a write cancelled and scheduled again, behind the barrier, so
+   * barriers follow until one arrives alone.
    */
   private def publicationsOf(path: Path, version: Int): Seq[Seq[Diagnostic]] = {
     val shout = fixture.resolve("core/src/main/java/core/Shout.java")
+    val (barrierFile, barrierLanguage) = if (path == shout) (greeting, "scala") else (shout, "java")
     val publications = Seq.newBuilder[Seq[Diagnostic]]
     var quiet = false
     while (!quiet) {
       val barrier = barrierVersions.incrementAndGet()
       server.getTextDocumentService.didOpen(new DidOpenTextDocumentParams(
-        new TextDocumentItem(shout.toUri.toString, "java", barrier, Files.readString(shout))))
+        new TextDocumentItem(barrierFile.toUri.toString, barrierLanguage, barrier, Files.readString(barrierFile))))
       var arrived = false
       quiet = true
       while (!arrived) {
         val next = Option(Client.published.poll(5, TimeUnit.MINUTES)).getOrElse(fail(s"no diagnostics for $path version $version"))
+        val ofBarrier = next.getUri == barrierFile.toUri.toString
         if (next.getUri == path.toUri.toString && next.getVersion == version) publications += next.getDiagnostics.asScala.toSeq
-        arrived = next.getUri == shout.toUri.toString && next.getVersion == barrier
-        if (!arrived) quiet = false
+        arrived = ofBarrier && next.getVersion == barrier
+        if (!ofBarrier) quiet = false
       }
     }
     publications.result()
@@ -1582,6 +1588,7 @@ class LanguageServerTest extends munit.FunSuite {
     val text = """package app
                  |object Hints {
                  |  def first = List(core.Greeting("x")).head
+                 |  def second = List(core.Greeting("x")).head
                  |}
                  |""".stripMargin
     def change(value: String, version: Int): Unit = server.getTextDocumentService.didChange(new DidChangeTextDocumentParams(
@@ -1605,6 +1612,13 @@ class LanguageServerTest extends munit.FunSuite {
       assertEquals(location.getUri, greeting.toUri.toString)
       assertEquals(location.getRange.getStart, new Position(2, 17))
       assert(resolvedParts(1).getTooltip.getLeft.contains("Greeting"), resolvedParts(1).getTooltip)
+
+      val ranged = server.getTextDocumentService.inlayHint(new InlayHintParams(document(main),
+        new Range(new Position(3, 0), new Position(5, 0)))).get(1, TimeUnit.MINUTES).asScala.toSeq
+      val later = ranged.find(_.getPosition == new Position(3, 12)).getOrElse(fail(s"no hint after `second`: $ranged"))
+      val laterParts = server.getTextDocumentService.resolveInlayHint(later).get(1, TimeUnit.MINUTES)
+        .getLabel.getRight.asScala.toSeq
+      assertEquals(laterParts(1).getLocation.getUri, greeting.toUri.toString, "a ranged request keeps whole-file indexes")
     } finally change(original, 381)
   }
 

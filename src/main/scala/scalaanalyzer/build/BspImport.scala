@@ -131,29 +131,37 @@ final class BuildConnection private[scalaanalyzer] (
     BspImport.dependenciesFirst(imported)
   }
 
-  /** Asks for the Scala options of the Scala targets among `targets`; sends no request when there are none. */
-  private def scalacOptionsById(targets: Seq[BuildTarget]): Map[BuildTargetIdentifier, BspImport.TargetOptions] = {
-    val ids = targets.filter(BspImport.classify(_) == BspImport.TargetKind.Scala).map(_.getId)
+  /**
+   * Asks the server, through `request`, about the targets among `targets` that are of `kind`, and describes each
+   * answer; sends no request when there are none.
+   */
+  private def askAboutTargets[A, V](targets: Seq[BuildTarget], kind: BspImport.TargetKind)(
+      request: java.util.List[BuildTargetIdentifier] => java.util.List[A])(
+      describe: A => (BuildTargetIdentifier, V)): Map[BuildTargetIdentifier, V] = {
+    val ids = targets.filter(BspImport.classify(_) == kind).map(_.getId)
 
-    if (ids.isEmpty) Map.empty
-    else await(server.buildTargetScalacOptions(new ScalacOptionsParams(ids.asJava))).getItems.asScala.map { item =>
-      item.getTarget -> BspImport.TargetOptions(
-        item.getOptions.asScala.toSeq, item.getClasspath.asScala.toSeq.map(uri => Path.of(URI.create(uri))),
-        item.getClassDirectory)
-    }.toMap
+    if (ids.isEmpty) Map.empty else request(ids.asJava).asScala.map(describe).toMap
   }
 
-  /** Asks for the Java options of the Java targets among `targets`; sends no request when there are none. */
-  private def javacOptionsById(targets: Seq[BuildTarget]): Map[BuildTargetIdentifier, BspImport.TargetOptions] = {
-    val ids = targets.filter(BspImport.classify(_) == BspImport.TargetKind.Java).map(_.getId)
+  /** The options, classpath and class directory that the Scala and Java options answers share. */
+  private def targetOptions(options: java.util.List[String], classpath: java.util.List[String], classDirectory: String)
+      : BspImport.TargetOptions =
+    BspImport.TargetOptions(
+      options.asScala.toSeq, classpath.asScala.toSeq.map(uri => Path.of(URI.create(uri))), classDirectory)
 
-    if (ids.isEmpty) Map.empty
-    else await(server.buildTargetJavacOptions(new JavacOptionsParams(ids.asJava))).getItems.asScala.map { item =>
-      item.getTarget -> BspImport.TargetOptions(
-        item.getOptions.asScala.toSeq, item.getClasspath.asScala.toSeq.map(uri => Path.of(URI.create(uri))),
-        item.getClassDirectory)
-    }.toMap
-  }
+  /** Asks for the Scala options of the Scala targets among `targets`. */
+  private def scalacOptionsById(targets: Seq[BuildTarget]): Map[BuildTargetIdentifier, BspImport.TargetOptions] =
+    askAboutTargets(targets, BspImport.TargetKind.Scala)(
+      ids => await(server.buildTargetScalacOptions(new ScalacOptionsParams(ids))).getItems) { item =>
+      item.getTarget -> targetOptions(item.getOptions, item.getClasspath, item.getClassDirectory)
+    }
+
+  /** Asks for the Java options of the Java targets among `targets`. */
+  private def javacOptionsById(targets: Seq[BuildTarget]): Map[BuildTargetIdentifier, BspImport.TargetOptions] =
+    askAboutTargets(targets, BspImport.TargetKind.Java)(
+      ids => await(server.buildTargetJavacOptions(new JavacOptionsParams(ids))).getItems) { item =>
+      item.getTarget -> targetOptions(item.getOptions, item.getClasspath, item.getClassDirectory)
+    }
 
   /**
    * Asks for the Java options of the Scala targets among `targets`, which may hold Java sources (mixed modules); sends
@@ -162,13 +170,12 @@ final class BuildConnection private[scalaanalyzer] (
    * sbt announces Scala only, and never answers `buildTarget/javacOptions` (measured with sbt 1.13): its mixed modules
    * get no Java options, which the host reads as the highest Java level.
    */
-  private def javacOptionsOfScalaTargets(targets: Seq[BuildTarget]): Map[BuildTargetIdentifier, Seq[String]] = {
-    val ids = targets.filter(BspImport.classify(_) == BspImport.TargetKind.Scala).map(_.getId)
-
-    if (ids.isEmpty || !BspImport.compilesJava(capabilities)) Map.empty
-    else await(server.buildTargetJavacOptions(new JavacOptionsParams(ids.asJava))).getItems.asScala
-      .map(item => item.getTarget -> item.getOptions.asScala.toSeq).toMap
-  }
+  private def javacOptionsOfScalaTargets(targets: Seq[BuildTarget]): Map[BuildTargetIdentifier, Seq[String]] =
+    if (!BspImport.compilesJava(capabilities)) Map.empty
+    else askAboutTargets(targets, BspImport.TargetKind.Scala)(
+      ids => await(server.buildTargetJavacOptions(new JavacOptionsParams(ids))).getItems) { item =>
+      item.getTarget -> item.getOptions.asScala.toSeq
+    }
 
   /**
    * Reloads the build definition and invalidates cached targets after success.
@@ -660,6 +667,18 @@ object BspImport {
 
     ordered.values.toSeq
   }
+
+  /**
+   * Whether a workspace is a Maven or Gradle build that the host imports through Bloop: its root has the tool's
+   * files and no `.bsp` connection file, which [[connect]] would use first.
+   *
+   * @param root workspace root
+   * @return `true` when [[connect]] would choose a build tool for the root; `false` for an sbt workspace, or a root
+   *         that has no build
+   */
+  private[scalaanalyzer] def importsThroughBloop(root: Path): Boolean =
+    connectionFiles(root).isEmpty &&
+      BloopBuild.Tool.values.exists(_.rootFiles.exists(file => Files.isRegularFile(root.resolve(file))))
 
   /** The `.bsp` connection files of a workspace, sorted by path; none when it has no `.bsp` directory. */
   private def connectionFiles(projectDir: Path): Seq[Path] = {

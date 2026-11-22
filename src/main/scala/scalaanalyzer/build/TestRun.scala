@@ -217,8 +217,10 @@ object TestRun {
    *
    * @param java path of the `java` executable that launches the runner
    * @param item the environment BSP reported: working directory, environment variables, JVM options and classpath
+   * @param launcherCache directory that keeps the `junit-platform-launcher` downloaded for a JUnit 5 run whose
+   *                      classpath lacks it; `None` fails such a run instead
    */
-  final case class Environment(java: Path, item: JvmEnvironmentItem)
+  final case class Environment(java: Path, item: JvmEnvironmentItem, launcherCache: Option[Path] = None)
 
   /**
    * Final user-facing summary; ignored tests warrant a warning rather than an all-passed notification.
@@ -308,29 +310,32 @@ object TestRun {
    * @param selection suite, and optionally tests, to run
    * @param environment the target's test environment
    * @return the program and its arguments, `java` first
-   * @throws IllegalStateException when the selection's runner cannot run on the test classpath (JUnit 5 without the launcher)
+   * @throws IllegalStateException when the selection's runner cannot run on the test classpath (JUnit 5 without the
+   *                               launcher, and no `junit-platform-engine` version to download it for)
+   * @throws MavenDownload.Unresolved when the JUnit 5 launcher has to be downloaded and cannot be
    */
   def testCommand(selection: Selection, environment: Environment): Seq[String] =
     JUnitRunners.get(selection.framework).fold(scalaCommand(selection, environment))(junitCommand(selection, environment, _))
 
   /**
    * The command line of a JUnit run as the IDE's `TestObject`, `TestClass` and `TestMethod` build it: `JUnitStarter`
-   * with the IDE's version, the runner and the class, or `class,method`. Fails when the JUnit Platform runner is chosen
-   * and the test classpath has no launcher, which the IDE would download.
+   * with the IDE's version, the runner and the class, or `class,method`. When the JUnit Platform runner is chosen and
+   * the test classpath has no launcher, the IDE downloads it, and so does this (see [[launcherJars]]).
    */
   private def junitCommand(selection: Selection, environment: Environment, runnerArgument: String): Seq[String] = {
     val classpath = environment.item.getClasspath.asScala.map(path(_)).toSeq
-    if (runnerArgument == JUnitStarter.JUNIT5_PARAMETER && !providesClass(classpath, LauncherClass))
-      throw new IllegalStateException(
-        "the test classpath has no org.junit.platform:junit-platform-launcher, which the JUnit 5 runner needs; " +
-          "add it as a test dependency of the module (the Maven and Gradle JUnit 5 setups list it separately)")
+    val launcher =
+      if (runnerArgument == JUnitStarter.JUNIT5_PARAMETER && !providesClass(classpath, LauncherClass))
+        launcherJars(classpath, environment.launcherCache)
+      else Seq.empty
 
     // The runner classes (junit-rt, junit-v5-rt) and what they report with (java-rt); loading a class does not link
     // the JUnit libraries it calls. The JUnit 5 runner is named, as its signatures mention the launcher's classes,
     // which the host does not have.
     val platformRunner = Class.forName("com.intellij.junit5.JUnit5IdeaTestRunner", false, getClass.getClassLoader)
     val runnerJars = Seq(classOf[JUnitStarter], platformRunner, classOf[RepeatCount])
-      .map(runner => Path.of(runner.getProtectionDomain.getCodeSource.getLocation.toURI).toString).distinct
+      .map(runner => Path.of(runner.getProtectionDomain.getCodeSource.getLocation.toURI).toString).distinct ++
+      launcher.map(_.toString)
     val test = selection.testName.fold(selection.suite)(method => s"${selection.suite},$method")
     val arguments = Seq(JUnitStarter.IDE_VERSION + JUnitStarter.VERSION, runnerArgument, test)
 
@@ -347,6 +352,35 @@ object TestRun {
     val arguments = Seq("-s", selection.suite.replace("`", "")) ++ names ++ Seq("-showProgressMessages", "true")
 
     jvmCommand(environment, Seq(runnerJar), runner.getName, arguments)
+  }
+
+  /** Matches the file name of the `junit-platform-engine` jar, capturing the platform's version. */
+  private val EngineJar = """junit-platform-engine-(\d.*)\.jar""".r
+
+  /**
+   * Provides the JUnit Platform launcher that the test classpath lacks, as the IDE does: the launcher of the version
+   * of the classpath's `junit-platform-engine`, since the platform's artifacts are released together. Maven's
+   * Surefire and Gradle supply the launcher themselves, so a project often does not list it.
+   */
+  private def launcherJars(classpath: Seq[Path], cache: Option[Path]): Seq[Path] = {
+    val version = classpath.flatMap(_.getFileName.toString match {
+      case EngineJar(version) => Some(version)
+      case _ => None
+    }).headOption
+
+    (cache, version) match {
+      case (Some(directory), Some(platform)) =>
+        val coordinates = MavenDownload.Coordinates("org.junit.platform", "junit-platform-launcher", platform)
+
+        // Its dependencies are on the classpath already, at the engine's version.
+        MavenDownload.resolve(directory, "junit-platform-launcher", Seq(coordinates)).map(_.toPath)
+          .filter(_.getFileName.toString.startsWith("junit-platform-launcher-"))
+      case _ =>
+        throw new IllegalStateException(
+          "the test classpath has no org.junit.platform:junit-platform-launcher, which the JUnit 5 runner needs, " +
+            "and no junit-platform-engine to tell which version to download; add the launcher as a test dependency " +
+            "of the module")
+    }
   }
 
   /** The launcher's class that the JUnit Platform runner needs on the test classpath. */

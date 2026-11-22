@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+- Resolving an inlay hint after a request for a range of the file resolves the hint that was asked for; the hints of a
+  range were numbered within the range, not within the file.
+- Maven and Gradle run on the `JAVA_HOME` VS Code was started with, not on the extension's `scalaAnalyzer.javaHome`,
+  and without `JAVA_HOME` when VS Code had none; `SCALA_ANALYZER_BUILD_JAVA_HOME` set empty removes it.
+- A Java file's errors show before its inspections finish, as a Scala file's problems do.
+- Only a Maven or Gradle workspace treats `pom.xml` and the Gradle files as its build definition, at any depth but
+  outside `target`, `build`, `node_modules` and hidden directories; the MCP server's disk scan sees the same files.
+- JUnit 5 test lenses run when the test classpath has no `junit-platform-launcher`: it is downloaded at the version of
+  the classpath's `junit-platform-engine`, as the IDE does.
+- A Java quick fix that fails no longer takes the other code actions of the range with it.
+
 ## 0.5.0 — 2026-11-22
 
 Java at the IDE's level, Maven and Gradle builds, a debugger and VS Code's Testing view.

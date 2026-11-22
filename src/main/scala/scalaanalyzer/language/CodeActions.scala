@@ -295,14 +295,20 @@ final class CodeActions(scalaIntentionClasses: Seq[String], javaIntentionClasses
 
   /**
    * The error fixes of a Java file's problems that the range touches. An import fix is replaced by a candidate per
-   * class it can import, as the chooser of the IDE lists them (see [[importCandidates]]).
+   * class it can import, as the chooser of the IDE lists them (see [[importCandidates]]). A fix that fails to
+   * create or to list its classes is logged and dropped alone, as the other code actions of the range remain.
    */
   private def javaFixCandidates(file: PsiJavaFile, range: TextRange, editor: Editor, problems: Seq[Diagnostic])
       : Seq[Candidate] =
     fixCandidates(range, problems).flatMap { candidate =>
-      candidate.create() match {
+      try candidate.create() match {
         case imports: ImportClassFixBase[?, ?] => importCandidates(imports, candidate, ActionContext.from(editor, file))
         case _ => Seq(candidate)
+      } catch {
+        case e: ProcessCanceledException => throw e
+        case e @ (NonFatal(_) | _: LinkageError) =>
+          HostLog.warn(s"code action ${candidate.name} could not be offered", e)
+          Seq.empty
       }
     }
 

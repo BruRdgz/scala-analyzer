@@ -170,7 +170,8 @@ final class ProjectSession private (
    *         change affects the build, as when sources only changed (see `followDisk`)
    */
   def importNeeded(root: Path, changes: Seq[ProjectSession.DiskChange]): Option[ProjectSession.ImportReason] = {
-    def isBuildPart(path: Path) = BuildDefinition.isPart(root, isModuleBase, path)
+    val mavenOrGradle = BspImport.importsThroughBloop(root)
+    def isBuildPart(path: Path) = BuildDefinition.isPart(root, mavenOrGradle, isModuleBase, path)
     val buildChanged = changes.exists(change => isBuildPart(change.path))
     val sourcesAddedOrRemoved = changes.exists { change =>
       change.kind != ProjectSession.DiskChange.Kind.Changed && !isBuildPart(change.path) && affectsSources(change.path)
@@ -419,11 +420,11 @@ final class ProjectSession private (
    * This may run concurrently with session operations and waits for import application. Scala 3 compiler
    * diagnostics use the current buffer when compile settings are available; other compiler diagnostics come
    * from the last build compile. Java sources use the platform's syntax and semantic analysis of the current
-   * buffer, without running javac. A Scala source's other problems can come first, through `early`, while its
-   * inspections run.
+   * buffer, without running javac. A source's errors and other problems can come first, through `early`, while
+   * its inspections run.
    *
    * @param path registered project-source path
-   * @param early receives the problems to show while a Scala source's inspections run, when they have to
+   * @param early receives the problems to show while a Scala or Java source's inspections run, when they have to
    * @return the plugin's problems, then the compiler's; empty for a source that is neither Scala nor Java
    */
   def problems(path: Path, early: Seq[FileProblem] => Unit = _ => ()): Seq[FileProblem] = {
@@ -1076,7 +1077,7 @@ final class ProjectSession private (
    * @throws IllegalStateException when the target does not compile, or the session is closed or unavailable
    */
   def prepareTestRun(target: String, changed: Set[Path] => Unit): TestRun.Environment =
-    compiledEnvironment(target, changed)(build.testEnvironment)
+    compiledEnvironment(target, changed)(build.testEnvironment).copy(launcherCache = Some(host.stateDir.resolve("junit-launcher")))
 
   /**
    * Compiles a target and captures its run environment, as `prepareTestRun` does for tests.

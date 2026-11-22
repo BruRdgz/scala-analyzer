@@ -102,8 +102,9 @@ server imports the project the way an IDE does:
 
 The build tool runs with the server's environment. To run it on another JDK than the server's JDK 25, which older
 Gradle versions cannot run on, set `SCALA_ANALYZER_BUILD_JAVA_HOME` to that JDK's home; it becomes the tool's
-`JAVA_HOME`. The VS Code setting `scalaAnalyzer.buildJavaHome` sets it, and when it is empty the extension passes the
-`JAVA_HOME` that VS Code was started with.
+`JAVA_HOME`. When it is unset the tool keeps the server's `JAVA_HOME`; when it is set and empty the tool runs without
+`JAVA_HOME` and finds `java` on the `PATH`. The VS Code setting `scalaAnalyzer.buildJavaHome` sets it, and when it is
+empty the extension passes the `JAVA_HOME` that VS Code was started with (none when VS Code had none).
 
 ### 3. Connect your editor
 
@@ -167,7 +168,7 @@ changed sources, and imports the build again when sources are created or deleted
 | --- | --- | --- |
 | `JAVA_HOME` | JDK used to run the server | `java` on `PATH` |
 | `SCALA_ANALYZER_STATE` | State, logs, formatter cache, library source files and the library index cache | `$XDG_CACHE_HOME/scala-analyzer`, or `~/.cache/scala-analyzer` |
-| `SCALA_ANALYZER_BUILD_JAVA_HOME` | JDK that runs Maven and Gradle for the import (set as the tool's `JAVA_HOME`) | The server's environment |
+| `SCALA_ANALYZER_BUILD_JAVA_HOME` | JDK that runs Maven and Gradle for the import (set as the tool's `JAVA_HOME`) | Unset: the server's `JAVA_HOME`; empty: no `JAVA_HOME` |
 | `SCALA_ANALYZER_HEAP` | Maximum JVM heap | `2g` |
 | `SCALA_ANALYZER_LOG` | Set to `debug` to log every request's timing, each file's inspection times and each library jar's cache use | Informational logging |
 
@@ -197,9 +198,10 @@ JUnit 4 and 5 classes and test methods in Java files have lenses as the IDE's ru
 methods have their own; an abstract class has none). They run through the IDE's own `JUnitStarter`, with the runner the
 IDE chooses for the class (JUnit 5 for a Jupiter class, JUnit 4 for the rest; JUnit 6 classes run on the JUnit 5
 runner), and the same summary as the Scala runs. JUnit 5 needs `org.junit.platform:junit-platform-launcher` on the
-test classpath, which the IDE downloads when it is missing and the server does not: add it as a test dependency
-(Maven: `junit-platform-launcher`, test scope; Gradle: `testRuntimeOnly("org.junit.platform:junit-platform-launcher")`),
-or the run fails with a message that names it.
+test classpath. When it is missing, as with a usual Maven setup where Surefire supplies it, the server downloads it
+from Maven Central, as the IDE does, at the version of the classpath's `junit-platform-engine` (kept in its state
+directory, under `junit-launcher`). Only when the classpath has no engine either does the run fail with a message that
+names the launcher.
 
 ### Running main classes
 

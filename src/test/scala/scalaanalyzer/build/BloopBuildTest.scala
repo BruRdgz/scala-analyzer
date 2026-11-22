@@ -61,24 +61,26 @@ class BloopBuildTest extends munit.FunSuite {
       Seq("gradle", "--init-script", "/init.gradle", "bloopInstall"))
   }
 
-  test("the build tools' JDK comes from the environment variable unless it is unset or empty") {
+  test("the build tools' JDK is inherited when the variable is unset, removed when empty, and the path otherwise") {
+    import BloopBuild.BuildJdk
     val cases = Seq(
-      Map.empty[String, String] -> None,
-      Map(BloopBuild.BuildJavaHomeVariable -> "") -> None,
-      Map("JAVA_HOME" -> "/jdk-25") -> None,
-      Map(BloopBuild.BuildJavaHomeVariable -> "/jdk-17", "JAVA_HOME" -> "/jdk-25") -> Some("/jdk-17"),
+      Map.empty[String, String] -> BuildJdk.Inherit,
+      Map("JAVA_HOME" -> "/jdk-25") -> BuildJdk.Inherit,
+      Map(BloopBuild.BuildJavaHomeVariable -> "") -> BuildJdk.Unset,
+      Map(BloopBuild.BuildJavaHomeVariable -> "/jdk-17", "JAVA_HOME" -> "/jdk-25") -> BuildJdk.Home("/jdk-17"),
     )
 
     cases.foreach { (environment, expected) =>
-      assertEquals(BloopBuild.buildJavaHome(environment), expected, environment.toString)
+      assertEquals(BloopBuild.buildJdk(environment), expected, environment.toString)
     }
   }
 
-  test("Maven and Gradle build files count as the build definition at any depth under the root") {
+  test("in a Maven or Gradle workspace the build files count at any depth, outside the tool directories") {
     val workspace = Path.of("/work")
     val cases = Seq(
       "/work/pom.xml" -> true,
       "/work/app/pom.xml" -> true,
+      "/work/modules/aggregator/pom.xml" -> true,
       "/work/build.gradle" -> true,
       "/work/app/build.gradle.kts" -> true,
       "/work/settings.gradle.kts" -> true,
@@ -90,10 +92,25 @@ class BloopBuildTest extends munit.FunSuite {
       "/elsewhere/pom.xml" -> false,
       "/work/build.sbt" -> true,
       "/work/app/build.sbt" -> false,
+      "/work/build/tmp/x.gradle.kts" -> false,
+      "/work/app/target/classes/pom.xml" -> false,
+      "/work/.gradle/caches/x.gradle" -> false,
+      "/work/build-logic/convention.gradle.kts" -> true,
+      "/work/buildSrc/build.gradle.kts" -> true,
     )
 
     cases.foreach { (path, expected) =>
-      assertEquals(BuildDefinition.isPart(workspace, _ => false, Path.of(path)), expected, path)
+      assertEquals(BuildDefinition.isPart(workspace, mavenOrGradle = true, _ => false, Path.of(path)), expected, path)
+    }
+  }
+
+  test("an sbt workspace takes no Maven or Gradle file as its build definition") {
+    val workspace = Path.of("/work")
+    val cases = Seq("/work/pom.xml" -> false, "/work/fixture/pom.xml" -> false, "/work/fixture/build.gradle" -> false,
+      "/work/build.sbt" -> true)
+
+    cases.foreach { (path, expected) =>
+      assertEquals(BuildDefinition.isPart(workspace, mavenOrGradle = false, _ => false, Path.of(path)), expected, path)
     }
   }
 }
