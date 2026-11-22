@@ -332,7 +332,7 @@ class LanguageServerTest extends munit.FunSuite {
     def scalaSelector(options: AnyRef): Unit = selector(options, "scala")
     // Features already shared with Java files; the others follow as their Java support lands.
     val scalaAndJava = Set("textDocument/signatureHelp", "textDocument/formatting", "textDocument/rangeFormatting",
-      "textDocument/references", "textDocument/codeAction")
+      "textDocument/references", "textDocument/codeAction", "textDocument/codeLens")
     selector(capabilities.getInlayHintProvider.getRight, "scala", "java")
     assert(capabilities.getInlayHintProvider.getRight.getResolveProvider)
     selector(capabilities.getSelectionRangeProvider.getRight, "scala", "java")
@@ -456,6 +456,44 @@ class LanguageServerTest extends munit.FunSuite {
       }
     }
     assertEquals(actual, cases)
+  }
+
+  // The oracle is the Java plugin's main-class rule (PsiMethodUtil.hasMainInClass), as its run markers use it: a
+  // static nested class is launched by its binary name, an instance `main` (Java 21+) makes a main class, and a
+  // non-static inner class is not one the JVM can launch.
+  test("discovers run-main code lenses on the main classes of a Java buffer") {
+    val service = server.getTextDocumentService
+    val javaFile = fixture.resolve("core/src/main/java/core/Shout.java")
+    val text = Seq(
+      "package core;",
+      "public class Shout {",
+      "  public static void main(String[] args) {}",
+      "  static class Nested { public static void main(String[] args) {} }",
+      "  class Inner { public static void main(String[] args) {} }",
+      "}",
+      "class Instance { void main() {} }",
+    ).mkString("\n")
+    def change(value: String, version: Int): Unit = service.didChange(new DidChangeTextDocumentParams(
+      new VersionedTextDocumentIdentifier(javaFile.toUri.toString, version), JavaList.of(new TextDocumentContentChangeEvent(value))))
+    val target = fixture.toFile.toURI.toString + "#core/Compile"
+    try {
+      change(text, 190)
+      val lenses = service.codeLens(new CodeLensParams(document(javaFile))).get(2, TimeUnit.MINUTES).asScala.toSeq
+      val found = lenses.map { lens =>
+        val command = lens.getCommand
+        assertEquals((command.getCommand, command.getTitle), ("scalaAnalyzer.runMain", "Run main"))
+        val argument = new Gson().toJsonTree(command.getArguments.get(0)).getAsJsonObject
+        (lens.getRange.getStart, argument.get("mainClass").getAsString, argument.get("target").getAsString)
+      }
+      def nameAt(line: Int, name: String) = new Position(line, text.split("\n")(line).indexOf(name))
+      assertEquals(found, Seq(
+        (nameAt(1, "Shout"), "core.Shout", target),
+        (nameAt(3, "Nested"), "core.Shout$Nested", target),
+        (nameAt(6, "Instance"), "core.Instance", target)))
+    } finally {
+      change(Files.readString(javaFile), 191)
+      service.documentSymbol(new DocumentSymbolParams(document(javaFile))).get(1, TimeUnit.MINUTES)
+    }
   }
 
   test("runs test selections through BSP and reports readable outcomes") {

@@ -394,10 +394,6 @@ final class ScalaLanguageServer(
       options
     }
 
-    /** Selects only Scala documents on the `file` scheme in the registration options, and returns them. */
-    def scalaOnly[T <: AbstractTextDocumentRegistrationAndWorkDoneProgressOptions](options: T): T =
-      selecting(options, "scala")
-
     /** Selects Scala and Java documents on the `file` scheme in the registration options, and returns them. */
     def scalaAndJava[T <: AbstractTextDocumentRegistrationAndWorkDoneProgressOptions](options: T): T =
       selecting(options, "scala", "java")
@@ -452,7 +448,7 @@ final class ScalaLanguageServer(
     capabilities.setCompletionProvider(new CompletionOptions(/* resolveProvider = */ false, completionTriggers))
 
     if (scopesScalaFeatures) {
-      val lenses = scalaOnly(new CodeLensRegistrationOptions)
+      val lenses = scalaAndJava(new CodeLensRegistrationOptions)
       lenses.setResolveProvider(false)
       capabilities.setInlayHintProvider(scalaAndJava(inlayHints))
       capabilities.setSelectionRangeProvider(scalaAndJava(new SelectionRangeRegistrationOptions))

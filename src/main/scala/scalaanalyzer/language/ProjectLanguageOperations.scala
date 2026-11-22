@@ -231,8 +231,13 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
    *         produce no runnable selection
    */
   def testLenses(path: Path): Seq[TestLens] = lensesOf(path) { (sourceFile, module, target, lines) =>
-    TestLenses.in(sourceFile, module).map { lens =>
-      TestLens(lines(lens.range), target, lens.framework, lens.suite, lens.testName)
+    sourceFile match {
+      case scalaFile: ScalaFile =>
+        TestLenses.in(scalaFile, module).map { lens =>
+          TestLens(lines(lens.range), target, lens.framework, lens.suite, lens.testName)
+        }
+      // The Java test frameworks (JUnit) are not detected.
+      case _: PsiJavaFile => Seq.empty
     }
   }
 
@@ -240,22 +245,22 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
    * Finds the runnable main classes of a source, each with the BSP target of its owning module.
    *
    * @param path registered project-source path
-   * @return the lenses of a Scala file whose module has a BSP target; empty for any other file
+   * @return the lenses of a Scala or Java file whose module has a BSP target; empty for any other file
    */
   def mainLenses(path: Path): Seq[MainLens] = lensesOf(path) { (sourceFile, _, target, lines) =>
     MainLenses.in(sourceFile).map(lens => MainLens(lines(lens.range), target, lens.mainClass))
   }
 
   /**
-   * Runs `find` on a Scala file whose module has a BSP target, in one host read.
+   * Runs `find` on a Scala or Java file whose module has a BSP target, in one host read.
    *
    * @param find receives the file, its module, the module's target and the conversion of offsets to document lines
    * @return what `find` returns; empty for any other file
    */
   private def lensesOf[A](path: Path)(
-      find: (ScalaFile, Module, String, TextRange => LineRange) => Seq[A]): Seq[A] = host.read {
+      find: (ScalaFile | PsiJavaFile, Module, String, TextRange => LineRange) => Seq[A]): Seq[A] = host.read {
     file(path) match {
-      case sourceFile: ScalaFile =>
+      case sourceFile: (ScalaFile | PsiJavaFile) =>
         host.modules.ofFile(sourceFile.getVirtualFile).toSeq.flatMap { module =>
           module.spec.identity.toSeq.flatMap { target =>
             val sourceDocument = document(sourceFile)

@@ -281,8 +281,11 @@ milestones, not one release; each wave ends with the full suite and its own comm
      with a Velocity subset in `HostFileTemplates` (the Java method-body templates use `#if`).
   3. Java refactorings: Extract variable and Inline variable done; Extract method, Inline method and Inline constant
      remain (see Done).
-  4. Wave D: `main` lenses (including Java 21+ instance mains) and JUnit 4/5 test lenses on Java sources, run over
-     BSP like the Scala ones.
+  4. Wave D: `main` lenses on Java sources done (the Java plugin's main-class rule, Java 21+ instance mains
+     included, run over BSP like the Scala ones). JUnit 4/5 test lenses wait for a decision on new dependencies: the
+     JetBrains artifacts `com.jetbrains.intellij.junit:junit` (the IDE's JUnit detection: JUnit4Framework,
+     JupiterFramework, JUnitUtil) and `junit-rt`/`junit-v5-rt` (the IDE's runners, whose TeamCity output the host's
+     test report already reads).
   5. Data flow: the services its inspections ask for are registered (see the open questions); what remains is why
      their reports on simple samples are missing or depend on what ran before.
   6. Release preparation of 0.5.0: README (Java, Maven, Gradle), CHANGELOG, the VS Code extension's README and
