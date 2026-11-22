@@ -86,7 +86,8 @@ class BspImportTest extends munit.FunSuite {
     assertEquals(imported.map(_.spec.stableId).distinct.size, imported.size)
     assert(app.spec.scalacOptions.contains("-Xsource:3"), app.spec.scalacOptions)
     assert(app.spec.classpath.exists(_.getFileName.toString == "scala-library-2.13.18.jar"), app.spec.classpath)
-    assertEquals(app.sources.map(fixture.relativize(_).toString), Seq("app/src/main/scala/app/Main.scala"))
+    assertEquals(app.sources.map(fixture.relativize(_).toString).sorted,
+      Seq("app/src/main/scala/app/Debugged.scala", "app/src/main/scala/app/Main.scala"))
     assert(!module("core").spec.scalacOptions.contains("-Xsource:3"))
     assert(module("core").sources.map(fixture.relativize(_).toString).contains("core/src/main/java/core/Shout.java"))
   }

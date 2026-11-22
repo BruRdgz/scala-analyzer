@@ -147,6 +147,39 @@ class BloopImportTest extends munit.FunSuite {
       }
     }
 
+    // A Java target has no Scala version: the adapter takes its default one, and Java frames need no download.
+    test(s"${build.label} debugs a Java main class: a breakpoint in the module it depends on, and the parameter's value") {
+      withConnection(build) { (copy, connection) =>
+        val modules = connection.modules()
+        val app = named(modules, "app")
+        assert(connection.compile().succeeded)
+        val environment = connection.runEnvironment(app.spec.stableId)
+        val caches = Files.createTempDirectory("debug-caches")
+
+        val adapter = DebugAdapter.start("demo.app.Main",
+          DebugAdapter.Launch(TestRun.mainCommand(TestRun.MainSelection(app.spec.stableId, "demo.app.Main"), environment)),
+          app, modules, environment, connection.librarySources, caches.resolve("tools"), caches.resolve("sources"))
+        try Using.resource(new scalaanalyzer.DapClient(adapter.uri)) { client =>
+          val launched = client.start()
+          // The line of `return "Hello, " + name;` in `Greeter.greet`.
+          val greeter = copy.resolve("core/src/main/java/demo/core/Greeter.java")
+          client.breakAt(greeter, 5)
+          client.run(launched)
+
+          val stop = client.nextStop()
+          val top = client.topFrame(stop)
+          assertEquals(Path.of(top.getSource.getPath).toRealPath(), greeter)
+          assert(client.evaluate(top, "name").contains("world"))
+          client.resume(stop)
+          client.awaitEnd()
+          assert(client.output.contains("Hello, world"), client.output)
+        } finally {
+          adapter.close()
+          delete(caches)
+        }
+      }
+    }
+
     test(s"${build.label} reload runs the install step again, so an added dependency appears in the modules") {
       withConnection(build) { (copy, connection) =>
         assert(!jarNames(named(connection.modules(), "app")).exists(_.startsWith("guava")))

@@ -507,6 +507,18 @@ final class ProjectSession private (
   def typeInfo(path: Path, range: LineRange): Option[String] = language.typeInfo(path, range)
 
   /**
+   * Finds where a debugger stopped in a source shows variable values at the end of lines, as the IDE's "Show values
+   * inline" does.
+   *
+   * @param path registered project-source path
+   * @param visible the part of the source the editor shows, in zero-based lines and UTF-16 columns
+   * @param stopped where the program stopped
+   * @return the names of the variables and where they are, in source order
+   */
+  def inlineValues(path: Path, visible: LineRange, stopped: LineColumn): Seq[(LineRange, String)] =
+    language.inlineValues(path, visible, stopped)
+
+  /**
    * Locates the declarations referenced at a source position, or the declaration whose name is there.
    *
    * Library targets are materialized as read-only source or decompiled files under the host's state directory.
@@ -1151,9 +1163,27 @@ final class ProjectSession private (
     val compilation = compileNotifyingDebugSessions(build.compile(target))
 
     changed(storeBuildProblems(compilation.diagnostics))
-    if (!compilation.succeeded) throw new IllegalStateException(s"compilation failed for $target; see compiler diagnostics")
+    if (!compilation.succeeded) throw new IllegalStateException(compilationFailure(target, compilation))
 
     environment(target)
+  }
+
+  /**
+   * Why a run or a debug session cannot start: the first error the build reported, with where it is, which may be in a
+   * module the target depends on; or that the build server reported none, which its log may explain.
+   */
+  private def compilationFailure(target: String, compilation: CompileResult): String = {
+    val errors = compilation.diagnostics.toSeq.sortBy((path, _) => path.toString).flatMap { (path, problems) =>
+      problems.filter(_.severity == HighlightSeverity.ERROR).map(path -> _)
+    }
+
+    errors.headOption.fold(s"compilation failed for $target, and the build server reported no error; see its log") {
+      (path, first) =>
+        val where = if (path.startsWith(root)) root.relativize(path) else path
+        val more = errors.size - 1
+        s"compilation failed for $target: $where:${first.start.line + 1}: ${first.message.linesIterator.nextOption().getOrElse("")}" +
+          (if (more > 0) s" (and $more more ${if (more == 1) "error" else "errors"})" else "")
+    }
   }
 
   /**

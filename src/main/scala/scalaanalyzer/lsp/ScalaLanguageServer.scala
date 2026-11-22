@@ -452,6 +452,7 @@ final class ScalaLanguageServer(
       lenses.setResolveProvider(false)
       capabilities.setInlayHintProvider(scalaAndJava(inlayHints))
       capabilities.setSelectionRangeProvider(scalaAndJava(new SelectionRangeRegistrationOptions))
+      capabilities.setInlineValueProvider(scalaAndJava(new InlineValueRegistrationOptions))
       capabilities.setImplementationProvider(scalaAndJava(new ImplementationRegistrationOptions))
       capabilities.setCallHierarchyProvider(scalaAndJava(new CallHierarchyRegistrationOptions))
       capabilities.setTypeHierarchyProvider(scalaAndJava(new TypeHierarchyRegistrationOptions))
@@ -473,6 +474,7 @@ final class ScalaLanguageServer(
       capabilities.setCodeLensProvider(new CodeLensOptions(false))
       capabilities.setInlayHintProvider(inlayHints)
       capabilities.setSelectionRangeProvider(true)
+      capabilities.setInlineValueProvider(true)
       capabilities.setSignatureHelpProvider(new SignatureHelpOptions(signatureTriggers, signatureRetriggers))
       capabilities.setDocumentFormattingProvider(true)
       capabilities.setDocumentRangeFormattingProvider(true)
@@ -1215,6 +1217,23 @@ final class ScalaLanguageServer(
     override def signatureHelp(params: SignatureHelpParams): CompletableFuture[SignatureHelp] =
       onRead("signatureHelp", params.getTextDocument, null) { (s, path) =>
         s.signatures(path, lineColumn(params.getPosition)).filter(_.items.nonEmpty).map(signatureHelpOf).orNull
+      }
+
+    /**
+     * Answers where a debug session stopped in the document shows variable values, as the IDE's "Show values inline":
+     * the client looks each name up in the stopped frame's variables.
+     *
+     * Runs on a read thread.
+     *
+     * @param params the document, its visible range and the stopped location
+     * @return one variable lookup per local variable and line, up to the stopped line; empty when the document is not a
+     *         project source
+     */
+    override def inlineValue(params: InlineValueParams): CompletableFuture[JavaList[InlineValue]] =
+      onRead("inlineValue", params.getTextDocument, JavaList.of[InlineValue]()) { (s, path) =>
+        s.inlineValues(path, lineRange(params.getRange), lineColumn(params.getContext.getStoppedLocation.getStart)).map {
+          (at, name) => new InlineValue(new InlineValueVariableLookup(range(at), /* caseSensitiveLookup = */ true, name))
+        }.asJava
       }
 
     /**

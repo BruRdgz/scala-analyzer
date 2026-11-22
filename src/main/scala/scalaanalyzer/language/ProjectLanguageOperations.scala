@@ -605,6 +605,28 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
   }
 
   /**
+   * Finds where a debugger stopped in a source shows variable values at the end of lines, as the IDE's "Show values
+   * inline" does (see [[InlineValues]]). Scala and Java files have them.
+   *
+   * @param path registered project-source path
+   * @param visible the part of the source the editor shows
+   * @param stopped where the program stopped
+   * @return the names of the variables and where they are, in source order; empty for a file that is neither Scala nor Java
+   */
+  def inlineValues(path: Path, visible: LineRange, stopped: LineColumn): Seq[(LineRange, String)] = file(path) match {
+    case sourceFile: (ScalaFile | PsiJavaFile) => host.read {
+      val sourceDocument = document(sourceFile)
+      val shown = new TextRange(offset(sourceDocument, visible.start), offset(sourceDocument, visible.end))
+
+      InlineValues.at(sourceFile, sourceDocument, shown, offset(sourceDocument, stopped)).map { found =>
+        LineRange(position(sourceDocument, found.range.getStartOffset), position(sourceDocument, found.range.getEndOffset)) ->
+          found.name
+      }
+    }
+    case _ => Seq.empty
+  }
+
+  /**
    * Locates the declarations referenced at a position.
    *
    * A Scala source asks the plugin's Go to Declaration, which also covers synthetic members (a case class's `apply`

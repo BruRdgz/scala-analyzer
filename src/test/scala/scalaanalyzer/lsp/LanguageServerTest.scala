@@ -633,6 +633,13 @@ class LanguageServerTest extends munit.FunSuite {
     main.addProperty("kind", "main")
     main.addProperty("target", root + "#app/Compile")
     main.addProperty("mainClass", "app.Main")
+    // The launch configuration's members, which the session accepts (their effect is DebugAdapterTest's).
+    val arguments = new JsonArray
+    arguments.add("first")
+    main.add("args", arguments)
+    val variables = new JsonObject
+    variables.addProperty("SCALA_ANALYZER_CHECK", "set")
+    main.add("env", variables)
     val test = new JsonObject
     test.addProperty("kind", "test")
     test.addProperty("target", root + "#core/Test")
@@ -669,6 +676,9 @@ class LanguageServerTest extends munit.FunSuite {
       "an attach kind with a port that is not a number" -> command("kind" -> "attach", "target" -> "file:///project#app/Compile", "hostName" -> "localhost", "port" -> "5005"),
       "a main kind with a test's members" -> command("kind" -> "main", "target" -> "file:///project#core/Test", "suite" -> "core.ExampleMUnit"),
       "a test kind without a framework" -> command("kind" -> "test", "target" -> "file:///project#core/Test", "suite" -> "core.ExampleMUnit"),
+      "args that are not an array" -> command("kind" -> "main", "target" -> "file:///project#app/Compile", "mainClass" -> "app.Main", "args" -> "first"),
+      "jvmOptions that are not an array" -> command("kind" -> "main", "target" -> "file:///project#app/Compile", "mainClass" -> "app.Main", "jvmOptions" -> "-Xmx1g"),
+      "env that is not an object" -> command("kind" -> "test", "target" -> "file:///project#core/Test", "framework" -> "munit", "suite" -> "core.ExampleMUnit", "env" -> "KEY=value"),
     )
     invalid.foreach { (name, params) =>
       val error = intercept[ExecutionException] {
@@ -1686,6 +1696,40 @@ class LanguageServerTest extends munit.FunSuite {
         Seq(new Position(4, call.indexOf("\"Ann\"")) -> "name:", new Position(4, call.indexOf("3)")) -> "times:"))
     } finally service.didChange(new DidChangeTextDocumentParams(
       new VersionedTextDocumentIdentifier(javaFile.toUri.toString, 201), JavaList.of(new TextDocumentContentChangeEvent(original))))
+  }
+
+  test("inline values: the locals and parameters of the stopped method, on the lines up to the stopped one") {
+    // In process, the opening and closing too, so that they keep their order with the request: lsp4j's reader cannot
+    // tell the three kinds of inline value apart (two are objects), so the test's client could not read the answer;
+    // editors read the JSON as the protocol defines it.
+    val service = implementation.getTextDocumentService
+    /** The variable lookups for a program stopped at the start of `stoppedLine`, as (line, name) pairs. */
+    def lookups(path: Path, language: String, stoppedLine: Int): Seq[(Int, String)] = {
+      service.didOpen(new DidOpenTextDocumentParams(new TextDocumentItem(path.toUri.toString, language, 1, Files.readString(path))))
+      try {
+        val stopped = new Range(new Position(stoppedLine, 0), new Position(stoppedLine, 0))
+        val everything = new Range(new Position(0, 0), new Position(100, 0))
+        service.inlineValue(new InlineValueParams(document(path), everything, new InlineValueContext(1, stopped)))
+          .get(1, TimeUnit.MINUTES).asScala.toSeq.map { value =>
+            assert(value.isInlineValueVariableLookup, value.toString)
+            val lookup = value.getInlineValueVariableLookup
+            // The range is the name, which the client shows the value after.
+            assertEquals(lookup.getRange.getStart.getLine, lookup.getRange.getEnd.getLine)
+            lookup.getRange.getStart.getLine -> lookup.getVariableName
+          }
+      } finally service.didClose(new DidCloseTextDocumentParams(document(path)))
+    }
+
+    // `app.Debugged` stopped at its `println` (zero-based line 13): the parameter, the `var`, the generator's
+    // variable and the `val`s, where declared or read, and nothing after the stopped line or in `triple`.
+    assertEquals(lookups(fixture.resolve("app/src/main/scala/app/Debugged.scala"), "scala", 13), Seq(
+      4 -> "args", 5 -> "total", 6 -> "i", 7 -> "total", 7 -> "i", 9 -> "numbers", 10 -> "names",
+      13 -> "total", 13 -> "numbers", 13 -> "names"))
+    // Stopped in `triple`: its parameter and local only.
+    assertEquals(lookups(fixture.resolve("app/src/main/scala/app/Debugged.scala"), "scala", 19),
+      Seq(17 -> "n", 18 -> "result", 18 -> "n", 19 -> "result"))
+    // Java: `Shout.loud` stopped at its `return`.
+    assertEquals(lookups(fixture.resolve("core/src/main/java/core/Shout.java"), "java", 6), Seq(5 -> "text", 6 -> "text"))
   }
 
   test("type info shows the type of the identifier under the caret or of the selected expression, and nothing else") {

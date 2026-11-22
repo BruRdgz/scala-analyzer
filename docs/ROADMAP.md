@@ -363,6 +363,20 @@ Debugging over DAP, for Scala and Java, in sbt, Maven and Gradle projects alike.
      answers lines that class files have no code for (comments, imports, `package`, blank) as not verified, which is
      what `canPutAt` refuses; the plugin's rule is not reused. Tested in `DebugAdapterTest` (unverified lines, hot code
      replace).
+  5. Done: closer to the IDE's flow. Inline values (`InlineValues`, LSP `textDocument/inlineValue`): the locals and
+     parameters of the method around the stopped location, where declared or read, up to the stopped line, as
+     variable lookups the client resolves in the frame (the IDE asks its debugger; here the PSI finds the same
+     references). java-debug's conditions, hit counts, log messages, exception breakpoints, `setVariable` and
+     `restartFrame` tested through the adapter (`DebugAdapterTest`); its log messages are Scala interpolations
+     (`$x`), not VS Code's `{x}`. The adapter's `exited` event always says 0, so the launcher prints the exit code.
+     A Debug or Run of a target that does not compile names the first error. Maven and Gradle Java debugging tested
+     (`BloopImportTest`).
+     Found and left: a collection shows its `toString` and its fields (no collection renderer), a captured `var`
+     shows its `IntRef` holder, and the adapter has no extension point for either (a DAP proxy or an upstream change);
+     sbt compiles Java without `-g`, so Java frames of an sbt build have no locals.
+  6. Not started: Smart Step Into. java-debug has no `stepInTargets`; the plugin's `ScalaSmartStepIntoHandler` needs
+     the IDE's debugger (`SourcePosition`, `DebugProcess`). It would need a DAP proxy between the editor and the adapter
+     that answers `stepInTargets` from the PSI of the line and steps in and out until the chosen method is entered.
 - Later, if useful: Bloop's `debugSession/start` as an alternative where the server announces it.
 
 ## Later

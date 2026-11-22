@@ -275,6 +275,180 @@ class DebugAdapterTest extends munit.FunSuite {
     }
   }
 
+  /** `app.Debugged`, the program of the tests of breakpoint options, exceptions and values. */
+  private val debugged = fixture.resolve("app/src/main/scala/app/Debugged.scala")
+  /** The line of `total += triple(i)` in the loop of `app.Debugged`. */
+  private val loopLine = 8
+  /** The lines of `val result = n * 3` and `result` in `app.Debugged.triple`. */
+  private val tripleLine = 19
+  private val resultLine = 20
+  /** The line of the `println` of `app.Debugged`, after the collections are built. */
+  private val printTotalLine = 14
+
+  /**
+   * Debugs `app.Debugged` with `arguments`: `prepare` sets the breakpoints before the program starts, and `use` follows
+   * the program from there.
+   */
+  private def debuggingDebugged(arguments: String*)(prepare: DapClient => Unit)(use: DapClient => Unit): Unit = {
+    val session = ProjectSession.open(TestHost.host, fixture)
+    try {
+      val uri = session.startMainDebugSession(fixture.toFile.toURI.toString + "#app/Compile", "app.Debugged", arguments,
+        DebugAdapter.LaunchOptions.Empty, _ => ())
+      Using.resource(new DapClient(uri)) { client =>
+        val launched = client.start()
+        prepare(client)
+        client.run(launched)
+        use(client)
+      }
+    } finally {
+      session.close()
+      releaseModules()
+    }
+  }
+
+  test("breakpoint options: a condition, a hit count and a log message, as the IDE's breakpoint properties") {
+    debuggingDebugged()(_.setVerifiedBreakpoints(debugged, Seq(
+      sourceBreakpoint(loopLine, _.setCondition("i == 3")),
+      // The adapter's log messages are Scala interpolations: `$n` or `${expr}`.
+      sourceBreakpoint(tripleLine, _.setLogMessage("triple of $n")),
+      sourceBreakpoint(resultLine, _.setHitCondition("4"))))) { client =>
+      val conditional = client.nextStop()
+      val loop = client.topFrame(conditional)
+      assertEquals(loop.getLine.intValue, loopLine)
+      assertEquals(client.evaluate(loop, "i"), "3")
+      client.resume(conditional)
+
+      // The fourth time the line runs: the call for 4, the calls for 1 to 3 having passed it.
+      val counted = client.nextStop()
+      val triple = client.topFrame(counted)
+      assertEquals(triple.getLine.intValue, resultLine)
+      assertEquals(client.evaluate(triple, "n"), "4")
+      client.resume(counted)
+
+      assertEquals(client.nextStopOrEnd().map(Set("terminated", "exited 0")), Right(true))
+      // A log message stops nothing and prints its text with the expressions in braces evaluated, each time.
+      for (n <- 1 to 5) assert(client.output.contains(s"triple of $n"), client.output)
+      assert(client.output.contains("total 45, 6, 2"), client.output)
+    }
+  }
+
+  test("exception breakpoints: a caught exception, then an uncaught one, with what was thrown") {
+    debuggingDebugged("throw")(_.breakOnExceptions("caught", "uncaught")) { client =>
+      def exception(stop: StoppedEventArguments): (String, String) = {
+        assertEquals(stop.getReason, "exception")
+        val arguments = new ExceptionInfoArguments
+        arguments.setThreadId(stop.getThreadId)
+        val info = client.await("exceptionInfo", client.server.exceptionInfo(arguments))
+        client.resume(stop)
+        info.getExceptionId -> info.getDescription
+      }
+
+      // Each stops where it is thrown, in `fail`; the program has no other exception (the Scala library throws none here).
+      val thrown = Seq(exception(client.nextStop()), exception(client.nextStop()))
+      assertEquals(thrown.map(_._1), Seq.fill(2)("java.lang.IllegalStateException"))
+      assert(thrown.head._2.contains("caught") && thrown(1)._2.contains("uncaught"), thrown.toString)
+      // The uncaught exception ends the program with an error. The adapter's `exited` event always says 0 (JDI does not
+      // know the code); the session prints the code, as the IDE's console does.
+      client.awaitEnd()
+      assert(client.output.contains("Process finished with exit code 1"), client.output)
+    }
+  }
+
+  test("values: a collection, set value and drop frame (restart frame)") {
+    debuggingDebugged()(_.setVerifiedBreakpoints(debugged, Seq(
+      sourceBreakpoint(resultLine, _.setCondition("n == 2")),
+      sourceBreakpoint(printTotalLine)))) { client =>
+      val first = client.nextStop()
+      val frame = client.topFrame(first)
+      assertEquals(client.evaluate(frame, "result"), "6")
+
+      // Dropping the frame pops `triple(2)` and steps into its call again: the program stops at the method's first
+      // line, then at the same breakpoint again.
+      val restart = new RestartFrameArguments
+      restart.setFrameId(frame.getId)
+      client.await("restartFrame", client.server.restartFrame(restart))
+      val stepped = client.nextStop()
+      assertEquals(client.topFrame(stepped).getLine.intValue, tripleLine)
+      client.resume(stepped)
+      val again = client.nextStop()
+      val restarted = client.topFrame(again)
+      assertEquals(restarted.getLine.intValue, resultLine)
+      assertEquals(client.evaluate(restarted, "n"), "2")
+
+      // Set Value: the call answers 40 instead of 6, which the total shows.
+      val locals = client.locals(restarted)
+      val setValue = new SetVariableArguments
+      setValue.setVariablesReference(locals.getVariablesReference)
+      setValue.setName("result")
+      setValue.setValue("40")
+      assertEquals(client.await("setVariable", client.server.setVariable(setValue)).getValue, "40")
+      client.resume(again)
+
+      val atPrint = client.nextStop()
+      val printFrame = client.topFrame(atPrint)
+      assertEquals(printFrame.getLine.intValue, printTotalLine)
+      val values = client.variables(client.locals(printFrame).getVariablesReference)
+      // A `var` that a lambda captures is a `scala.runtime.IntRef`, which the adapter shows as the holder with its value
+      // (the IDE shows the value alone).
+      assert(values.get("total").exists(_.getValue.contains("\"79\"")), values.get("total").toString)
+      // A collection shows its `toString`, and its children are its fields (`head` and `next` for a `List`): the
+      // adapter has no collection renderer, where the IDE lists the elements.
+      val numbers = values.getOrElse("numbers", fail(s"no numbers in ${values.keySet}"))
+      assert(numbers.getValue.contains("\"List(1, 2, 3)\""), numbers.getValue)
+      assertEquals(client.variables(numbers.getVariablesReference).keySet.intersect(Set("head", "next")), Set("head", "next"))
+      client.resume(atPrint)
+      client.awaitEnd()
+      assert(client.output.contains("total 79, 6, 2"), client.output)
+    }
+  }
+
+  test("debugs a Java frame: a breakpoint in a Java source of an sbt build, and its stack") {
+    val shout = fixture.resolve("core/src/main/java/core/Shout.java")
+    val session = ProjectSession.open(TestHost.host, fixture)
+    try {
+      val uri = session.startMainDebugSession(fixture.toFile.toURI.toString + "#app/Compile", "app.Main", Seq.empty,
+        DebugAdapter.LaunchOptions.Empty, _ => ())
+      Using.resource(new DapClient(uri)) { client =>
+        val launched = client.start()
+        // The line of `return text.toUpperCase() + "!";`.
+        client.breakAt(shout, 7)
+        client.run(launched)
+
+        val stop = client.nextStop()
+        val top = client.topFrame(stop)
+        assertEquals(Path.of(top.getSource.getPath), shout)
+        assertEquals(top.getLine.intValue, 7)
+        // No local variables: sbt compiles Java without `-g`, so the class has no table of them (Maven and Gradle
+        // compile with it, see BloopImportTest).
+        client.resume(stop)
+        client.awaitEnd()
+      }
+    } finally {
+      session.close()
+      releaseModules()
+    }
+  }
+
+  test("a debug session of a target that does not compile fails with the first error and where it is") {
+    val greeting = fixture.resolve("core/src/main/scala/core/Greeting.scala")
+    val original = Files.readString(greeting)
+    val session = ProjectSession.open(TestHost.host, fixture)
+    try {
+      Files.writeString(greeting, original.replace("def text: String = s\"Hello, $name\"", "def text: String = 42"))
+      val failure = intercept[IllegalStateException] {
+        session.startMainDebugSession(fixture.toFile.toURI.toString + "#app/Compile", "app.Main", Seq.empty,
+          DebugAdapter.LaunchOptions.Empty, _ => ())
+      }
+      // The error is in `core`, which `app` depends on: the message says where, as the editor shows no other dialog.
+      assert(failure.getMessage.contains("core/src/main/scala/core/Greeting.scala:4: "), failure.getMessage)
+    } finally {
+      Files.writeString(greeting, original)
+      session.compileBuild(None)
+      session.close()
+      releaseModules()
+    }
+  }
+
   /** The JDWP agent of a program the test starts itself: it waits for the debugger and picks a free port. */
   private val Agent = "-agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=127.0.0.1:0"
 

@@ -10,6 +10,15 @@ import java.util.concurrent.{CompletableFuture, LinkedBlockingQueue, TimeUnit}
 
 import scala.jdk.CollectionConverters.*
 
+/** A breakpoint at a line, with the options of `configure` (condition, hit count, log message). */
+def sourceBreakpoint(line: Int, configure: SourceBreakpoint => Unit = _ => ()): SourceBreakpoint = {
+  // A plain instance: Gson writes an anonymous subclass as null.
+  val breakpoint = new SourceBreakpoint
+  breakpoint.setLine(line)
+  configure(breakpoint)
+  breakpoint
+}
+
 /**
  * A DAP client for the tests of the debug adapter: it connects to the address a debug session answered with and keeps
  * what the adapter sends, for the test to wait for. Every wait is bounded.
@@ -90,18 +99,62 @@ final class DapClient(uri: URI) extends munit.Assertions with AutoCloseable {
   def breakAt(source: Path, line: Int): Unit = assertEquals(setBreakpoint(source, line).isVerified, true)
 
   /** Puts a breakpoint at a line of a source, as the only one of the file, and answers the adapter's verdict. */
-  def setBreakpoint(source: Path, line: Int): Breakpoint = {
+  def setBreakpoint(source: Path, line: Int): Breakpoint = setBreakpoints(source, Seq(sourceBreakpoint(line))).head
+
+  /**
+   * Replaces the breakpoints of a source, as an editor sends them all at once, and checks that the adapter verified
+   * each.
+   */
+  def setVerifiedBreakpoints(source: Path, breakpoints: Seq[SourceBreakpoint]): Unit =
+    assertEquals(setBreakpoints(source, breakpoints).map(_.isVerified), breakpoints.map(_ => true))
+
+  /** Replaces the breakpoints of a source, and answers the adapter's verdicts in the same order. */
+  def setBreakpoints(source: Path, breakpoints: Seq[SourceBreakpoint]): Seq[Breakpoint] = {
     val file = new Source
     file.setPath(source.toString)
     val arguments = new SetBreakpointsArguments
     arguments.setSource(file)
-    // A plain instance: Gson writes an anonymous subclass as null.
-    val breakpoint = new SourceBreakpoint
-    breakpoint.setLine(line)
-    arguments.setBreakpoints(Array(breakpoint))
+    arguments.setBreakpoints(breakpoints.toArray)
     val set = await("setBreakpoints", server.setBreakpoints(arguments))
-    assertEquals(set.getBreakpoints.length, 1)
-    set.getBreakpoints.head
+    assertEquals(set.getBreakpoints.length, breakpoints.size)
+    set.getBreakpoints.toSeq
+  }
+
+  /** Makes the program stop at the exceptions of the adapter's filters: `caught`, `uncaught`, or both. */
+  def breakOnExceptions(filters: String*): Unit = {
+    val arguments = new SetExceptionBreakpointsArguments
+    arguments.setFilters(filters.toArray)
+    await("setExceptionBreakpoints", server.setExceptionBreakpoints(arguments))
+  }
+
+  /** The frame the program stopped in. */
+  def topFrame(stop: StoppedEventArguments): StackFrame = {
+    val arguments = new StackTraceArguments
+    arguments.setThreadId(stop.getThreadId)
+    await("stackTrace", server.stackTrace(arguments)).getStackFrames.head
+  }
+
+  /** The first scope of a frame, its local variables. */
+  def locals(frame: StackFrame): Scope = {
+    val arguments = new ScopesArguments
+    arguments.setFrameId(frame.getId)
+    await("scopes", server.scopes(arguments)).getScopes.head
+  }
+
+  /** The variables of a scope or a structured value, by name. */
+  def variables(reference: Int): Map[String, Variable] = {
+    val arguments = new VariablesArguments
+    arguments.setVariablesReference(reference)
+    await("variables", server.variables(arguments)).getVariables.map(variable => variable.getName -> variable).toMap
+  }
+
+  /** Evaluates an expression in a frame, as the debug console does, and answers its value. */
+  def evaluate(frame: StackFrame, expression: String): String = {
+    val arguments = new EvaluateArguments
+    arguments.setExpression(expression)
+    arguments.setFrameId(frame.getId)
+    arguments.setContext("repl")
+    await(s"evaluate $expression", server.evaluate(arguments)).getResult
   }
 
   /**

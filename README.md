@@ -280,8 +280,25 @@ changes method bodies only: a changed signature, field or class shape fails with
 method that is still running (`main`) keeps the old code. Class files are compared by size and modification time, so a
 recompile that wrote identical bytes is reported too.
 
-Limitations: Java frames evaluate simple expressions only, and the source of a library is shown only when the build
-gives its source archive.
+Breakpoint properties work as in the IDE: a condition, a hit count, and a log message, which stops nothing and prints
+its text. The adapter reads a log message as a Scala string interpolation: `value is $x` or `${a + b}` (VS Code's
+`{x}` is printed as written). Exception breakpoints stop where an exception is thrown (VS Code's "Caught
+Exceptions" and "Uncaught Exceptions"), Set Value changes a variable, and Restart Frame drops the frame and calls the
+method again, as the IDE's Drop Frame. When the program exits by itself, the debug console's last line is `Process
+finished with exit code N`: the adapter's own `exited` event always reports 0.
+
+While the program is stopped, the editor shows the values of the method's local variables and parameters at the end of
+the lines that declare or read them, up to the current line, as the IDE's "Show values inline" (the LSP request
+`textDocument/inlineValue`; VS Code's `debug.inlineValues` setting turns it off).
+
+A Debug or Run whose target does not compile fails with the first error the build reported and where it is, which may
+be in a module the target depends on.
+
+Limitations: Java frames evaluate simple expressions only, and show local variables only when their classes were
+compiled with `-g` (Maven and Gradle compile with it by default; sbt does not); the source of a library is shown only
+when the build gives its source archive; a collection is shown by its `toString` with its fields as children (`head`
+and `next` for a `List`), where the IDE lists its elements; a `var` that a lambda captures shows as its
+`scala.runtime.IntRef` (or `ObjectRef`) holder with the value; and there is no Smart Step Into.
 
 ### Troubleshooting
 

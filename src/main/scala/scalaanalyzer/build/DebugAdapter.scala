@@ -365,7 +365,7 @@ object DebugAdapter {
   /**
    * Starts the program with the JDWP agent, in the environment's working directory with its variables, as `Run.launch`
    * does for a run, and reports what it prints to the listener. The agent's announcement of its port is not output: it
-   * becomes the listener's `onListening`.
+   * becomes the listener's `onListening`. When the program exits by itself, a last line tells its exit code.
    *
    * @return a future that completes when the program has exited and its output has been read, and fails when it exited
    *         with an error, unless it was cancelled; cancelling ends it and its child processes
@@ -399,6 +399,8 @@ object DebugAdapter {
     val waiter = new Thread(() => {
       val exit = process.waitFor()
       readers.foreach(_.join())
+      // The adapter's `exited` event always reports 0: JDI does not know the code. The console shows it, as the IDE's does.
+      if (!cancelled.get) listener.out(s"Process finished with exit code $exit")
       if (exit == 0 || cancelled.get) result.success(()) else result.failure(new IllegalStateException(s"the program exited with code $exit"))
       ()
     }, "scala-analyzer-debuggee")

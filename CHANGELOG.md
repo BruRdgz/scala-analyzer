@@ -19,6 +19,11 @@
   rewritten, and the DAP request `redefineClasses` (java-debug's custom request, which the client sends; the VS Code
   extension does after a successful compile command) redefines them in the running program. A breakpoint on a line without code stays unverified; a line with a lambda still stops in the
   enclosing code and in the lambda, as the adapter has no breakpoint columns.
+- Debugging, closer to the IDE's: the values of the stopped method's variables are shown at the end of their lines
+  (`textDocument/inlineValue`); conditional breakpoints, hit counts, log messages (Scala interpolations: `$x`),
+  exception breakpoints, Set Value and Restart Frame (Drop Frame) are tested and documented; the debug console ends
+  with the program's exit code; and a Debug or Run of a target that does not compile names the first error and its
+  file, which may be in a module the target depends on. Java debugging of Maven and Gradle builds is tested.
 - JUnit 4 and 5 test classes and methods in Java files have run lenses, found as the IDE's run markers find them and
   run through the IDE's JUnit runner. JUnit 5 runs need `junit-platform-launcher` on the test classpath (see "Running
   tests" in the README). The JUnit plugin's frameworks also make Go to Test know JUnit classes.
