@@ -41,8 +41,13 @@ function registerTests(context, client, launchConfiguration) {
   const controller = vscode.tests.createTestController('scala-analyzer', 'Scala (scala-analyzer)');
   /** The selection of every item of the tree: a target has none. @type {WeakMap<vscode.TestItem, Selection>} */
   const selections = new WeakMap();
-  /** The test run whose request is in flight; the server allows one, so results belong to it. @type {{ suite: vscode.TestItem, run: vscode.TestRun } | undefined} */
-  let active;
+  /**
+   * The items whose run request is in flight, by the suite their results name, oldest first. Two Testing runs may
+   * overlap (VS Code does not queue them), and the server refuses the second while the first runs, so a suite's results
+   * belong to its oldest entry.
+   * @type {Map<string, Array<{ item: vscode.TestItem, run: vscode.TestRun, reported: Set<string>, failed: boolean }>>}
+   */
+  const inFlight = new Map();
   /** The document refreshes that wait for their debounce, by document URI. @type {Map<string, NodeJS.Timeout>} */
   const pending = new Map();
   let generation = 0;
@@ -194,6 +199,16 @@ function registerTests(context, client, launchConfiguration) {
     }
   }
 
+  // One handler for the controller's life: the client keeps one handler per notification, so a handler per run would
+  // replace the one of a run still in flight.
+  context.subscriptions.push(client.onNotification('scalaAnalyzer/testResult', /** @param {TestResult} result */ result => {
+    const entry = inFlight.get(result.suite)?.[0];
+    if (!entry) return;
+    entry.reported.add(result.testName);
+    if (result.outcome === 'failed') entry.failed = true;
+    show(entry.run, entry.item, result);
+  }));
+
   /**
    * Runs one suite or test through the server and shows its results as they arrive, ending quietly on cancellation.
    * @param {vscode.TestRun} run
@@ -203,13 +218,10 @@ function registerTests(context, client, launchConfiguration) {
   async function runItem(run, item, token) {
     const selection = selections.get(item);
     if (!selection || token.isCancellationRequested) return;
-    let reported = false;
-    active = { suite: item, run };
+    const entry = { item, run, reported: new Set(), failed: false };
+    const entries = inFlight.get(selection.suite) ?? [];
+    inFlight.set(selection.suite, [...entries, entry]);
     run.started(item);
-    const listener = client.onNotification('scalaAnalyzer/testResult', /** @param {TestResult} result */ result => {
-      reported = true;
-      show(run, item, result);
-    });
 
     try {
       const { target, framework, suite, testName } = selection;
@@ -217,12 +229,20 @@ function registerTests(context, client, launchConfiguration) {
         command: 'scalaAnalyzer.runTest',
         arguments: [{ target, framework, suite, ...(testName === undefined ? {} : { testName }) }],
       }, token);
-      if (!reported) run.errored(item, new vscode.TestMessage('the run reported no test results; see the scala-analyzer output'));
+      if (entry.reported.size === 0) {
+        run.errored(item, new vscode.TestMessage('the run reported no test results; see the scala-analyzer output'));
+      } else if (testName !== undefined && !entry.reported.has(testName)) {
+        // The runner named the test otherwise (a ScalaTest scope, a parameterized method): its results are the
+        // children `show` added, and the item takes their outcome.
+        if (entry.failed) run.failed(item, new vscode.TestMessage('a test of this selection failed'));
+        else run.passed(item);
+      }
     } catch (error) {
       if (!token.isCancellationRequested) run.errored(item, new vscode.TestMessage(error.message));
     } finally {
-      listener.dispose();
-      active = undefined;
+      const remaining = (inFlight.get(selection.suite) ?? []).filter(other => other !== entry);
+      if (remaining.length > 0) inFlight.set(selection.suite, remaining);
+      else inFlight.delete(selection.suite);
     }
   }
 
@@ -254,26 +274,30 @@ function registerTests(context, client, launchConfiguration) {
       const folder = item.uri && vscode.workspace.getWorkspaceFolder(item.uri);
       /** @type {vscode.DebugSession | undefined} */
       let session;
-      const ended = new Promise(resolve => {
-        const subscriptions = [
-          vscode.debug.onDidStartDebugSession(started => {
-            if (started.configuration.name === configuration.name) session = started;
-          }),
-          vscode.debug.onDidTerminateDebugSession(terminated => {
-            if (terminated === session) {
-              subscriptions.forEach(subscription => subscription.dispose());
+      /** @type {vscode.Disposable[]} */
+      let subscriptions = [];
+      try {
+        const ended = new Promise(resolve => {
+          subscriptions = [
+            vscode.debug.onDidStartDebugSession(started => {
+              if (!session && started.configuration.name === configuration.name) session = started;
+            }),
+            vscode.debug.onDidTerminateDebugSession(terminated => {
+              if (terminated === session) resolve(undefined);
+            }),
+            token.onCancellationRequested(() => {
+              if (session) vscode.debug.stopDebugging(session);
               resolve(undefined);
-            }
-          }),
-          token.onCancellationRequested(() => {
-            if (session) vscode.debug.stopDebugging(session);
-            resolve(undefined);
-          }),
-        ];
-      });
-      testRun.started(item);
-      if (await vscode.debug.startDebugging(folder, configuration)) await ended;
-      else testRun.errored(item, new vscode.TestMessage('the debug session did not start'));
+            }),
+          ];
+        });
+        testRun.started(item);
+        if (await vscode.debug.startDebugging(folder, configuration)) await ended;
+        else testRun.errored(item, new vscode.TestMessage('the debug session did not start'));
+      } finally {
+        // Also when the session never started: the listeners would otherwise outlive the run.
+        subscriptions.forEach(subscription => subscription.dispose());
+      }
     } finally {
       testRun.end();
     }

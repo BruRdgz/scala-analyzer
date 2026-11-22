@@ -26,6 +26,7 @@ import java.util.concurrent.locks.ReentrantReadWriteLock
 import scala.concurrent.ExecutionContext
 import scala.jdk.CollectionConverters.*
 import scala.util.Using
+import scala.util.control.NonFatal
 
 /**
  * Owns an imported workspace, its source buffers and its build connection.
@@ -1022,23 +1023,35 @@ final class ProjectSession private (
       val before = classStamps()
       val compiled = compile
       val after = classStamps()
-      val updated = after.collect { case (name, stamp) if !before.get(name).contains(stamp) => name }.toSeq.sorted
 
-      if (updated.nonEmpty) debugAdapters.forEach(_.classesUpdated(updated))
+      for (previous <- before; current <- after) {
+        val updated = current.collect { case (name, stamp) if !previous.get(name).contains(stamp) => name }.toSeq.sorted
+        if (updated.nonEmpty) debugAdapters.forEach(_.classesUpdated(updated))
+      }
       compiled
     }
   }
 
-  /** The class files of the imported modules' class directories, by the JVM name of their class. */
-  private def classStamps(): Map[String, ClassStamp] =
-    imported.flatMap(_.classDirectory).filter(Files.isDirectory(_)).flatMap { directory =>
+  /**
+   * The class files of the imported modules' class directories, by the JVM name of their class; `None` when a directory
+   * could not be walked.
+   */
+  private def classStamps(): Option[Map[String, ClassStamp]] =
+    try Some(imported.flatMap(_.classDirectory).filter(Files.isDirectory(_)).flatMap { directory =>
       Using.resource(Files.walk(directory)) { paths =>
         paths.iterator().asScala.filter(_.getFileName.toString.endsWith(".class")).map { file =>
           val name = directory.relativize(file).toString.stripSuffix(".class").replace(file.getFileSystem.getSeparator, ".")
           name -> ClassStamp(Files.size(file), Files.getLastModifiedTime(file))
         }.toSeq
       }
-    }.toMap
+    }.toMap)
+    catch {
+      // Another writer (an `sbt ~compile`, the build server's own cleanup) changed a class directory during the walk.
+      // The stamps only serve hot code replace, so the compile goes on without them.
+      case NonFatal(error) =>
+        HostLog.warn(s"the classes of the build were not compared for hot code replace: $error")
+        None
+    }
 
   /** Replaces the stored build diagnostics; returns the registered sources whose diagnostics differ from the old ones. */
   private def storeBuildProblems(compiled: Map[Path, Seq[CompilerDiagnostic]]): Set[Path] = {
@@ -1153,7 +1166,11 @@ final class ProjectSession private (
       (path, line) => if (files.containsKey(path)) language.stepTargets(path, line) else Seq.empty)
 
     debugAdapters.add(adapter)
-    adapter.finished.onComplete(_ => debugAdapters.remove(adapter))(using ExecutionContext.parasitic)
+    // An ended session is closed too: a client that never connected leaves its threads otherwise.
+    adapter.finished.onComplete { _ =>
+      debugAdapters.remove(adapter)
+      adapter.close()
+    }(using ExecutionContext.parasitic)
     adapter.uri
   }
 

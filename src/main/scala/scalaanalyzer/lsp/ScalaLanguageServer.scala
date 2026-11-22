@@ -427,7 +427,8 @@ final class ScalaLanguageServer(
     capabilities.setTextDocumentSync(TextDocumentSyncKind.Incremental)
     capabilities.setHoverProvider(true)
     capabilities.setExecuteCommandProvider(
-      new ExecuteCommandOptions(java.util.List.of(CompleteInsertion, RunTest, RunMain, OverrideMembers, ExtractRefactoring)))
+      new ExecuteCommandOptions(java.util.List.of(CompleteInsertion, RunTest, RunMain, StartDebugSession, OverrideMembers,
+        ExtractRefactoring)))
     capabilities.setDefinitionProvider(true)
     capabilities.setTypeDefinitionProvider(true)
     capabilities.setWorkspaceSymbolProvider(true)

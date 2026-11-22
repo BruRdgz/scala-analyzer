@@ -5,14 +5,15 @@ import com.google.gson.{JsonArray, JsonObject, JsonParser}
 import scalaanalyzer.platform.HostLog
 
 import java.io.{BufferedInputStream, ByteArrayOutputStream, IOException}
-import java.net.{InetAddress, ServerSocket, Socket, URI}
+import java.net.{InetAddress, ServerSocket, Socket, SocketTimeoutException, URI}
 import java.nio.charset.StandardCharsets.UTF_8
 import java.nio.file.{InvalidPathException, Path}
-import java.util.concurrent.{CompletableFuture, ExecutorService, LinkedBlockingQueue, TimeUnit}
+import java.util.concurrent.{CompletableFuture, ExecutorService, LinkedBlockingQueue, TimeUnit, TimeoutException}
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger}
 
 import scala.annotation.tailrec
 import scala.collection.concurrent.TrieMap
+import scala.concurrent.{Future, Promise}
 import scala.concurrent.duration.*
 import scala.reflect.NameTransformer
 import scala.util.control.NonFatal
@@ -24,33 +25,42 @@ import scala.util.control.NonFatal
  * values the IDE shows as values (strings, the `scala.runtime.*Ref` holders of captured `var`s), collections listed
  * by their elements, and Smart Step Into (`stepInTargets`).
  *
- * Like the adapter's server, the proxy listens on the loopback address and takes one client; it ends with that
- * client's connection or with the adapter's.
+ * The proxy listens on the loopback address and takes one client, which must connect within [[DebugProxy.ClientDeadline]];
+ * it ends with that client's connection or with the adapter's, and `ended` then completes.
  *
  * @param listener the socket the editor connects to
- * @param adapter the address of the adapter's server
+ * @param openAdapter starts the adapter's session for the client that connected, answering the socket that talks to it
  * @param stepTargets the calls of a source line the program can step into, as `DebugAdapter.start` documents it
  * @param executor the threads of the connection's readers and of the requests the proxy sends itself, shut down with
  *                 the proxy
  */
-final class DebugProxy private (listener: ServerSocket, adapter: URI,
+final class DebugProxy private (listener: ServerSocket, openAdapter: () => Socket,
                                 stepTargets: (Path, Int) => Seq[DebugAdapter.StepTarget],
                                 executor: ExecutorService) extends AutoCloseable {
   /** The address of the proxy, `tcp://host:port`, which a DAP client connects to. */
   val uri: URI = URI.create(s"tcp://${listener.getInetAddress.getHostAddress}:${listener.getLocalPort}")
 
+  private val endPromise = Promise[Unit]()
+
+  /**
+   * Completes when the proxy has ended: its client and the adapter are disconnected, no client connected in time, or
+   * the proxy was closed.
+   */
+  val ended: Future[Unit] = endPromise.future
+
   private var session: Option[DebugProxy.Session] = None
   private var closed = false
 
-  /** Waits for the editor, connects to the adapter, and then relays until either side ends. */
+  /** Waits for the editor, starts the adapter's session, and then relays until either side ends. */
   private def serve(): Unit =
     try {
+      listener.setSoTimeout(DebugProxy.ClientDeadline.toMillis.toInt)
       val clientSocket = listener.accept()
       listener.close()
       val adapterSocket =
-        try new Socket(adapter.getHost, adapter.getPort)
+        try openAdapter()
         catch {
-          case error: IOException =>
+          case NonFatal(error) =>
             clientSocket.close()
             throw error
         }
@@ -62,8 +72,13 @@ final class DebugProxy private (listener: ServerSocket, adapter: URI,
 
       if (stillOpen) created.relay() else created.close()
     } catch {
+      case _: SocketTimeoutException =>
+        HostLog.warn(s"debug proxy: no client connected within ${DebugProxy.ClientDeadline}; the session is closed")
       case _: IOException if synchronized(closed) => ()
       case NonFatal(error) => HostLog.warn("debug proxy: the connection ended with an error", error)
+    } finally {
+      listener.close()
+      endPromise.trySuccess(())
     }
 
   /** Closes the listener and the connection in progress, which ends the adapter's session. Closing is idempotent. */
@@ -76,14 +91,16 @@ final class DebugProxy private (listener: ServerSocket, adapter: URI,
     listener.close()
     current.foreach(_.close())
     executor.shutdownNow()
+    endPromise.trySuccess(())
   }
 }
 
 object DebugProxy {
   /**
    * The most elements of a collection the proxy lists. Each element costs a round trip to the debuggee (an evaluation
-   * that rebuilds an indexed view of the collection), and an editor lists every child it is given: a hundred keeps a
-   * large collection expandable in about a second, and the last child tells how many are left out.
+   * that iterates to it, so a listing walks at most this many elements a hundred times, whatever the collection's
+   * size), and an editor lists every child it is given: a hundred keeps a collection expandable in about a second, and
+   * the last child tells how many are left out.
    */
   private val MaxElements = 100
 
@@ -92,6 +109,13 @@ object DebugProxy {
    * back out of it when it is not the target. A line with more calls than this stops in the last one stepped into.
    */
   private val MaxSmartSteps = 30
+
+  /**
+   * How long the proxy waits for its client: an editor connects as soon as the debug command answers, so a session
+   * nobody connects to in this time was abandoned (a failed or cancelled start), and keeping it would keep its
+   * threads and make every compile look for changed classes.
+   */
+  private val ClientDeadline = 2.minutes
 
   /** How long the proxy waits for the adapter's answer to its own request, or for the stop a step ends in. */
   private val InternalTimeout = 30.seconds
@@ -128,11 +152,11 @@ object DebugProxy {
    *
    * The caller owns the result and closes it.
    *
-   * @param adapter the address of the adapter's server, which the proxy connects to when its client does
+   * @param openAdapter starts the adapter's session when the client connects, answering the proxy's socket to it
    * @param stepTargets the calls of a source line, as `DebugAdapter.start` documents it
    * @return the running proxy; its `uri` is where a DAP client connects
    */
-  def start(adapter: URI, stepTargets: (Path, Int) => Seq[DebugAdapter.StepTarget]): DebugProxy = {
+  def start(openAdapter: () => Socket, stepTargets: (Path, Int) => Seq[DebugAdapter.StepTarget]): DebugProxy = {
     val executor = java.util.concurrent.Executors.newCachedThreadPool { task =>
       val thread = new Thread(task, "scala-analyzer-debug-proxy")
       thread.setDaemon(true)
@@ -145,7 +169,7 @@ object DebugProxy {
           executor.shutdown()
           throw error
       }
-    val proxy = new DebugProxy(listener, adapter, stepTargets, executor)
+    val proxy = new DebugProxy(listener, openAdapter, stepTargets, executor)
 
     executor.execute(() => proxy.serve())
     proxy
@@ -160,14 +184,19 @@ object DebugProxy {
    * @param clientSeq the sequence number of the client's request
    * @param command the request's command
    * @param frameId the frame the request concerns, when it names one or a reference of one
+   * @param threadId the thread a `stackTrace` request asks about
    */
-  private final case class Forwarded(clientSeq: Int, command: String, frameId: Option[Int]) extends Pending
+  private final case class Forwarded(clientSeq: Int, command: String, frameId: Option[Int], threadId: Option[Int])
+      extends Pending
 
   /** A request of the proxy: the response completes `response` and goes no further. */
   private final case class Internal(response: CompletableFuture[JsonObject]) extends Pending
 
-  /** The stopped location of a frame, which the step targets of its line are looked up by. */
-  private final case class Frame(path: Path, line: Int)
+  /**
+   * The stopped location of a frame, which the step targets of its line are looked up by, and its thread, whose
+   * resuming invalidates it.
+   */
+  private final case class Frame(path: Path, line: Int, threadId: Option[Int])
 
   /**
    * A collection the proxy lists the elements of.
@@ -429,9 +458,10 @@ object DebugProxy {
         case "variables" => arguments.flatMap(_.int("variablesReference")).flatMap(referenceFrames.get)
         case _ => None
       }
+      val threadId = if (command == "stackTrace") arguments.flatMap(_.int("threadId")) else None
       val clientSeq = request.int("seq").getOrElse(0)
 
-      adapter.write(request, seq => pending.put(seq, Forwarded(clientSeq, command, frameId)))
+      adapter.write(request, seq => pending.put(seq, Forwarded(clientSeq, command, frameId, threadId)))
     }
 
     private def onAdapterMessage(message: JsonObject): Unit = message.string("type") match {
@@ -477,7 +507,7 @@ object DebugProxy {
               id <- frame.int("id")
               line <- frame.int("line")
               path <- frame.obj("source").flatMap(_.string("path")).flatMap(pathOf)
-            } frames.put(id, Frame(path, line))
+            } frames.put(id, Frame(path, line, forwarded.threadId))
           }
         case "scopes" =>
           for (frame <- forwarded.frameId; scope <- body.objects("scopes"); reference <- scope.int("variablesReference"))
@@ -507,22 +537,36 @@ object DebugProxy {
       val thread = event.obj("body").flatMap(_.int("threadId"))
       val ofSmartStep = thread.isDefined && thread == stepping
 
+      // A thread's frames and references end when it resumes; another thread stopped meanwhile keeps its own.
+      def allThreads(flag: String) = event.obj("body").exists(_.bool(flag))
+
       event.string("event") match {
         case Some("stopped") =>
-          clearTracking()
+          clearTracking(thread.filterNot(_ => allThreads("allThreadsStopped")))
           if (ofSmartStep) steppingStops.put(event) else client.write(event)
         case Some("continued") =>
-          clearTracking()
+          clearTracking(thread.filterNot(_ => allThreads("allThreadsContinued")))
           if (!ofSmartStep) client.write(event)
         case _ => client.write(event)
       }
     }
 
-    /** Forgets the frames and references of the stop that ended: the adapter invalidates them when the program resumes. */
-    private def clearTracking(): Unit = {
-      frames.clear()
-      referenceFrames.clear()
-      collections.clear()
+    /**
+     * Forgets the frames and references of a thread whose stop ended, or of every thread: the adapter invalidates them
+     * when the thread resumes. What is not known to belong to a thread is forgotten with any.
+     *
+     * @param thread the thread that stopped or resumed; `None` for all of them
+     */
+    private def clearTracking(thread: Option[Int]): Unit = thread match {
+      case None =>
+        frames.clear()
+        referenceFrames.clear()
+        collections.clear()
+      case Some(id) =>
+        val ended = frames.collect { case (frame, Frame(_, _, owner)) if owner.forall(_ == id) => frame }.toSet
+        referenceFrames.filterInPlace((_, frame) => !ended(frame) && frames.contains(frame))
+        collections.filterInPlace((_, collection) => !ended(collection.frameId) && frames.contains(collection.frameId))
+        frames.filterInPlace((frame, _) => !ended(frame))
     }
 
     /**
@@ -788,9 +832,22 @@ object DebugProxy {
       val indexes = if (arguments.string("filter").contains("named")) Seq.empty
         else (start until elementCount(collection.size)).take(count)
       val listed = new JsonArray
+      // One evaluation that timed out ends the evaluations of the listing: the debuggee is blocked or the adapter
+      // compiles each expression, and the client waits for the whole answer.
+      var timedOut = false
 
       indexes.foreach { index =>
-        listed.add(if (index < MaxElements && index < collection.size) element(collection, index) else marker(collection))
+        listed.add(
+          if (index >= MaxElements || index >= collection.size) marker(collection)
+          else if (timedOut) notEvaluated(collection, index)
+          else
+            try element(collection, index)
+            catch {
+              case _: TimeoutException =>
+                HostLog.debug(s"debug proxy: element $index of ${collection.expression} timed out; the rest is not evaluated")
+                timedOut = true
+                notEvaluated(collection, index)
+            })
       }
 
       val body = new JsonObject
@@ -800,23 +857,35 @@ object DebugProxy {
 
     /** The variable of an element, shown as any other; one that cannot be evaluated says so. */
     private def element(collection: Collection, index: Int): JsonObject = {
-      val expression = s"${collection.expression}.toIndexedSeq.apply($index)"
-      val child = new JsonObject
-      child.addProperty("name", index.toString)
-      child.addProperty("evaluateName", expression)
+      // An iterator that skips to the element: building an indexed copy per element would copy the whole collection
+      // a hundred times. The expression is a chain of calls with literal arguments, which the adapter evaluates
+      // without compiling.
+      val expression = s"${collection.expression}.iterator.drop($index).next()"
 
       try {
         val result = evaluate(collection.frameId, expression)
+        val child = new JsonObject
+        child.addProperty("name", index.toString)
+        child.addProperty("evaluateName", expression)
         child.addProperty("value", result.string("result").getOrElse(""))
         result.string("type").foreach(child.addProperty("type", _))
         child.put("variablesReference", result.int("variablesReference").getOrElse(0))
+        render(child, Some(collection.frameId))
       } catch {
+        case timeout: TimeoutException => throw timeout
         case NonFatal(error) =>
           HostLog.debug(s"debug proxy: element $index of ${collection.expression} was not evaluated: $error")
-          child.addProperty("value", "<not evaluated>")
-          child.put("variablesReference", 0)
+          notEvaluated(collection, index)
       }
-      render(child, Some(collection.frameId))
+    }
+
+    /** The child of an element the proxy did not evaluate. */
+    private def notEvaluated(collection: Collection, index: Int): JsonObject = {
+      val child = new JsonObject
+      child.addProperty("name", index.toString)
+      child.addProperty("value", "<not evaluated>")
+      child.put("variablesReference", 0)
+      child
     }
 
     /** The last child of a collection with more elements than are listed. */

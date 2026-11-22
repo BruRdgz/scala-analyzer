@@ -377,10 +377,10 @@ Debugging over DAP, for Scala and Java, in sbt, Maven and Gradle projects alike.
      numbers (it sends requests of its own), rewriting or answering only what follows. `DebugAdapter.uri` is the
      proxy's. Values: strings unexpandable; `scala.runtime.*Ref` holders replaced by their `elem`; a type of
      `scala.collection.` whose `iterableFactory` evaluates (what excludes iterators) and is not `LazyList`, `Stream` or
-     `View` is given a proxy reference whose children are `toIndexedSeq.apply(i)` evaluated per element in the frame
+     `View` is given a proxy reference whose children are `iterator.drop(i).next()` evaluated per element in the frame
      (the adapter's runtime evaluator handles these without downloading a compiler). Limits: lazy collections keep the
-     adapter's fields view; each element is an evaluation that rebuilds an indexed view, so cost grows with the
-     collection; only 100 elements are listed (`MaxElements`, then a `...` child); Java collections are not listed.
+     adapter's fields view; each element is an evaluation that iterates to it (a listing does not depend on the
+     collection's size), and the first evaluation that times out ends the listing's evaluations; only 100 elements are listed (`MaxElements`, then a `...` child); Java collections are not listed.
      Smart Step Into: `stepInTargets` is answered from the PSI of the frame's line (`language/StepTargets.scala`:
      calls in evaluation order, Scala and Java), and `stepIn` with a target steps in and out internally (swallowing
      the adapter's stops) until the frame one level deeper is the target's method, at most 30 steps (`MaxSmartSteps`).

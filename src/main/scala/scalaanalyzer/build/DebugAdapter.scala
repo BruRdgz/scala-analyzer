@@ -1,22 +1,23 @@
 package scalaanalyzer.build
 
 import ch.epfl.scala.bsp4j.JvmEnvironmentItem
-import com.microsoft.java.debug.core.DebugSettings
 import ch.epfl.scala.debugadapter.{
-  CancelableFuture, DebugServer, DebugToolsResolver, Debuggee, DebuggeeListener, JavaRuntime, Library, Logger, Module,
+  CancelableFuture, DebugToolsResolver, Debuggee, DebuggeeListener, JavaRuntime, Library, Logger, Module,
   ScalaVersion, SourceDirectory, SourceEntry, StandaloneSourceFile, UnmanagedEntry,
 }
+import ch.epfl.scala.debugadapter.internal.HostDebugSession
+import com.microsoft.java.debug.core.DebugSettings
 
 import scalaanalyzer.platform.{HostLog, LibraryCache}
 
-import java.io.{BufferedReader, Closeable}
-import java.net.{InetSocketAddress, URI, URLClassLoader}
+import java.io.{BufferedReader, Closeable, IOException}
+import java.net.{InetAddress, InetSocketAddress, ServerSocket, Socket, URI, URLClassLoader}
 import java.nio.charset.StandardCharsets.UTF_8
 import java.nio.file.{Files, Path, StandardCopyOption}
 import java.nio.file.attribute.FileTime
 import java.time.Instant
 import java.util.concurrent.{CopyOnWriteArrayList, ExecutorService, Executors, ThreadFactory}
-import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.{AtomicBoolean, AtomicReference}
 import java.util.zip.ZipFile
 
 import scala.collection.mutable
@@ -35,18 +36,18 @@ import scala.util.matching.Regex
  * (`MetalsDebuggee`). A session can instead attach to a program that already runs with a JDWP agent, which it neither
  * starts nor ends. The session ends when the client disconnects or the program exits, or when it is closed.
  *
- * The client does not talk to the adapter's server directly but to a [[DebugProxy]] in front of it, which adds what the
- * adapter lacks: collections listed by their elements, captured `var`s shown by their values, and Smart Step Into.
+ * The client talks to a [[DebugProxy]], which adds what the adapter lacks (collections listed by their elements,
+ * captured `var`s shown by their values, Smart Step Into) and starts the adapter's session when the client connects,
+ * over a socket of the loopback interface.
  *
- * @param server the adapter's server, which accepts the proxy's connection and runs the debuggee
- * @param proxy the proxy the client connects to, which relays to `server`
- * @param finished completes when the server has stopped accepting clients: after its session has ended, or after it
- *                 was closed
- * @param executor the threads of the server and its sessions, shut down with it
+ * @param session the adapter's session, once the client has connected
+ * @param proxy the proxy the client connects to, which relays to the session
+ * @param finished completes when the proxy has ended: the session ended, no client connected in time, or it was closed
+ * @param executor the threads of the session, shut down with it
  * @param classUpdates the observers the adapter registered for the classes that changed after a compile
  */
-final class DebugAdapter private (server: DebugServer, proxy: DebugProxy, val finished: Future[Unit],
-                                  executor: ExecutorService,
+final class DebugAdapter private (session: AtomicReference[Option[AutoCloseable]], proxy: DebugProxy,
+                                  val finished: Future[Unit], executor: ExecutorService,
                                   classUpdates: CopyOnWriteArrayList[Seq[String] => Unit]) extends AutoCloseable {
   /** The address of the session, `tcp://host:port`, which a DAP client connects to: that of the proxy. */
   val uri: URI = proxy.uri
@@ -60,11 +61,11 @@ final class DebugAdapter private (server: DebugServer, proxy: DebugProxy, val fi
   def classesUpdated(classes: Seq[String]): Unit = classUpdates.forEach(_(classes))
 
   /**
-   * Closes the server and ends the session in progress, terminating the program. Closing is idempotent.
+   * Closes the proxy and ends the session in progress, terminating a launched program. Closing is idempotent.
    */
   override def close(): Unit = {
     proxy.close()
-    server.close()
+    session.get.foreach(_.close())
     executor.shutdown()
   }
 }
@@ -79,6 +80,21 @@ object DebugAdapter {
    * port is chosen by the system and announced on standard output. The loopback address keeps the agent off the network.
    */
   private val Agent = "-agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=127.0.0.1:0"
+
+  /** The options that load a JDWP agent, which the build may carry for its own debugging (an attach set-up). */
+  private val DebugAgentOptions = Seq("-agentlib:jdwp", "-Xrunjdwp", "-Xdebug")
+
+  /** The environment variables whose options every JVM of the process reads. */
+  private val JvmOptionVariables = Seq("JAVA_TOOL_OPTIONS", "JDK_JAVA_OPTIONS")
+
+  /**
+   * JVM options without those that load a JDWP agent, before the classpath: the session's agent replaces them, as a
+   * JVM refuses to load two. What follows `-cp` (the main class and the program's arguments) is left as it is.
+   */
+  private def withoutDebugAgents(options: Seq[String]): Seq[String] = {
+    val (jvmOptions, rest) = options.span(_ != "-cp")
+    jvmOptions.filterNot(option => DebugAgentOptions.exists(option.startsWith)) ++ rest
+  }
 
   /**
    * The Scala version of a Java target, which the adapter needs for every debuggee: the adapter's own default 2.13,
@@ -180,24 +196,41 @@ object DebugAdapter {
       DebugSettings.getCurrent.showQualifiedNames = true
       val classUpdates = new CopyOnWriteArrayList[Seq[String] => Unit]
       val debuggee = describe(subject, program, target, modules, environment, librarySources, sourcesCache, classUpdates)
-      val server = DebugServer(debuggee, new ToolsResolver(toolsCache), HostLogger)
+      val resolver = new ToolsResolver(toolsCache)
+      val session = new AtomicReference(Option.empty[AutoCloseable])
+      // As SDA's `DebugServer.connect` does, but over a socket of the loopback interface: its server binds every
+      // interface (`DebugServer.Address` has no other), where anyone on the network could take the session first.
+      val openAdapter = () => {
+        val (proxySide, adapterSide) = loopbackPair()
+        session.set(Some(HostDebugSession.start(adapterSide, debuggee, resolver, HostLogger)))
+        proxySide
+      }
+      val proxy = DebugProxy.start(openAdapter, stepTargets)
 
-      val finished = server.run()
-      val proxy =
-        try DebugProxy.start(server.uri, stepTargets)
-        catch {
-          case error: Throwable =>
-            server.close()
-            throw error
-        }
-
-      new DebugAdapter(server, proxy, finished, executor, classUpdates)
+      new DebugAdapter(session, proxy, proxy.ended, executor, classUpdates)
     } catch {
       case error: Throwable =>
         executor.shutdown()
         throw error
     }
   }
+
+  /**
+   * Two connected sockets of the loopback interface, the proxy's and the adapter's. The listener lives only for the one
+   * connection, and the accepted socket must be the one the proxy opened: another local process that connected first
+   * is refused.
+   */
+  private def loopbackPair(): (Socket, Socket) =
+    Using.resource(new ServerSocket(0, 1, InetAddress.getLoopbackAddress)) { listener =>
+      val proxySide = new Socket(listener.getInetAddress, listener.getLocalPort)
+      val adapterSide = listener.accept()
+
+      if (adapterSide.getPort == proxySide.getLocalPort) (proxySide, adapterSide)
+      else {
+        Seq(proxySide, adapterSide).foreach(_.close())
+        throw new IOException("another process connected to the debug adapter's socket first")
+      }
+    }
 
   /** Sends the adapter's log to the host's. */
   private object HostLogger extends Logger {
@@ -403,9 +436,15 @@ object DebugAdapter {
    */
   private def launch(command: Seq[String], environment: TestRun.Environment,
                      listener: DebuggeeListener): CancelableFuture[Unit] = {
-    val builder = new ProcessBuilder((command.head +: Agent +: command.tail).asJava)
+    val builder = new ProcessBuilder((command.head +: Agent +: withoutDebugAgents(command.tail)).asJava)
       .directory(TestRun.path(environment.item.getWorkingDirectory).toFile)
     builder.environment().putAll(environment.item.getEnvironmentVariables)
+    // The JVM reads these too, and refuses to load a second JDWP agent.
+    JvmOptionVariables.foreach { name =>
+      Option(builder.environment().get(name)).foreach { value =>
+        builder.environment().put(name, withoutDebugAgents(value.split("\\s+").toSeq.filter(_.nonEmpty)).mkString(" "))
+      }
+    }
     val process = builder.start()
     val result = Promise[Unit]()
     val cancelled = new AtomicBoolean
