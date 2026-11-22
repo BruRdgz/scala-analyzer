@@ -1067,6 +1067,36 @@ class EditingTest extends munit.FunSuite {
     }
   }
 
+  // The oracle is the platform's list intentions over the Java plugin's list contexts and comma flipper, as the IDE
+  // offers them in Java: the split arguments are laid out by the Java formatter, so only the line break is checked
+  // apart from the collapsed text.
+  test("Java files get the platform's split, join and flip-comma intentions") {
+    val cases = Seq(
+      ("class Lists { void foo(int i, String s) {} void g() { foo(<caret>42, \"boo\"); } }",
+        "Put arguments on separate lines", "class Lists { void foo(int i, String s) {} void g() { foo(42, \"boo\"); } }",
+        Some("42,\n")),
+      ("class Lists { void foo(int i, String s) {} void g() { foo<caret>(42,\n \"boo\"); } }",
+        "Put arguments on one line", "class Lists { void foo(int i, String s) {} void g() { foo(42, \"boo\"); } }",
+        None),
+      ("class Lists { int f(int a, int b) { return 0; } int x = f(1<caret>, 2); }", "Flip",
+        "class Lists { int f(int a, int b) { return 0; } int x = f(2, 1); }", None),
+    )
+    for ((marked, title, expected, lineBreak) <- cases) {
+      val original = marked.replace("<caret>", "")
+      val file = host.openFile(Path.of("/editing/Lists.java"), original, module)
+      try {
+        val at = marked.indexOf("<caret>")
+        val actions = host.codeActions(file, new TextRange(at, at)).choices
+        val chosen = actions.find(_.title.startsWith(title)).getOrElse(fail(actions.map(_.title).toString))
+        assertEquals(chosen.disabled, None, title)
+        val changed = applyEdits(original, chosen.edits)
+        assertEquals(changed.replaceAll("\\s+", " "), expected, title)
+        lineBreak.foreach(text => assert(changed.contains(text), changed))
+        assertEquals(host.read(file.getText), original)
+      } finally host.closeSource(file)
+    }
+  }
+
   // The oracle is the Java plugin's unwrap and surround descriptors, as the IDE's Unwrap/Remove and Surround With
   // popups list them: the surrounded statement is found in the `if` that the surrounder writes, whatever condition it
   // leaves for the user to type.

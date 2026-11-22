@@ -369,8 +369,8 @@ private[scalaanalyzer] object HostBootstrap {
         "com.intellij.codeInsight.completion.JavaNoVariantsDelegator").contains(bean.implementation))
 
   /**
-   * The platform's split/join and flip-comma intentions: the Scala descriptors do not register them, and they act
-   * through the list contexts the host registers from the plugin's descriptors.
+   * The platform's split/join and flip-comma intentions: neither plugin's descriptors register them, and they act
+   * through the list contexts and flippers the host registers from the plugins' descriptors.
    */
   private val PlatformListIntentions: Seq[String] =
     Seq(classOf[SplitLineIntention], classOf[JoinLinesIntention], classOf[FlipCommaIntention]).map(_.getName)
@@ -670,12 +670,22 @@ private[scalaanalyzer] object HostBootstrap {
      * @param name the extension point's qualified name
      * @param extension the Java plugin's implementation
      */
-    private def registerJavaLanguageExtension[T <: AnyRef](name: String, extension: T): Unit = {
+    private def registerJavaLanguageExtension[T <: AnyRef](name: String, extension: T): Unit =
+      // The element type is erased; the only extension registered here is the Java plugin's.
+      addJavaLanguageExtension(declare(name).asInstanceOf[ExtensionPointImpl[LanguageExtensionPoint[T]]], extension)
+
+    /**
+     * Registers the Java plugin's extension for Java in a declared language extension point.
+     *
+     * @param point the extension point
+     * @param extension the Java plugin's implementation
+     */
+    private def addJavaLanguageExtension[T <: AnyRef](point: ExtensionPointImpl[LanguageExtensionPoint[T]], extension: T)
+        : Unit = {
       val javaPlugin = new DefaultPluginDescriptor(PluginId.getId("com.intellij.java"))
       val bean = new LanguageExtensionPoint[T](JavaLanguage.INSTANCE.getID, extension)
       bean.setPluginDescriptor(javaPlugin)
-      // The element type is erased; the only extension registered here is the Java plugin's.
-      declare(name).asInstanceOf[ExtensionPointImpl[LanguageExtensionPoint[T]]].registerExtension(bean, javaPlugin, root)
+      point.registerExtension(bean, javaPlugin, root)
     }
 
     private def declare(name: String): ExtensionPointImpl[?] = {
@@ -1475,7 +1485,7 @@ private[scalaanalyzer] object HostBootstrap {
         languageBean(JavaLanguage.INSTANCE.getID, new JavaStubDefinition), scalaPlugin, root)
       // Split/join list: the platform's intentions ask for the list contexts of the file's language. Flip comma asks for
       // language flippers, which the Scala plugin declares none of.
-      // The element type is erased; the only extensions registered here are the Scala plugin's list contexts.
+      // The element type is erased; the only extensions registered here are the plugins' list contexts.
       val splitJoinContexts = declare("com.intellij.listSplitJoinContext")
         .asInstanceOf[ExtensionPointImpl[LanguageExtensionPoint[ListSplitJoinContext]]]
       for (bean <- Descriptors.scalaExtensionBeans(config.scalaPluginJars, "com.intellij.listSplitJoinContext")
@@ -1483,7 +1493,14 @@ private[scalaanalyzer] object HostBootstrap {
         val context = newPrivate(Class.forName(bean.implementation).asSubclass(classOf[ListSplitJoinContext]))
         splitJoinContexts.registerExtension(languageBean(ScalaLanguage.INSTANCE.getID, context), scalaPlugin, root)
       }
-      declare("com.intellij.flipCommaIntention.flipper")
+      // Java's list contexts (arguments, parameters, array initializers, annotation attributes, record components) and
+      // its comma flipper, as java-backend's descriptor registers them.
+      for (name <- javaBackendExtensions("com.intellij.listSplitJoinContext"))
+        addJavaLanguageExtension(splitJoinContexts,
+          newPrivate(Class.forName(name).asSubclass(classOf[ListSplitJoinContext])))
+      for (name <- javaBackendExtensions("com.intellij.flipCommaIntention.flipper"))
+        registerJavaLanguageExtension("com.intellij.flipCommaIntention.flipper",
+          newPrivate(Class.forName(name).asSubclass(classOf[FlipCommaIntention.Flipper])))
       appServices.register(classOf[StubElementRegistryService])(
         new StubElementRegistryServiceImpl(CoroutineScopeKt.CoroutineScope(EmptyCoroutineContext.INSTANCE)))
 
@@ -2217,7 +2234,7 @@ private[scalaanalyzer] object HostBootstrap {
         librarySources, moduleModel, () => psiChanged(),
         new CodeActions(
           Descriptors.scalaExtensions(config.scalaPluginJars, "com.intellij.intentionAction") ++ PlatformListIntentions,
-          javaIntentions(),
+          javaIntentions() ++ PlatformListIntentions,
           Descriptors.scalaExtensions(config.scalaPluginJars, "com.intellij.lang.surroundDescriptor"),
           Descriptors.scalaExtensions(config.scalaPluginJars, "com.intellij.lang.unwrapDescriptor"),
           javaBackendExtensions("com.intellij.lang.surroundDescriptor"),

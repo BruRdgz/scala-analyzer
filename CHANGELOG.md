@@ -71,6 +71,8 @@
   javadoc tags and references, the qualifier as an argument, `main`'s `args`, loggers.
 - Java files have the surround (`if`, `for`, `try`..., on selected statements or an expression) and unwrap/remove
   actions of the Java plugin's descriptors, previewed on a copy.
+- Java files have the platform's split/join list intentions (arguments, parameters, array initializers, annotation
+  attributes, record components) and Flip ',', through the Java plugin's list contexts and flipper.
 - Type Info (the VS Code command and MCP's `type_of`) works in Java files: the type of the selected expression, or of
   the innermost one at the caret.
 - A rename of a Java element to a Java keyword is refused, and Java references, rename and navigation decide the
