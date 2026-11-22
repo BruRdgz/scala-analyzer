@@ -21,6 +21,12 @@
   <a href="#development">Development</a>
 </p>
 
+> [!NOTE]
+> **Project on indefinite hiatus.** I will be studying for exams until January, and possibly longer,
+> so I am not actively developing scala-analyzer. The project stays open: you are welcome to use it, fork it, or
+> contribute, but issues and pull requests may wait a long time for an answer. The latest release is
+> [0.5.1](https://github.com/BruRdgz/scala-analyzer/releases/tag/0.5.1).
+
 scala-analyzer runs the IntelliJ Scala plugin in a standalone process, without the IntelliJ application container.
 It exposes editor features through the **Language Server Protocol (LSP)** and imports projects through the
 **Build Server Protocol (BSP)**. A VS Code extension is included; other editors can connect over stdio.
