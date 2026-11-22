@@ -341,29 +341,30 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
     }
 
   /**
-   * Lists the members Override Members offers for the class at a position. Only Scala files have it.
+   * Lists the members Override Members offers for the class at a position. Scala and Java files have it.
    *
    * @param path registered project-source path
    * @param at caret position, in the class, object or trait whose members are listed
    * @return the members in the chooser's order, grouped by owner; empty when the position is not in a class, object
-   *         or trait, nothing is left to override, and for a file that is not Scala
+   *         or trait, nothing is left to override, and for a file that is neither Scala nor Java
    */
   def overridableMembers(path: Path, at: LineColumn): Seq[MemberOverrides.Member] = file(path) match {
-    case sourceFile: ScalaFile => host.overridableMembers(sourceFile, host.read(offset(document(sourceFile), at)))
+    case sourceFile: (ScalaFile | PsiJavaFile) =>
+      host.overridableMembers(sourceFile, host.read(offset(document(sourceFile), at)))
     case _ => Seq.empty
   }
 
   /**
-   * Computes the changes that override the chosen members in the class at a position. Only Scala files have them.
+   * Computes the changes that override the chosen members in the class at a position. Scala and Java files have them.
    *
    * @param path registered project-source path
    * @param at caret position, where the members are inserted
    * @param ids identifiers of the members to override, as `overridableMembers` gave them
-   * @return the changes against the current buffer; empty for a file that is not Scala
+   * @return the changes against the current buffer; empty for a file that is neither Scala nor Java
    * @throws MemberOverrides.UnknownMembers when an identifier is not that of a member the class offers
    */
   def overrideMembers(path: Path, at: LineColumn, ids: Seq[String]): Seq[TextChange] = file(path) match {
-    case sourceFile: ScalaFile =>
+    case sourceFile: (ScalaFile | PsiJavaFile) =>
       val edits = host.overrideMembers(sourceFile, host.read(offset(document(sourceFile), at)), ids)
 
       host.read(edits.map(textChange(document(sourceFile), _)))
@@ -372,15 +373,15 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
 
   /**
    * Computes the changes of Implement members for the class at a position: every member it has to implement, inserted
-   * as the IDE's dialog does by default. Only Scala files have them.
+   * as the IDE's dialog does by default. Scala and Java files have them.
    *
    * @param path registered project-source path
    * @param at caret position, in the class, object or trait whose members are implemented
    * @return the changes against the current buffer; empty when the position is not in a class, object or trait, and
-   *         for a file that is not Scala
+   *         for a file that is neither Scala nor Java
    */
   def implementMembers(path: Path, at: LineColumn): Seq[TextChange] = file(path) match {
-    case sourceFile: ScalaFile =>
+    case sourceFile: (ScalaFile | PsiJavaFile) =>
       val edits = host.implementMembers(sourceFile, host.read(offset(document(sourceFile), at)))
 
       host.read(edits.map(textChange(document(sourceFile), _)))
@@ -826,7 +827,8 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
    * ancestor kind. A Scala file has the plugin's fixes, intentions, surround, unwrap, inline and extract actions, and
    * Implement members, which is previewed only when `only` accepts its kind and not at all for a caller that
    * `resolvesEdits`. A Java file has the Java plugin's intentions, as `refactor.rewrite` like the Scala ones, the fixes of
-   * its errors and inspection problems as `quickfix`, and Organize imports, which the platform's Java import optimizer computes.
+   * its errors and inspection problems as `quickfix`, Organize imports, which the platform's Java import optimizer
+   * computes, and Implement members for a class whose errors do not already offer the Java plugin's fix for it.
    *
    * @param path registered project-source path
    * @param start selection start
@@ -858,11 +860,9 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
           host.codeActions(sourceFile, range, withInspections)
         else CodeActions.Offered(Seq.empty, None, Seq.empty)
       val implementing = offered.implementMembers.filter(action => accepts(action.kind))
-      val (previewed, deferred) = sourceFile match {
-        case scalaFile: ScalaFile if !resolvesEdits =>
-          (implementing.map(host.previewImplementMembers(scalaFile, range, _)), None)
-        case _ => (None, implementing)
-      }
+      val (previewed, deferred) =
+        if (resolvesEdits) (None, implementing)
+        else (implementing.map(host.previewImplementMembers(sourceFile, range, _)), None)
       val source =
         if (only.nonEmpty && accepts("source.organizeImports")) Seq(host.organizeImports(sourceFile))
         else Seq.empty

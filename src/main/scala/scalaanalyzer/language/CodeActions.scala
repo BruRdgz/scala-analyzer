@@ -1,6 +1,6 @@
 package scalaanalyzer.language
 
-import com.intellij.codeInsight.daemon.impl.quickfix.ImportClassFixBase
+import com.intellij.codeInsight.daemon.impl.quickfix.{ImplementMethodsFix, ImportClassFixBase}
 import com.intellij.codeInsight.intention.IntentionAction
 import com.intellij.codeInsight.intention.preview.{IntentionPreviewInfo, IntentionPreviewUtils}
 import com.intellij.codeInsight.unwrap.UnwrapDescriptor
@@ -346,8 +346,9 @@ final class CodeActions(scalaIntentionClasses: Seq[String], javaIntentionClasses
     }
   }
 
+  /** Whether the candidate is the Scala plugin's annotator fix for Implement members or the Java plugin's error fix. */
   private def isImplementMembersFix(candidate: Candidate): Boolean =
-    candidate.name == classOf[ImplementMembersQuickFix].getName
+    Set(classOf[ImplementMembersQuickFix], classOf[ImplementMethodsFix]).exists(_.getName == candidate.name)
 
   /** Creates a registered intention; a ModCommand action is wrapped as the intention the platform registers it as. */
   private def newIntention(name: String): IntentionAction =
@@ -443,16 +444,18 @@ final class CodeActions(scalaIntentionClasses: Seq[String], javaIntentionClasses
   /**
    * Whether Implement members is offered at the range's start: as the annotator's fix when it is available, and
    * otherwise as an action of a class that has abstract members left to implement (an abstract class has no problem to
-   * fix).
+   * fix). In a Java file the fix of the class's error is one of [[collect]]'s choices, and then this is not offered
+   * as well.
    *
    * Callers hold PSI read access. Nothing is previewed (see [[implementMembers]]).
    *
-   * @param file Scala file being queried
+   * @param file Scala or Java file being queried
    * @param range selected UTF-16 range, empty for a caret request
-   * @param problems current diagnostics carrying annotator fixes
+   * @param problems current diagnostics carrying fixes
    * @return the action to preview, or none when the range does not offer it
    */
-  def implementMembersOffer(file: ScalaFile, range: TextRange, problems: Seq[Diagnostic]): Option[ImplementMembers] =
+  def implementMembersOffer(file: ScalaFile | PsiJavaFile, range: TextRange, problems: Seq[Diagnostic])
+      : Option[ImplementMembers] =
     Using.resource(new RequestEditor(file.getViewProvider.getDocument, file.getProject, range.getStartOffset)) {
       request =>
       val title = ScalaBundle.message("implement.members.fix")
@@ -462,28 +465,33 @@ final class CodeActions(scalaIntentionClasses: Seq[String], javaIntentionClasses
       val fixes = fixCandidates(range, problems).filter(isImplementMembersFix)
         .filter(_.create().isAvailable(file.getProject, request.editor, file))
 
-      if (fixes.nonEmpty) Some(ImplementMembers(title, "quickfix", fixes.flatMap(_.problems)))
-      else if (MemberOverrides.hasMembersToImplement(file, range.getStartOffset))
-        Some(ImplementMembers(title, "refactor.rewrite", Seq.empty))
-      else None
+      file match {
+        case _: ScalaFile if fixes.nonEmpty => Some(ImplementMembers(title, "quickfix", fixes.flatMap(_.problems)))
+        // The Java plugin's fix is listed by `collect` with its own edits, which are those of this action (its preview
+        // inserts the abstract methods through the same call), so the IDE's lightbulb lists the change once.
+        case _: PsiJavaFile if fixes.nonEmpty => None
+        case _ if MemberOverrides.hasMembersToImplement(file, range.getStartOffset) =>
+          Some(ImplementMembers(title, "refactor.rewrite", Seq.empty))
+        case _ => None
+      }
     }
 
   /**
    * Previews Implement members, which inserts every member the class at the range's start has to implement, the default
    * of the dialog that the IDE shows.
    *
-   * The insertion runs on the dispatch thread as a query of its own, so the caller must not hold the read lock (see
-   * [[MemberOverrides.implementAll]]). The cancellation of the caller's request propagates. A write that cancels only
-   * the preview, such as an edit of another file, is retried once; if it cancels the retry too, the action is
+   * A Scala file's insertion runs on the dispatch thread as a query of its own, so the caller must not hold the read
+   * lock (see [[MemberOverrides.implementAll]]). The cancellation of the caller's request propagates. A write that
+   * cancels only the preview, such as an edit of another file, is retried once; if it cancels the retry too, the action is
    * disabled rather than failing the caller's other actions. Another failure is logged and disables it too.
    *
-   * @param file Scala file the action was collected for
+   * @param file Scala or Java file the action was collected for
    * @param range the range it was collected for
    * @param offered the action [[implementMembersOffer]] found
    * @return the action with its edits against the current text of `file`
    * @throws ProcessCanceledException when the caller's request is cancelled
    */
-  def implementMembers(file: ScalaFile, range: TextRange, offered: ImplementMembers): Choice =
+  def implementMembers(file: ScalaFile | PsiJavaFile, range: TextRange, offered: ImplementMembers): Choice =
     try {
       def edits = MemberOverrides.implementAll(file, range.getStartOffset).edits
       // An edit of another document cancels the preview without making it wrong, so it gets one more attempt.

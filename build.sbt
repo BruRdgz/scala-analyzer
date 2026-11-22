@@ -136,6 +136,9 @@ lazy val root = (project in file("."))
       // check, behind the "class needs to be abstract" error. Only these jars; nothing in them is registered.
       "com.jetbrains.intellij.java" % "java-impl" % platformVersion intransitive(),
       "com.jetbrains.intellij.platform" % "lang-impl" % platformVersion intransitive(),
+      // The template engine that lang-impl declares: its FileTemplateUtil, through which the Java plugin indents the
+      // bodies of generated methods, links Velocity's types, and fails to load without them.
+      "org.apache.velocity" % "velocity-engine-core" % "2.4.1",
       // RenameUtil and PsiElementRenameHandler: the platform's rename steps, which the plugin's rename processors extend. Only this jar.
       "com.jetbrains.intellij.platform" % "refactoring" % platformVersion intransitive(),
       // RenameJavaClassProcessor, RenameJavaMethodProcessor and the like: the plugin's rename processors extend them. Only this jar.

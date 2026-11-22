@@ -1,9 +1,11 @@
 package scalaanalyzer.platform
 
 import com.intellij.codeInsight.InferredAnnotationsManager
+import com.intellij.codeInspection.bytecodeAnalysis.ProjectBytecodeAnalysis
 import com.intellij.openapi.diagnostic.DefaultLogger
+import com.intellij.openapi.project.Project
 import com.intellij.openapi.vfs.{VirtualFile, VirtualFileSet}
-import com.intellij.psi.{PsiAnnotation, PsiModifierListOwner}
+import com.intellij.psi.{PsiAnnotation, PsiField, PsiMethod, PsiModifierListOwner}
 import com.intellij.util.Processor
 
 import java.lang.reflect.{InvocationHandler, Method, Proxy}
@@ -184,6 +186,50 @@ private[scalaanalyzer] final class HostInferredAnnotationsManager extends Inferr
   override def findInferredAnnotation(owner: PsiModifierListOwner, name: String): PsiAnnotation = {
     CallLog.hit("InferredAnnotationsManager.findInferredAnnotation")
     null
+  }
+}
+
+/**
+ * The IDE's analysis of library bytecode, which reads an index of the libraries' class files that the host does not
+ * build: as [[HostInferredAnnotationsManager]], it infers nothing, and a library getter or setter has no known field.
+ *
+ * Every lookup is recorded in [[CallLog]].
+ *
+ * @param project the host's project
+ */
+private[scalaanalyzer] final class HostProjectBytecodeAnalysis(project: Project) extends ProjectBytecodeAnalysis(project) {
+  /**
+   * Finds no field: the field an accessor reads or writes comes from the index.
+   *
+   * @param accessor getter or setter; not inspected
+   * @return null
+   */
+  override def findFieldForAccessor(accessor: PsiMethod): PsiField = {
+    CallLog.hit("ProjectBytecodeAnalysis.findFieldForAccessor")
+    null
+  }
+
+  /**
+   * Finds no inferred annotation.
+   *
+   * @param owner annotated element; not inspected
+   * @param name annotation name; not inspected
+   * @return null
+   */
+  override def findInferredAnnotation(owner: PsiModifierListOwner, name: String): PsiAnnotation = {
+    CallLog.hit("ProjectBytecodeAnalysis.findInferredAnnotation")
+    null
+  }
+
+  /**
+   * Finds no inferred annotations.
+   *
+   * @param owner annotated element; not inspected
+   * @return an empty array
+   */
+  override def findInferredAnnotations(owner: PsiModifierListOwner): Array[PsiAnnotation] = {
+    CallLog.hit("ProjectBytecodeAnalysis.findInferredAnnotations")
+    PsiAnnotation.EMPTY_ARRAY
   }
 }
 

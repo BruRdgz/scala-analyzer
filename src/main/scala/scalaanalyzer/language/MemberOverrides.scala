@@ -1,9 +1,16 @@
 package scalaanalyzer.language
 
-import com.intellij.codeInsight.generation.GenerateMembersUtil
+import com.intellij.codeInsight.generation.{
+  ClassMember as ChooserMember, GenerateMembersUtil, OverrideImplementExploreUtil, OverrideImplementUtil,
+  PsiMethodMember,
+}
 import com.intellij.codeInsight.intention.preview.IntentionPreviewUtils
 import com.intellij.openapi.editor.Editor
-import com.intellij.psi.{PsiClass, PsiFile}
+import com.intellij.pom.java.JavaFeature
+import com.intellij.psi.{PsiClass, PsiCompiledElement, PsiFile, PsiJavaFile, PsiMethod, PsiModifier}
+import com.intellij.psi.codeStyle.JavaCodeStyleSettings
+import com.intellij.psi.infos.CandidateInfo
+import com.intellij.psi.util.PsiUtil
 import org.jetbrains.plugins.scala.editor.ScalaEditorUtils
 import org.jetbrains.plugins.scala.lang.psi.api.ScalaFile
 import org.jetbrains.plugins.scala.lang.psi.api.statements.ScExtension
@@ -26,6 +33,9 @@ import scala.util.Using
  *
  * The plugin decides which members a class offers (`ScalaOIUtil`), in what order they are listed and where, how and
  * with what bodies they are inserted. The class is the one around the caret, as for the actions.
+ *
+ * A Java class has the same through the Java plugin's own code (`OverrideImplementUtil` and
+ * `OverrideImplementExploreUtil`), which the actions of its dialogs run.
  */
 object MemberOverrides {
   /**
@@ -50,6 +60,18 @@ object MemberOverrides {
   private final case class Listing(clazz: ScTemplateDefinition, members: Seq[ClassMember])
 
   /**
+   * The Java class at the caret and what the chooser of the Java plugin shows for it.
+   *
+   * @param clazz the class
+   * @param members the members in the chooser's order
+   * @param preselected the members that Implement Methods selects when the chooser opens: those that the class has to
+   *                    implement, in the chooser's order; none for Override Methods, which selects nothing
+   * @param insertOverride whether the chooser's `@Override` option is on, which is its default
+   */
+  private final case class JavaListing(
+      clazz: PsiClass, members: Seq[PsiMethodMember], preselected: Seq[PsiMethodMember], insertOverride: Boolean)
+
+  /**
    * The plugin's `TypeAdjuster`, which Scala keeps private to the plugin's package: it shortens the types of the
    * inserted members and imports what they need.
    */
@@ -64,29 +86,48 @@ object MemberOverrides {
    *
    * The caller holds the host read lock; the file is unchanged.
    *
-   * @param file Scala source being queried
+   * @param file Scala or Java source being queried
    * @param offset UTF-16 caret offset
-   * @return `true` when the caret is in a class, object or trait that has abstract members left to implement
+   * @return `true` when the caret is in a class, object or trait that has abstract members left to implement; for a
+   *         Java class, abstract methods only: a default method of an interface is offered by the dialog but not
+   *         required
    */
-  def hasMembersToImplement(file: ScalaFile, offset: Int): Boolean =
-    atCaret(file, offset)(editor => listing(file, editor, implement = true).exists(_.members.nonEmpty))
+  def hasMembersToImplement(file: ScalaFile | PsiJavaFile, offset: Int): Boolean = atCaret(file, offset) { editor =>
+    file match {
+      case scalaFile: ScalaFile => listing(scalaFile, editor, implement = true).exists(_.members.nonEmpty)
+      case javaFile: PsiJavaFile => javaListing(javaFile, editor, implement = true).exists(_.preselected.nonEmpty)
+    }
+  }
 
   /**
    * Previews the insertion of every member the class at the offset has to implement, the chooser's default selection.
    *
-   * Takes read access itself and runs on the host's dispatch thread (see [[inserting]]), so the caller must not be
-   * reading or editing; the file is unchanged.
+   * Takes read access itself and leaves the file unchanged. A Scala file's preview runs on the host's dispatch thread
+   * (see [[inserting]]), so the caller must not be reading or editing; a Java file's runs on the calling thread.
    *
-   * @param file Scala source to edit
+   * For a Java class the default selection of Implement Methods is the abstract methods, which is what the Java
+   * plugin's "Implement methods" fix inserts; a class with only default methods left to implement gets nothing, where
+   * the dialog would preselect an arbitrary one of them.
+   *
+   * @param file Scala or Java source to edit
    * @param offset UTF-16 caret offset; nothing is inserted when it is not in a class, object or trait
    * @return the changed text and the edits against the current text of `file`
    */
-  def implementAll(file: ScalaFile, offset: Int): ChangeEngine.Result = inserting {
-    ChangeEngine.run(file) { copy =>
-      val editor = previewEditorAt(offset)
+  def implementAll(file: ScalaFile | PsiJavaFile, offset: Int): ChangeEngine.Result = file match {
+    case scalaFile: ScalaFile =>
+      inserting {
+        ChangeEngine.run(scalaFile) { copy =>
+          val editor = previewEditorAt(offset)
 
-      listing(copy, editor, implement = true).foreach(found => insert(found.members, found.clazz, editor))
-    }._1
+          listing(copy, editor, implement = true).foreach(found => insert(found.members, found.clazz, editor))
+        }._1
+      }
+    case javaFile: PsiJavaFile =>
+      previewJava(javaFile) { copy =>
+        val editor = previewEditorAt(offset)
+
+        javaListing(copy, editor, implement = true).foreach(found => insertJava(found.preselected, found, editor))
+      }._1
   }
 
   /**
@@ -94,38 +135,61 @@ object MemberOverrides {
    *
    * The caller holds the host read lock; the file is unchanged.
    *
-   * @param file Scala source being queried
+   * @param file Scala or Java source being queried
    * @param offset UTF-16 caret offset
    * @return the chooser's members in its order, grouped by owner as the chooser does; empty when the caret is not in
-   *         a class, object or trait, or nothing is left to override
+   *         a class, object or trait, or nothing is left to override. A Java class lists the methods it can override
+   *         and, as the dialog does by default, the abstract ones it has to implement
    */
-  def overridable(file: ScalaFile, offset: Int): Seq[Member] = atCaret(file, offset) { editor =>
-    listing(file, editor, implement = false).toSeq.flatMap(found => rows(found.members))
+  def overridable(file: ScalaFile | PsiJavaFile, offset: Int): Seq[Member] = atCaret(file, offset) { editor =>
+    file match {
+      case scalaFile: ScalaFile =>
+        listing(scalaFile, editor, implement = false).toSeq.flatMap(found => rows(found.members))
+      case javaFile: PsiJavaFile =>
+        javaListing(javaFile, editor, implement = false).toSeq.flatMap(found => rows(found.members))
+    }
   }
 
   /**
    * Computes the edits that override the chosen members in the class at the offset.
    *
-   * Takes read access itself and runs on the host's dispatch thread (see [[inserting]]), so the caller must not be
-   * reading or editing; the file is unchanged.
+   * Takes read access itself and leaves the file unchanged. A Scala file's preview runs on the host's dispatch thread
+   * (see [[inserting]]), so the caller must not be reading or editing; a Java file's runs on the calling thread.
    *
-   * @param file Scala source to edit
+   * @param file Scala or Java source to edit
    * @param offset UTF-16 caret offset, where the members are inserted
    * @param ids identifiers of the members to override, as [[overridable]] gave them
    * @return the edits against the current text of `file`
    * @throws UnknownMembers when an identifier is not that of a member the class offers
    */
-  def overrideMembers(file: ScalaFile, offset: Int, ids: Seq[String]): Seq[ChangeEngine.Edit] = inserting {
-    ChangeEngine.run(file) { copy =>
-      val editor = previewEditorAt(offset)
-      val offered = listing(copy, editor, implement = false)
-      val byId = offered.toSeq.flatMap(found => rows(found.members).map(_.id).zip(found.members)).toMap
-      val unknown = ids.filterNot(byId.contains)
+  def overrideMembers(file: ScalaFile | PsiJavaFile, offset: Int, ids: Seq[String]): Seq[ChangeEngine.Edit] =
+    file match {
+      case scalaFile: ScalaFile =>
+        inserting {
+          ChangeEngine.run(scalaFile) { copy =>
+            val editor = previewEditorAt(offset)
+            val offered = listing(copy, editor, implement = false)
+            val byId = offered.toSeq.flatMap(found => rows(found.members).map(_.id).zip(found.members)).toMap
+            val unknown = ids.filterNot(byId.contains)
 
-      if (unknown.nonEmpty) throw new UnknownMembers(unknown)
-      offered.foreach(found => insert(ids.distinct.map(byId), found.clazz, editor))
-    }._1.edits
-  }
+            if (unknown.nonEmpty) throw new UnknownMembers(unknown)
+            offered.foreach(found => insert(ids.distinct.map(byId), found.clazz, editor))
+          }._1.edits
+        }
+      case javaFile: PsiJavaFile =>
+        previewJava(javaFile) { copy =>
+          val editor = previewEditorAt(offset)
+          val offered = javaListing(copy, editor, implement = false)
+          val listed = offered.toSeq.flatMap(found => rows(found.members).map(_.id).zip(found.members))
+          val unknown = ids.filterNot(listed.map(_._1).toSet)
+
+          if (unknown.nonEmpty) throw new UnknownMembers(unknown)
+          // The dialog gives its selection in the order it lists it, and the members are inserted in that order.
+          val chosen = listed.collect { case (id, member) if ids.contains(id) => member }
+
+          offered.foreach(found => insertJava(chosen, found, editor))
+        }._1.edits
+    }
 
   /**
    * Runs a preview that inserts members on the host's dispatch thread: the plugin's type adjuster, which the insertion
@@ -134,6 +198,17 @@ object MemberOverrides {
    * [[scalaanalyzer.platform.HostLock.queryOnDispatchThread]]).
    */
   private def inserting[A](preview: => A): A = HostLock.queryOnDispatchThread(preview)
+
+  /**
+   * Runs a preview on the copy of a Java file. The Java plugin's insertion needs no dispatch thread: it is what the
+   * "Implement methods" fix of its errors previews, which runs under the caller's read access with the other previews
+   * of Java fixes.
+   */
+  private def previewJava[A](file: PsiJavaFile)(modify: PsiJavaFile => A): (ChangeEngine.Result, A) =
+    ChangeEngine.run[A](file) {
+      case copy: PsiJavaFile => modify(copy)
+      case other => throw new IllegalStateException(s"change copy is not a Java file: ${other.getClass.getName}")
+    }
 
   /**
    * The class at the editor's caret, chosen as the plugin's actions do, with the members it offers to implement or
@@ -175,6 +250,81 @@ object MemberOverrides {
 
     owners.flatMap(byOwner.get).map(_.sortBy(_.getElement.getTextOffset))
   }
+
+  /**
+   * The Java class around the caret with the members the Java plugin's chooser lists for it, found as the plugin's
+   * Override Methods and Implement Methods actions do.
+   *
+   * The class is `OverrideImplementUtil.getContextClass`, which only Implement Methods lets be an interface where the
+   * language level has no default methods (`JavaImplementMethodsHandler`). The candidates are those of
+   * `OverrideImplementUtil.prepareChooser` and `prepareJavaOverrideImplementChooser`: the dialog lists the methods to
+   * override and then, since its default is to show the two together, those to implement; Implement Methods lists the
+   * methods to implement, the default methods of interfaces unselected. The order is the dialog's (see
+   * [[javaChooserOrder]]), and `@Override` is on as the dialog has it: its setting, offered where the language level
+   * allows (`JavaOverrideImplementMemberChooser.prepare`, `isInsertOverrideAnnotationSelected`). Javadoc is not copied,
+   * which is the checkbox's default (`MemberChooser.PROP_COPYJAVADOC` is unset).
+   */
+  private def javaListing(file: PsiJavaFile, editor: Editor, implement: Boolean): Option[JavaListing] = {
+    val allowInterface = !implement || PsiUtil.isAvailable(JavaFeature.EXTENSION_METHODS, file)
+
+    Option(OverrideImplementUtil.getContextClass(file.getProject, editor, file, allowInterface)).map { clazz =>
+      val candidates = OverrideImplementExploreUtil.getMethodsToOverrideImplement(clazz, implement).asScala.toSeq
+      val isDefault = (candidate: CandidateInfo) =>
+        candidate.getElement match {
+          case method: PsiMethod => method.hasModifierProperty(PsiModifier.DEFAULT)
+          case _ => false
+        }
+      val (primary, secondary) =
+        if (implement) candidates.partition(!isDefault(_))
+        else
+          (candidates,
+            if (clazz.isInterface) Seq.empty
+            else OverrideImplementExploreUtil.getMethodsToOverrideImplement(clazz, true).asScala.toSeq)
+      val shown = javaChooserOrder((primary ++ secondary).distinct.map(new PsiMethodMember(_)))
+      val level = PsiUtil.getLanguageLevel(clazz)
+      val overrideAvailable =
+        JavaFeature.OVERRIDE_INTERFACE.isSufficient(level) || JavaFeature.ANNOTATIONS.isSufficient(level) && !implement
+
+      JavaListing(clazz, shown, if (implement) preselected(shown, primary, clazz) else Seq.empty,
+        overrideAvailable && JavaCodeStyleSettings.getInstance(file).INSERT_OVERRIDE_ANNOTATION)
+    }
+  }
+
+  /**
+   * The members that Implement Methods selects when it opens: those it lists first, without the methods of
+   * `java.lang.Record` that a record implements by itself unless nothing else is left (`prepare`'s `selectElements`).
+   */
+  private def preselected(
+      shown: Seq[PsiMethodMember], primary: Seq[CandidateInfo], clazz: PsiClass)
+      : Seq[PsiMethodMember] = {
+    val required = shown.filter(member => primary.exists(_.getElement == member.getElement))
+    val own = required.filterNot(member => OverrideImplementExploreUtil.belongsToRecord(member.getElement))
+
+    if (clazz.isRecord && own.nonEmpty) own else required
+  }
+
+  /**
+   * Orders Java methods as the dialog of the Java plugin lists them: the owners in the order in which the candidates
+   * first name them, which is how `MemberChooser.buildModel` creates its nodes, and within an owner by position in the
+   * source (`MemberChooser.OrderComparator`), or in the candidates' own order for a compiled owner, which has no
+   * positions.
+   */
+  private def javaChooserOrder(members: Seq[PsiMethodMember]): Seq[PsiMethodMember] =
+    members.map(_.getElement.getContainingClass).distinct.flatMap { owner =>
+      val own = members.filter(_.getElement.getContainingClass == owner)
+
+      if (own.head.getElement.isInstanceOf[PsiCompiledElement]) own else own.sortBy(_.getElement.getTextOffset)
+    }
+
+  /**
+   * Inserts the methods into the Java class at the editor's caret as the dialog's OK does: the plugin's
+   * `OverrideImplementUtil.overrideOrImplementMethodsInRightPlace`, which places them by the caret and builds their
+   * bodies from the body templates.
+   */
+  private def insertJava(members: Seq[PsiMethodMember], listing: JavaListing, editor: Editor): Unit =
+    // The last argument is the dialog's `@Override` checkbox; Javadoc is not copied.
+    OverrideImplementUtil.overrideOrImplementMethodsInRightPlace(
+      editor, listing.clazz, members.asJava, false, listing.insertOverride)
 
   /** The members in the chooser's order (see [[ownerGroups]]). */
   private def inChooserOrder(members: Seq[ClassMember], clazz: ScTemplateDefinition): Seq[ClassMember] =
@@ -254,7 +404,7 @@ object MemberOverrides {
    * @param chooser the members in the chooser's order
    * @return one row per member, in the same order
    */
-  private def rows(chooser: Seq[ClassMember]): Seq[Member] = {
+  private def rows(chooser: Seq[ChooserMember]): Seq[Member] = {
     val shown = chooser.map(member => (member.getParentNodeDelegate.getText, member.getText))
     val sharing = shown.groupMapReduce(identity)(_ => 1)(_ + _)
 

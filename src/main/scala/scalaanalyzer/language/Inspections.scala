@@ -42,33 +42,12 @@ private[scalaanalyzer] object Inspections {
   /** The id of the unused-import problems, which the unused-declaration tool reports without a registration of its own. */
   val UnusedImportId = "ScalaUnusedImport"
 
-  /** Why the inspections that read facts inferred from library bytecode do not run. */
-  private val NeedsBytecodeIndex =
-    "reads the IDE's bytecode index of libraries (ProjectBytecodeAnalysis), which the host does not build"
-  private val NeedsMessageBus =
-    "caches through JavaLibraryModificationTracker, a final project service that subscribes to the IDE's message bus, " +
-      "which the host does not have"
-
   /**
    * The Java inspections the host does not run, by id, each with the reason: the loaded ones that the audit in
    * `JavaInspectionsTest` finds failing. The audit fails on an entry that no longer fails, so the set only shrinks
    * as the host registers what they ask for.
    */
   val JavaExclusions: Map[String, String] = Map(
-    "ComparatorMethodParameterNotUsed" -> NeedsMessageBus,
-    "ConditionCoveredByFurtherCondition" -> NeedsMessageBus,
-    "ConstantExpression" -> NeedsMessageBus,
-    "DataFlowIssue" -> NeedsMessageBus,
-    "DuplicateCondition" -> NeedsMessageBus,
-    "IgnoreResultOfCall" -> NeedsMessageBus,
-    "ObviousNullCheck" -> NeedsMessageBus,
-    "PointlessBooleanExpression" -> NeedsMessageBus,
-    "WriteOnlyObject" -> NeedsMessageBus,
-    "DuplicateExpressions" -> NeedsBytecodeIndex,
-    "IdempotentLoopBody" -> NeedsBytecodeIndex,
-    "IfStatementMissingBreakInLoop" -> NeedsBytecodeIndex,
-    "LoopConditionNotUpdatedInsideLoop" -> NeedsBytecodeIndex,
-    "MismatchedCollectionQueryUpdate" -> NeedsBytecodeIndex,
     "EnumSwitchStatementWhichMissesCases" ->
       "needs com.intellij.ide.nls.NlsMessages, which the host's slice of the platform's ide-core-impl leaves out",
     "MarkdownDocumentationCommentsMigration" -> "needs jsoup, which is not on the host's class path",

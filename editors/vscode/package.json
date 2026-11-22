@@ -170,7 +170,7 @@
         },
         {
           "command": "scalaAnalyzer.chooseMembersToOverride",
-          "when": "editorLangId == scala",
+          "when": "editorLangId == scala || editorLangId == java",
           "group": "1_modification"
         }
       ],
@@ -241,7 +241,7 @@
         },
         {
           "command": "scalaAnalyzer.chooseMembersToOverride",
-          "when": "editorLangId == scala"
+          "when": "editorLangId == scala || editorLangId == java"
         },
         {
           "command": "scalaAnalyzer.compileTarget",

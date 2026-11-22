@@ -1,6 +1,7 @@
 package scalaanalyzer.platform
 
 import com.intellij.codeInsight.javadoc.{DocumentationDelegateProvider, JavaDocInfoGeneratorFactory}
+import com.intellij.codeInsight.generation.{MemberImplementorExplorersProviderImpl, OverrideImplementExploreUtil}
 import com.intellij.codeInsight.hints.settings.ParameterNameHintsSettings
 import com.intellij.codeInsight.hints.{
   InlayHintsProviderExtensionBean, InlayHintsSettings, InlayParameterHintsExtension, JavaInlayParameterHintsProvider
@@ -81,6 +82,7 @@ import com.intellij.codeInspection.{
   SuppressManager
 }
 import com.intellij.codeInspection.bulkOperation.BulkMethodInfoProvider
+import com.intellij.codeInspection.bytecodeAnalysis.ProjectBytecodeAnalysis
 import com.intellij.codeInspection.naming.NamingConvention
 import com.intellij.codeInspection.ex.{EntryPointsManager, EntryPointsManagerBase}
 import com.intellij.concurrency.JobLauncher
@@ -96,6 +98,7 @@ import com.intellij.ide.highlighter.{JavaClassFileType, JavaFileType}
 import com.intellij.ide.util.PropertiesComponent
 import com.intellij.internal.statistic.eventLog.{StatisticsEventLogProvidersHolder, StatisticsEventLoggerProvider}
 import com.intellij.java.codeserver.highlighting.JavaErrorFilter
+import com.intellij.java.library.JavaLibraryModificationTracker
 import com.intellij.java.frontback.psi.impl.syntax.JavaSyntaxDefinitionExtension
 import com.intellij.java.impl.template.{JavaTemplateCodeInsightSupport, JavaTemplateImportSupport}
 import com.intellij.lang.{
@@ -163,14 +166,15 @@ import com.intellij.pom.java.{InternalPersistentJavaLanguageLevelReaderService, 
 import com.intellij.pom.tree.TreeAspect
 import com.intellij.profile.codeInspection.InspectionProjectProfileManager
 import com.intellij.psi.{
-  ClassFileViewProviderFactory, DumbJavaModuleGraphHelper, FileTypeFileViewProviders, JavaModuleGraphHelper,
-  JavaPsiFacade, JvmPsiConversionHelper, LanguageSubstitutors, PackageDirectoryProvider, ParsingDiagnostics,
+  ClassFileViewProviderFactory, DumbJavaModuleGraphHelper, FileTypeFileViewProviders, JVMElementFactoryProvider,
+  JavaModuleGraphHelper, JavaPsiFacade, JvmPsiConversionHelper, LanguageSubstitutors, PackageDirectoryProvider, ParsingDiagnostics,
   PsiAnnotation, PsiClassOwner, PsiDocumentManager, PsiElementFactory, PsiElementFinder, PsiFileFactory,
-  PsiImportList, PsiImportStatementBase, PsiJavaFile, PsiMethod, PsiNameHelper, PsiReference, PsiReferenceProvider,
-  PsiReferenceRegistrar, PsiReferenceService, PsiReferenceServiceImpl, PsiResolveHelper, PsiSubstitutorFactory,
-  SmartPointerManager, SmartTypePointerManager
+  PsiImportList, PsiImportStatementBase, PsiJavaFile, PsiMember, PsiMethod, PsiNameHelper, PsiReference,
+  PsiReferenceProvider, PsiReferenceRegistrar, PsiReferenceService, PsiReferenceServiceImpl, PsiResolveHelper,
+  PsiSubstitutorFactory, SmartPointerManager, SmartTypePointerManager
 }
 import com.intellij.psi.augment.PsiAugmentProvider
+import com.intellij.psi.codeStyle.arrangement.{JavaRearranger, MemberOrderService, Rearranger}
 import com.intellij.psi.codeStyle.{
   CodeStyleManager, CodeStyleSettings, CodeStyleSettingsService, CommonCodeStyleSettings,
   CustomCodeStyleSettingsFactory, DocCommentSettings, JavaCodeStyleManager, JavaCodeStyleSettings,
@@ -179,7 +183,8 @@ import com.intellij.psi.codeStyle.{
 import com.intellij.psi.compiled.ClassFileDecompilers
 import com.intellij.psi.controlFlow.ControlFlowFactory
 import com.intellij.psi.impl.{
-  DocumentCommitProcessor, JavaClassSupersImpl, JavaPsiFacadeImpl, JavaPsiImplementationHelper,
+  DocumentCommitProcessor, JavaClassSupersImpl, JavaFactoryProvider, JavaPsiFacadeImpl, JavaPsiImplementationHelper,
+  JavaPsiImplementationHelperImpl,
   JvmPsiConversionHelperImpl, PsiCachedValuesFactory, PsiElementFactoryImpl, PsiFileFactoryImpl,
   PsiJavaModuleModificationTracker, PsiModificationTrackerImpl, PsiNameHelperImpl, PsiParserFacadeImpl,
   PsiSubstitutorFactoryImpl, RecordAugmentProvider,
@@ -198,8 +203,9 @@ import com.intellij.psi.impl.java.stubs.{
 import com.intellij.psi.impl.migration.PsiMigrationManager
 import com.intellij.psi.impl.search.{
   CachesBasedRefSearcher, ImplicitClassesSearcher, JavaClassInheritorsSearcher, JavaDirectInheritorsSearcher,
-  JavaOverridingMethodsSearcher, MethodDeepestSuperSearcher, MethodSuperSearcher, MethodUsagesSearcher,
-  PsiSearchHelperImpl
+  JavaFilesSearchScopeProvider, JavaFilesSearchScopeProviderImpl, JavaNullMethodArgumentIndex,
+  JavaOverridingMethodsSearcher, MethodDeepestSuperSearcher, MethodSuperSearcher,
+  MethodUsagesSearcher, PsiSearchHelperImpl
 }
 import com.intellij.psi.impl.smartPointers.{
   SmartPointerAnchorProvider, SmartPointerManagerImpl, SmartTypePointerManagerImpl
@@ -230,7 +236,8 @@ import com.intellij.psi.util.{CachedValuesManager, JavaClassSupers, PsiVersionin
 import com.intellij.task.ProjectTaskManager
 import com.intellij.testIntegration.{JavaTestFinder, TestFinder, TestFramework}
 import com.intellij.util.{
-  CachedValuesManagerImpl, CollectionQuery, EmptyQuery, Queries, QueriesImpl, Query, QueryExecutor
+  CachedValuesManagerImpl, CollectionQuery, EmptyQuery, ForcefulReparseModificationTracker, Queries, QueriesImpl,
+  Query, QueryExecutor,
 }
 import com.intellij.util.concurrency.TransferredWriteActionService
 import com.intellij.util.gist.GistManager
@@ -555,6 +562,31 @@ private[scalaanalyzer] object HostBootstrap {
       // The fixes of an incompatible assignment ask for the types a variable could have.
       registerListed("com.intellij.codeInsight.changeVariableTypeQuickFixProvider",
         classOf[ChangeVariableTypeQuickFixProvider])
+      // The method generation of Implement methods (the fix of a class that lacks an implementation) and of the Java
+      // Override and Implement Members, which share it, reads these two with `getExtensionList`, which fails for an
+      // extension point that is not declared. The descriptor's extensions are left out: the first generates the
+      // methods of a class in a `{@snippet}` javadoc tag, and the second repeats the null-safety annotations of the
+      // overridden method and needs the nullability annotation lists that the host's manager does not answer.
+      declare("com.intellij.methodImplementor")
+      declare("com.intellij.overrideImplementsAnnotationsHandler")
+      // The listing of the methods to implement asks for the explorers of other languages' implementors, which the
+      // IDE's service reads from the first extension point above.
+      appServices.register(classOf[OverrideImplementExploreUtil.MemberImplementorExplorersProvider])(
+        new MemberImplementorExplorersProviderImpl)
+      // Where generated members go: the place that the language's arrangement rules give them.
+      appServices.register(classOf[MemberOrderService])(new MemberOrderService)
+      Rearranger.EXTENSION.addExplicitExtension(JavaLanguage.INSTANCE, new JavaRearranger)
+      // The generated methods are created by the language's element factory, as java-backend's descriptor registers it.
+      // The element type is erased; the only extension registered here is Java's factory. A language bean is
+      // instantiated for its plugin, which it must name.
+      locally {
+        val javaPlugin = new DefaultPluginDescriptor(PluginId.getId("com.intellij.java"))
+        val factory = new LanguageExtensionPoint[JVMElementFactoryProvider](JavaLanguage.INSTANCE.getID, new JavaFactoryProvider)
+        factory.setPluginDescriptor(javaPlugin)
+        declare("com.intellij.generation.topLevelFactory")
+          .asInstanceOf[ExtensionPointImpl[LanguageExtensionPoint[JVMElementFactoryProvider]]]
+          .registerExtension(factory, javaPlugin, root)
+      }
       // Import fixes ask whether an extension keeps a file from being changed silently; the host has none.
       declare("com.intellij.silentChangeVetoer")
       // Import fixes also read the names the user keeps out of auto-import: the defaults, as the host persists none.
@@ -591,6 +623,16 @@ private[scalaanalyzer] object HostBootstrap {
       appServices.register(classOf[BatchSuppressManager])(new BatchSuppressManagerImpl)
       // The contract, internal-API and unstable-API annotations that the analysis recognizes by name.
       appServices.register(classOf[StaticAnalysisAnnotationManager])(new StaticAnalysisAnnotationManager)
+      // Counts forced reparses, a part of the project's JavaLibraryModificationTracker; the host forces none.
+      appServices.register(classOf[ForcefulReparseModificationTracker])(new ForcefulReparseModificationTracker)
+      // The contracts that data flow infers from the methods of source files, kept in a gist of each file; the class is
+      // internal to the Java plugin.
+      locally {
+        // A class loaded by name is a reference type.
+        val gist = Class.forName("com.intellij.codeInspection.dataFlow.inference.ContractInferenceGist")
+          .asInstanceOf[Class[AnyRef]]
+        appServices.register(gist)(newPrivate(gist))
+      }
       // The class naming conventions: the first that applies to a class checks its name, so the descriptor's order
       // (it lists each after the previous, the last one as `last`) is kept. The inspection also watches the
       // registrations of local inspections (an extension point of the platform), of which the host registers none.
@@ -1521,6 +1563,18 @@ private[scalaanalyzer] object HostBootstrap {
           val p = processor.asInstanceOf[Processor[VirtualFile]]
           val query = wordQuery(words, checker.asInstanceOf[Condition[Integer]])
           java.lang.Boolean.valueOf(wordIndex.filesWithAll(Seq(query), scope).forall(p.process))
+        // The files that may pass `null` to a method, which data flow searches for the calls that do. The IDE's index is
+        // a filter ahead of an exact search of those calls (JavaNullMethodArgumentUtil.searchNullArgument), so the files
+        // that mention the method's name, a superset, give the same calls. As the IDE's, the files have every key.
+        case ("FileBasedIndex.getFilesWithKey",
+              Array(id, keys: java.util.Set[?], processor: Processor[?], scope: GlobalSearchScope))
+            if id == JavaNullMethodArgumentIndex.INDEX_ID =>
+          // The platform asks this method for a processor of VirtualFiles.
+          val p = processor.asInstanceOf[Processor[VirtualFile]]
+          val names = keys.asScala.toSeq.map(_.asInstanceOf[JavaNullMethodArgumentIndex.MethodCallData].getMethodName)
+          val files = names.distinct.map(name => wordIndex.filesWith(new IdIndexEntry(name, true), scope))
+            .reduceOption((left, right) => left.filter(right.contains)).getOrElse(Seq.empty)
+          java.lang.Boolean.valueOf(files.forall(p.process))
         // The reference search asks for several indexes at once; the host has the word index only.
         case ("FileBasedIndex.processFilesContainingAllKeys",
               Array(queries: java.util.Collection[?], scope: GlobalSearchScope, processor: Processor[?])) =>
@@ -1676,6 +1730,16 @@ private[scalaanalyzer] object HostBootstrap {
         Disposer.register(root, tracker)
         tracker
       }
+      // The Java plugin's caches of facts about library classes (the contracts that data flow reads) depend on this
+      // tracker: the project's roots, which the host advances when its modules change (see `ScalaPsiHost.addModule`),
+      // plus reparses and reloaded library files, which the host does not have.
+      projectServices.register(classOf[JavaLibraryModificationTracker]) {
+        val tracker = new JavaLibraryModificationTracker(project)
+        Disposer.register(root, tracker)
+        tracker
+      }
+      // The scope of the Java files, which data flow searches for the calls that pass `null` to a method.
+      projectServices.register(classOf[JavaFilesSearchScopeProvider])(new JavaFilesSearchScopeProviderImpl(project))
       // PSI <-> document synchronization without the IDE's global editor event multicaster.
       projectServices.register(classOf[PsiDocumentManager]) {
         val documents = new HostPsiDocumentManager(project)
@@ -1824,6 +1888,7 @@ private[scalaanalyzer] object HostBootstrap {
         case ("ExternalAnnotationsManager.findExternalAnnotations", Array(_, _)) => java.util.List.of()
       }))
       projectServices.register(classOf[InferredAnnotationsManager])(new HostInferredAnnotationsManager)
+      projectServices.register(classOf[ProjectBytecodeAnalysis])(new HostProjectBytecodeAnalysis(project))
       // Nullability annotations of library Java types: the host configures none (the IDE's defaults come from
       // settings).
       projectServices.register(classOf[NullableNotNullManager])(new Host_NullableNotNullManager(project, dispatch {
@@ -1835,7 +1900,13 @@ private[scalaanalyzer] object HostBootstrap {
       // Java class files navigate to their sources through this helper, as the IDE's: the source file of the same
       // package and name in the sources attached to the class's library, or the class file itself (a library without
       // sources).
+      // The IDE's helper, for the one rule the host takes from it as it is: where a new member goes in a class.
+      lazy val ideJavaHelper = new JavaPsiImplementationHelperImpl(project)
       projectServices.register(classOf[JavaPsiImplementationHelper])(new Host_JavaPsiImplementationHelper(dispatch {
+        // By the Java arrangement settings, the defaults the IDE ships (fields before methods, and so on), through
+        // MemberOrderService and Java's rearranger, which `registerJavaErrorFixes` registers.
+        case ("JavaPsiImplementationHelper.getDefaultMemberAnchor", Array(c: PsiClass, m: PsiMember)) =>
+          ideJavaHelper.getDefaultMemberAnchor(c, m)
         case ("JavaPsiImplementationHelper.getClsFileNavigationElement", Array(f: PsiJavaFile)) =>
           val source = for {
             classFile <- Option(f.getVirtualFile).collect { case lib: LibraryFile => lib }

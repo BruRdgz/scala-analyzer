@@ -17,7 +17,7 @@ import scalaanalyzer.build.{DocumentCompiler, ScalafmtFormatting}
 import scalaanalyzer.language.{
   ChangeEngine, CodeActions, Completion, Extract, MemberOverrides, ProjectLanguageOperations, ProjectSearch, Rename,
 }
-import scalaanalyzer.platform.{CallLog, HostDispatchThread, HostLock, HostLog, RequestEditor}
+import scalaanalyzer.platform.{CallLog, HostDispatchThread, HostFileTemplates, HostLock, HostLog, RequestEditor}
 
 import java.nio.file.Path
 import java.util.concurrent.{CompletableFuture, CountDownLatch, Executors, TimeUnit}
@@ -1523,6 +1523,143 @@ class EditingTest extends munit.FunSuite {
         host.overrideMembers(file, at - first.length, Seq(overloads.head.id))
       }
     } finally (file +: parameterTypes).foreach(host.closeSource)
+  }
+
+  /** The Java classes of the Java Override and Implement Members tests; `B`, `C` and `D` follow them. */
+  private val JavaOverridables =
+    "package ovr;\n\nabstract class A {\n  abstract int count();\n  abstract String label();\n  abstract void reset();\n" +
+      "  String name() { return \"a\"; }\n}\ninterface I {\n  boolean ready();\n}\n"
+
+  private def javaSource(name: String, text: String): PsiJavaFile =
+    host.openFile(Path.of(s"/editing/ovr/$name.java"), text, module) match {
+      case f: PsiJavaFile => f
+      case other => fail(s"not Java: $other")
+    }
+
+  private def collapsed(text: String): String = text.replaceAll("\\s+", " ")
+
+  // The oracle is the Java plugin's dialog (`OverrideImplementUtil.prepareChooser` and `MemberChooser`): the methods to
+  // override and then those to implement, grouped by owner in the order in which the owners first appear, and by
+  // position in the source within an owner. The compiled `Object` has no positions, so its methods are not asserted in
+  // order.
+  test("Java Override Members lists what a class can override and implement, as the Java plugin's dialog does") {
+    val marked = JavaOverridables + "class B extends A implements I {\n  <caret>\n}\n"
+    val original = marked.replace("<caret>", "")
+    val file = javaSource("List", original)
+    try {
+      val offered = host.overridableMembers(file, marked.indexOf("<caret>"))
+
+      assertEquals(offered.map(_.owner).distinct, Seq("ovr.A", "java.lang.Object", "ovr.I"))
+      assertEquals(offered.filter(_.owner == "ovr.A").map(_.signature.takeWhile(_ != '(')),
+        Seq("count", "label", "reset", "name"))
+      assertEquals(offered.filter(_.owner == "ovr.A").take(1).map(_.id), Seq("ovr.A#count(): int"))
+      assert(offered.contains(MemberOverrides.Member("ovr.A#name(): String", "name(): String", "ovr.A")), offered.toString)
+      assertEquals(offered.filter(_.owner == "ovr.I").map(_.signature), Seq("ready(): boolean"))
+      val objects = offered.filter(_.owner == "java.lang.Object").map(_.signature.takeWhile(_ != '('))
+      assert(Set("equals", "hashCode", "toString").subsetOf(objects.toSet), objects.toString)
+      assertEquals(offered.map(_.id).distinct.size, offered.size)
+      assertEquals(host.read(file.getText), original)
+    } finally host.closeSource(file)
+  }
+
+  test("Java Override Members inserts @Override and the call to super, and refuses what is no longer offered") {
+    val marked = JavaOverridables + "class B extends A implements I {\n  <caret>\n}\n"
+    val original = marked.replace("<caret>", "")
+    // (the member's identifier, the method that the plugin generates for it: the template `$CALL_SUPER;`)
+    val cases = Seq(
+      "ovr.A#name(): String" -> "@Override String name() { return super.name(); }",
+      "java.lang.Object#hashCode(): int" -> "@Override public int hashCode() { return super.hashCode(); }",
+    )
+    val file = javaSource("Override", original)
+    try {
+      val at = marked.indexOf("<caret>")
+
+      for ((id, method) <- cases) {
+        val expected = collapsed(original).replace("implements I { }", s"implements I { $method }")
+
+        assertEquals(collapsed(applyEdits(original, host.overrideMembers(file, at, Seq(id)))), expected, id)
+      }
+      val stale = intercept[MemberOverrides.UnknownMembers] {
+        host.overrideMembers(file, at, Seq("ovr.A#name(): String", "ovr.A#gone(): int"))
+      }
+      assertEquals(stale.ids, Seq("ovr.A#gone(): int"))
+      assertEquals(host.read(file.getText), original)
+    } finally host.closeSource(file)
+  }
+
+  // The oracle is the Java plugin's "Implement methods" fix (`ImplementMethodsFix.generatePreview`), which inserts the
+  // abstract methods with the template `#if ( $RETURN_TYPE != "void" )return $DEFAULT_RETURN_VALUE;#end`; the default
+  // value is `PsiTypesUtil.getDefaultValueOfType` in the class's context, which is `""` for a String.
+  test("Java Implement members inserts every abstract method with its default return, once, as a fix or an action") {
+    val bodies = "@Override int count() { return 0; } @Override String label() { return \"\"; } " +
+      "@Override void reset() { } @Override public boolean ready() { return false; }"
+    val markedFix = JavaOverridables + "class <caret>C extends A implements I {\n}\n"
+    val markedAction = JavaOverridables + "abstract class D extends A implements I {\n  <caret>\n}\n"
+    // (name, file, source with the caret, the kind of the one action that implements, the source after it)
+    val cases = Seq(
+      ("the fix of the error of a class", "ImplementFix", markedFix, "quickfix",
+        "class C extends A implements I { " + bodies + " }"),
+      ("the action of an abstract class", "ImplementAction", markedAction, "refactor.rewrite",
+        "abstract class D extends A implements I { " + bodies + " }"),
+    )
+    for ((name, fileName, marked, kind, expectedClass) <- cases) {
+      val original = marked.replace("<caret>", "")
+      val file = javaSource(fileName, original)
+      try {
+        val at = marked.indexOf("<caret>")
+        val range = new TextRange(at, at)
+        val actions = host.codeActions(file, range)
+        val expected = collapsed(JavaOverridables) + expectedClass + " "
+        val fixes = actions.choices.filter(_.title.startsWith("Implement"))
+
+        // One action implements the methods: the Java plugin's fix where the class has an error there, and the host's
+        // action where it has none.
+        val edits = kind match {
+          case "quickfix" =>
+            assertEquals(fixes.map(_.kind), Seq(kind), name)
+            assertEquals(fixes.head.disabled, None, name)
+            assertEquals(actions.implementMembers, None, name)
+            fixes.head.edits
+          case _ =>
+            assertEquals(fixes, Seq.empty, name)
+            val offered = actions.implementMembers.getOrElse(fail(s"$name: not offered"))
+            assertEquals((offered.title, offered.kind), ("Implement members", kind), name)
+            host.previewImplementMembers(file, range, offered).edits
+        }
+        assertEquals(collapsed(applyEdits(original, edits)), expected, name)
+        assertEquals(collapsed(applyEdits(original, host.implementMembers(file, at))), expected, name)
+        assertEquals(host.read(file.getText), original, name)
+      } finally host.closeSource(file)
+    }
+  }
+
+  test("the body templates render #if conditionals, and the directives they do not render are told apart") {
+    def render(name: String, properties: (String, String)*): String = {
+      val attributes = new java.util.HashMap[String, AnyRef]()
+
+      properties.foreach((key, value) => attributes.put(key, value))
+      HostFileTemplates.manager.getCodeTemplate(name).getText(attributes)
+    }
+    val implemented = "Implemented Method Body.java"
+
+    assertEquals(render(implemented, "RETURN_TYPE" -> "int", "DEFAULT_RETURN_VALUE" -> "0"), "return 0;")
+    assertEquals(render(implemented, "RETURN_TYPE" -> "void", "DEFAULT_RETURN_VALUE" -> "null"), "")
+    assertEquals(render("Overridden Method Body.java", "CALL_SUPER" -> "return super.f()"), "return super.f();")
+
+    // (template text, the directive that cannot be rendered; none for a template that can)
+    val templates = Seq(
+      ("#if ( $A == \"x\" )a#end", None),
+      ("#if($A != \"x\")${B}#end$C", None),
+      ("#if ($A == \"x\")a#else b#end", Some("#if")),
+      ("#if ($A > 1)a#end", Some("#if")),
+      ("#if ($A == \"x\")#if ($B == \"y\")a#end#end", Some("#if")),
+      ("#foreach ($p in $PARAMS)$p#end", Some("#foreach")),
+      ("#set ($x = 1)", Some("#set")),
+      ("#parse(\"File Header.java\")", Some("#parse")),
+      ("## a comment", Some("##")),
+    )
+    for ((text, directive) <- templates)
+      assertEquals(HostFileTemplates.unsupportedDirective(text), directive, text)
   }
 
   test("type-import actions keep colliding candidates separate and preserve the source") {

@@ -246,6 +246,10 @@ milestones, not one release; each wave ends with the full suite and its own comm
     JavaPlugin.xml); the IDE's default Java local inspections (432 enabled by default, from java-backend's
     descriptors, minus `Inspections.JavaExclusions`, each excluded with its reason by the audit in
     `JavaInspectionsTest`; 432 run over its corpus in about 1 s).
+  - Navigation on Java documents: implementations, call and type hierarchies, Go to Super (a lambda's super is its
+    functional interface's method). Override and Implement Members on Java classes, through the Java plugin's
+    `OverrideImplementUtil` with the dialog's defaults and order; the method bodies come from the IDE's templates,
+    rendered by the host's subset of Velocity (`#if`), and indented by the platform with Velocity on the class path.
 - Decisions:
   - Bloop for both Maven and Gradle (spike E0): Microsoft's build-server-for-gradle publishes no artifact, reports no
     compile diagnostics and has no test or run environment. Bloop answers no `workspace/reload` and has no stdio mode.
@@ -253,10 +257,14 @@ milestones, not one release; each wave ends with the full suite and its own comm
   - sbt announces Scala only and never answers `buildTarget/javacOptions`: it is not asked, and the Java sources of
     sbt modules stay at the highest language level.
 - Open questions from wave C:
-  - Nine data-flow inspections (DataFlowIssue, ConstantExpression, PointlessBooleanExpression, ObviousNullCheck...)
-    are excluded: they cache through `JavaLibraryModificationTracker`, a final project service that subscribes to the
-    IDE's message bus, which the host was designed without. ConstantValue, of the same engine, loads but reports
-    nothing on `int x = 1; if (x == 1)`; to look into with them.
+  - Data flow (2026-11-22): the host now registers what the data-flow inspections ask for (the IDE's
+    JavaLibraryModificationTracker, advanced when the modules change; the contract inference gist; a bytecode analysis
+    that infers nothing, as the host's inferred annotations; the null-argument index answered from the word index), and
+    the audit runs them all without failures. C4's reason for excluding them, a missing message bus, was wrong: the host
+    has application and project buses. Their reports are not reliable yet: on one-method samples, DataFlowIssue
+    (`String s = null; s.length()`) and PointlessBooleanExpression (`b && true`) report nothing, and ConstantValue
+    (`x == 1` after `int x = 1`) reported in one run and not in another, depending on what ran before it. To
+    investigate before the README claims them.
   - NullableProblems is excluded, and data flow sees no nullability annotations: the host's NullableNotNullManager
     answers none. The real manager plus the Java plugin's annotation-package supports would change how Scala sees
     Java's `@Nullable` too, so it needs the type-inference oracle first.
@@ -270,9 +278,8 @@ milestones, not one release; each wave ends with the full suite and its own comm
      processors with the IDE's defaults, as the Scala ones are.
   4. Wave D: `main` lenses (including Java 21+ instance mains) and JUnit 4/5 test lenses on Java sources, run over
      BSP like the Scala ones.
-  5. Spike, no architecture change without a decision: what the nine data-flow inspections need of a message bus
-     (one project-level `MessageBusImpl` with no subscribers but the tracker, or a replaced tracker), and why
-     ConstantValue reports nothing.
+  5. Data flow: the services its inspections ask for are registered (see the open questions); what remains is why
+     their reports on simple samples are missing or depend on what ran before.
   6. Release preparation of 0.5.0: README (Java, Maven, Gradle), CHANGELOG, the VS Code extension's README and
      activation, the java-playground's scenarios as the manual checklist, VSIX; merge and push wait for the user.
 - After 0.5.0, candidates (each its own decision): 0.4.1's Move; debugging over BSP's `debugSession/start` (Bloop

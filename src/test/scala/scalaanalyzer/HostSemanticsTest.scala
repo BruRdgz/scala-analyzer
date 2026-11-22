@@ -64,7 +64,10 @@ class HostSemanticsTest extends munit.FunSuite {
 
   private def typeOf(definition: String): String = {
     val pattern = TestHost.patternDefinitions(file).find(_.getText.startsWith(definition)).get
-    pattern.expr.get.`type`().fold(failure => s"<failure: $failure>", _.presentableText(using pattern))
+    // The value's type, which the compiler widens: its right-hand side `1` has the literal type `1` wherever literal
+    // types are on, and for the scenario, which no module owns, the plugin turns them on with any 2.13 or Scala 3
+    // module of the project (`literalTypesEnabled`), so other tests' modules would decide the expression's type.
+    pattern.bindings.head.`type`().fold(failure => s"<failure: $failure>", _.presentableText(using pattern))
   }
 
   test("types literals and local references") {

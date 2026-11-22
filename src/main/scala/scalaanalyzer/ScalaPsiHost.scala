@@ -11,7 +11,7 @@ import com.intellij.openapi.fileTypes.FileTypeRegistry
 import com.intellij.openapi.module.Module
 import com.intellij.openapi.progress.ProcessCanceledException
 import com.intellij.openapi.project.Project
-import com.intellij.openapi.roots.LanguageLevelModuleExtension
+import com.intellij.openapi.roots.{LanguageLevelModuleExtension, ProjectRootManager}
 import com.intellij.openapi.util.{Key, TextRange, UserDataHolderBase}
 import com.intellij.openapi.util.text.StringUtil
 import com.intellij.openapi.vfs.VirtualFile
@@ -209,11 +209,11 @@ final class ScalaPsiHost private[scalaanalyzer] (
    *
    * Takes read access itself and leaves `file` unchanged.
    *
-   * @param file Scala source being queried
+   * @param file Scala or Java source being queried
    * @param offset UTF-16 caret offset
    * @return the members in the chooser's order; empty when the caret is not in a class, object or trait
    */
-  def overridableMembers(file: ScalaFile, offset: Int): Seq[MemberOverrides.Member] =
+  def overridableMembers(file: ScalaFile | PsiJavaFile, offset: Int): Seq[MemberOverrides.Member] =
     read(MemberOverrides.overridable(file, offset))
 
   /**
@@ -221,13 +221,13 @@ final class ScalaPsiHost private[scalaanalyzer] (
    *
    * Takes read access itself and leaves `file` unchanged.
    *
-   * @param file Scala source to edit
+   * @param file Scala or Java source to edit
    * @param offset UTF-16 caret offset, where the members are inserted
    * @param ids identifiers of the members to override, as `overridableMembers` gave them
    * @return the edits against the current text of `file`
    * @throws MemberOverrides.UnknownMembers when an identifier is not that of a member the class offers
    */
-  def overrideMembers(file: ScalaFile, offset: Int, ids: Seq[String]): Seq[ChangeEngine.Edit] =
+  def overrideMembers(file: ScalaFile | PsiJavaFile, offset: Int, ids: Seq[String]): Seq[ChangeEngine.Edit] =
     MemberOverrides.overrideMembers(file, offset, ids)
 
   /**
@@ -477,6 +477,7 @@ final class ScalaPsiHost private[scalaanalyzer] (
    */
   def removeModule(name: String): Unit = HostLock.write {
     modules.remove(name)
+    rootsChanged()
     psiChanged()
   }
 
@@ -605,9 +606,16 @@ final class ScalaPsiHost private[scalaanalyzer] (
       org.jetbrains.plugins.scala.project.settings.ScalaCompilerConfiguration.incModificationCount()
     }
 
+    rootsChanged()
     psiChanged()
     hostModule
   }
+
+  /**
+   * Advances the project roots' modification count, as the IDE does when its project model changes: the caches that
+   * depend on the roots (those of facts about library classes, through `JavaLibraryModificationTracker`) are dropped.
+   */
+  private def rootsChanged(): Unit = ProjectRootManager.getInstance(project).incModificationCount()
 
   /**
    * The IDE `Module` of a host module; its only order entry is the Scala SDK, which a Java module lacks, and scopes
@@ -716,9 +724,10 @@ final class ScalaPsiHost private[scalaanalyzer] (
    * the whole file's analysis, and editors ask again when the diagnostics arrive. A caller that already shows
    * inspection problems in the range asks for their fixes with `withInspections`, since the editor will not ask again.
    *
-   * Implement members is offered but not previewed: its preview occupies the host's single dispatch thread, so it runs
-   * only when the caller asks for it ([[previewImplementMembers]] or [[implementMembers]]). The extractions are offered
-   * and not performed, for they change the file itself ([[extract]]).
+   * Implement members is offered but not previewed: a Scala file's preview occupies the host's single dispatch thread,
+   * so it runs only when the caller asks for it ([[previewImplementMembers]] or [[implementMembers]]), and a Java
+   * file's is deferred alike. The extractions are offered and not performed, for they change the file itself
+   * ([[extract]]).
    *
    * Takes read access itself.
    *
@@ -738,7 +747,8 @@ final class ScalaPsiHost private[scalaanalyzer] (
       case javaFile: PsiJavaFile =>
         val problems = javaProblemsAround(javaFile, range) ++ inspectedForActions(javaFile, withInspections)
 
-        CodeActions.Offered(actions.collect(javaFile, range, problems), None, Seq.empty)
+        CodeActions.Offered(actions.collect(javaFile, range, problems),
+          actions.implementMembersOffer(javaFile, range, problems), Seq.empty)
       case _ => CodeActions.Offered(actions.collect(file, range, Seq.empty), None, Seq.empty)
     }
   }
@@ -747,16 +757,16 @@ final class ScalaPsiHost private[scalaanalyzer] (
    * Previews the Implement members that [[codeActions]] offered for `range` as an action whose failure disables it
    * (see [[CodeActions.implementMembers]]).
    *
-   * Runs on the host's dispatch thread with read access of its own, so the caller must not be reading or editing;
-   * `file` is unchanged.
+   * Takes read access of its own, so the caller must not be reading or editing: a Scala file's preview runs on the
+   * host's dispatch thread. `file` is unchanged.
    *
-   * @param file Scala source the action was offered for
+   * @param file Scala or Java source the action was offered for
    * @param range UTF-16 range it was offered for
    * @param offered the offered action
    * @return the action with its edits against the current text of `file`
    * @throws com.intellij.openapi.progress.ProcessCanceledException when the caller's request is cancelled
    */
-  def previewImplementMembers(file: ScalaFile, range: TextRange, offered: CodeActions.ImplementMembers)
+  def previewImplementMembers(file: ScalaFile | PsiJavaFile, range: TextRange, offered: CodeActions.ImplementMembers)
       : CodeActions.Choice =
     actions.implementMembers(file, range, offered)
 
@@ -797,14 +807,14 @@ final class ScalaPsiHost private[scalaanalyzer] (
    * The edits that implement every member the class at `offset` has to implement (see
    * [[MemberOverrides.implementAll]]); failures propagate.
    *
-   * Runs on the host's dispatch thread with read access of its own, so the caller must not be reading or editing;
-   * `file` is unchanged.
+   * Takes read access itself, so the caller must not be reading or editing: a Scala file's insertion runs on the host's
+   * dispatch thread. `file` is unchanged.
    *
-   * @param file Scala source to edit
+   * @param file Scala or Java source to edit
    * @param offset UTF-16 caret offset, where the class is looked for
    * @return the edits against the current text of `file`; empty when the offset is not in a class, object or trait
    */
-  def implementMembers(file: ScalaFile, offset: Int): Seq[ChangeEngine.Edit] =
+  def implementMembers(file: ScalaFile | PsiJavaFile, offset: Int): Seq[ChangeEngine.Edit] =
     MemberOverrides.implementAll(file, offset).edits
 
   /**
