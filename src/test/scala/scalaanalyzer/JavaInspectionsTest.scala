@@ -99,6 +99,13 @@ class JavaInspectionsTest extends munit.FunSuite {
       HighlightSeverity.WARNING),
     ("RedundantCast", "class Cast { String f(String s) { return (String) s; } }", "String", "redundant",
       HighlightSeverity.WARNING),
+    // Data flow, over the control flow that the Java plugin's provider builds.
+    ("DataFlowIssue", "class Npe { int f() { String s = null; return s.length(); } }", "length",
+      "NullPointerException", HighlightSeverity.WARNING),
+    ("ConstantValue", "class Cv { void f() { int x = 1; if (x == 1) { System.out.println(x); } } }", "x == 1",
+      "always 'true'", HighlightSeverity.WARNING),
+    ("PointlessBooleanExpression", "class Bool { boolean f(boolean b) { return b && true; } }", "b && true",
+      "can be simplified", HighlightSeverity.WARNING),
   )
 
   test("the default Java inspections report their problems, in the inspection diagnostics and in Inspect Code") {

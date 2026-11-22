@@ -83,6 +83,7 @@ import com.intellij.codeInspection.{
 }
 import com.intellij.codeInspection.bulkOperation.BulkMethodInfoProvider
 import com.intellij.codeInspection.bytecodeAnalysis.ProjectBytecodeAnalysis
+import com.intellij.codeInspection.dataFlow.java.JavaDataFlowIRProvider
 import com.intellij.codeInspection.naming.NamingConvention
 import com.intellij.codeInspection.ex.{EntryPointsManager, EntryPointsManagerBase}
 import com.intellij.concurrency.JobLauncher
@@ -166,8 +167,8 @@ import com.intellij.pom.java.{InternalPersistentJavaLanguageLevelReaderService, 
 import com.intellij.pom.tree.TreeAspect
 import com.intellij.profile.codeInspection.InspectionProjectProfileManager
 import com.intellij.psi.{
-  ClassFileViewProviderFactory, DumbJavaModuleGraphHelper, FileTypeFileViewProviders, JVMElementFactoryProvider,
-  JavaModuleGraphHelper, JavaPsiFacade, JvmPsiConversionHelper, LanguageSubstitutors, PackageDirectoryProvider, ParsingDiagnostics,
+  ClassFileViewProviderFactory, DumbJavaModuleGraphHelper, FileTypeFileViewProviders, JavaModuleGraphHelper,
+  JavaPsiFacade, JvmPsiConversionHelper, LanguageSubstitutors, PackageDirectoryProvider, ParsingDiagnostics,
   PsiAnnotation, PsiClassOwner, PsiDocumentManager, PsiElementFactory, PsiElementFinder, PsiFileFactory,
   PsiImportList, PsiImportStatementBase, PsiJavaFile, PsiMember, PsiMethod, PsiNameHelper, PsiReference,
   PsiReferenceProvider, PsiReferenceRegistrar, PsiReferenceService, PsiReferenceServiceImpl, PsiResolveHelper,
@@ -184,11 +185,9 @@ import com.intellij.psi.compiled.ClassFileDecompilers
 import com.intellij.psi.controlFlow.ControlFlowFactory
 import com.intellij.psi.impl.{
   DocumentCommitProcessor, JavaClassSupersImpl, JavaFactoryProvider, JavaPsiFacadeImpl, JavaPsiImplementationHelper,
-  JavaPsiImplementationHelperImpl,
-  JvmPsiConversionHelperImpl, PsiCachedValuesFactory, PsiElementFactoryImpl, PsiFileFactoryImpl,
-  PsiJavaModuleModificationTracker, PsiModificationTrackerImpl, PsiNameHelperImpl, PsiParserFacadeImpl,
-  PsiSubstitutorFactoryImpl, RecordAugmentProvider,
-  ResolveScopeManager
+  JavaPsiImplementationHelperImpl, JvmPsiConversionHelperImpl, PsiCachedValuesFactory, PsiElementFactoryImpl,
+  PsiExpressionEvaluator, PsiFileFactoryImpl, PsiJavaModuleModificationTracker, PsiModificationTrackerImpl,
+  PsiNameHelperImpl, PsiParserFacadeImpl, PsiSubstitutorFactoryImpl, RecordAugmentProvider, ResolveScopeManager
 }
 import com.intellij.psi.impl.cache.impl.id.IdIndexers
 import com.intellij.psi.impl.cache.impl.idCache.JavaIdIndexer
@@ -582,16 +581,7 @@ private[scalaanalyzer] object HostBootstrap {
       appServices.register(classOf[MemberOrderService])(new MemberOrderService)
       Rearranger.EXTENSION.addExplicitExtension(JavaLanguage.INSTANCE, new JavaRearranger)
       // The generated methods are created by the language's element factory, as java-backend's descriptor registers it.
-      // The element type is erased; the only extension registered here is Java's factory. A language bean is
-      // instantiated for its plugin, which it must name.
-      locally {
-        val javaPlugin = new DefaultPluginDescriptor(PluginId.getId("com.intellij.java"))
-        val factory = new LanguageExtensionPoint[JVMElementFactoryProvider](JavaLanguage.INSTANCE.getID, new JavaFactoryProvider)
-        factory.setPluginDescriptor(javaPlugin)
-        declare("com.intellij.generation.topLevelFactory")
-          .asInstanceOf[ExtensionPointImpl[LanguageExtensionPoint[JVMElementFactoryProvider]]]
-          .registerExtension(factory, javaPlugin, root)
-      }
+      registerJavaLanguageExtension("com.intellij.generation.topLevelFactory", new JavaFactoryProvider)
       // Import fixes ask whether an extension keeps a file from being changed silently; the host has none.
       declare("com.intellij.silentChangeVetoer")
       // Import fixes also read the names the user keeps out of auto-import: the defaults, as the host persists none.
@@ -628,6 +618,8 @@ private[scalaanalyzer] object HostBootstrap {
       appServices.register(classOf[BatchSuppressManager])(new BatchSuppressManagerImpl)
       // The contract, internal-API and unstable-API annotations that the analysis recognizes by name.
       appServices.register(classOf[StaticAnalysisAnnotationManager])(new StaticAnalysisAnnotationManager)
+      // The data-flow inspections analyze the control flow that the language's provider builds from a method's body.
+      registerJavaLanguageExtension("com.intellij.dataflowIRProvider", new JavaDataFlowIRProvider)
       // Counts forced reparses, a part of the project's JavaLibraryModificationTracker; the host forces none.
       appServices.register(classOf[ForcefulReparseModificationTracker])(new ForcefulReparseModificationTracker)
       // The contracts that data flow infers from the methods of source files, kept in a gist of each file; the class is
@@ -657,6 +649,21 @@ private[scalaanalyzer] object HostBootstrap {
     }
 
     /** Registers a descriptor-declared extension point and returns its platform registry; fails if undeclared. */
+    /**
+     * Declares a language extension point and registers the Java plugin's extension for Java in it, as java-backend's
+     * descriptor does. A language bean is instantiated for its plugin, which it must name.
+     *
+     * @param name the extension point's qualified name
+     * @param extension the Java plugin's implementation
+     */
+    private def registerJavaLanguageExtension[T <: AnyRef](name: String, extension: T): Unit = {
+      val javaPlugin = new DefaultPluginDescriptor(PluginId.getId("com.intellij.java"))
+      val bean = new LanguageExtensionPoint[T](JavaLanguage.INSTANCE.getID, extension)
+      bean.setPluginDescriptor(javaPlugin)
+      // The element type is erased; the only extension registered here is the Java plugin's.
+      declare(name).asInstanceOf[ExtensionPointImpl[LanguageExtensionPoint[T]]].registerExtension(bean, javaPlugin, root)
+    }
+
     private def declare(name: String): ExtensionPointImpl[?] = {
       val declaration = epDecls.getOrElse(
         name, throw new IllegalStateException(s"extension point is not declared on the classpath: $name"))
@@ -2081,6 +2088,10 @@ private[scalaanalyzer] object HostBootstrap {
           case ("getNonTrivialPackagePrefixes", _) => java.util.List.of[String]()
         })
       projectServices.register(classOf[JavaPsiFacade])(new JavaPsiFacadeImpl(project, null))
+      // Java's constant expressions, which the facade's evaluation helper computes through the language's evaluator (as
+      // java-psi-impl's descriptor registers it): without one, every constant (a literal `true`, a `final` field's
+      // value) evaluates to nothing in the inspections and fixes that ask.
+      registerJavaLanguageExtension("com.intellij.constantExpressionEvaluator", new PsiExpressionEvaluator)
       // Resolution inside Java sources (mixed projects).
       projectServices.register(classOf[PsiResolveHelper])(new PsiResolveHelperImpl(project))
       // ScalaDocParserDefinition reads TAB_SIZE from code style: one fixed settings object, never the scheme manager.

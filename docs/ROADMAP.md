@@ -262,14 +262,13 @@ milestones, not one release; each wave ends with the full suite and its own comm
   - sbt announces Scala only and never answers `buildTarget/javacOptions`: it is not asked, and the Java sources of
     sbt modules stay at the highest language level.
 - Open questions from wave C:
-  - Data flow (2026-11-22): the host now registers what the data-flow inspections ask for (the IDE's
-    JavaLibraryModificationTracker, advanced when the modules change; the contract inference gist; a bytecode analysis
-    that infers nothing, as the host's inferred annotations; the null-argument index answered from the word index), and
-    the audit runs them all without failures. C4's reason for excluding them, a missing message bus, was wrong: the host
-    has application and project buses. Their reports are not reliable yet: on one-method samples, DataFlowIssue
-    (`String s = null; s.length()`) and PointlessBooleanExpression (`b && true`) report nothing, and ConstantValue
-    (`x == 1` after `int x = 1`) reported in one run and not in another, depending on what ran before it. To
-    investigate before the README claims them.
+  - Data flow (2026-11-22): the data-flow inspections run and report as the IDE does on its samples
+    (DataFlowIssue, ConstantValue, PointlessBooleanExpression in `JavaInspectionsTest`). They had found nothing: the
+    host lacked the Java control-flow provider (`dataflowIRProvider`) and the Java constant evaluator
+    (`constantExpressionEvaluator`), so every analysis was "not applicable" and every constant evaluated to nothing.
+    C4's reason for excluding them, a missing message bus, was wrong: the host has application and project buses.
+    Library bytecode is not analyzed (a bytecode analysis that infers nothing, as the host's inferred annotations), so
+    facts the IDE infers from library class files are missing.
   - NullableProblems is excluded, and data flow sees no nullability annotations: the host's NullableNotNullManager
     answers none. The real manager plus the Java plugin's annotation-package supports would change how Scala sees
     Java's `@Nullable` too, so it needs the type-inference oracle first.
@@ -286,8 +285,7 @@ milestones, not one release; each wave ends with the full suite and its own comm
      JetBrains artifacts `com.jetbrains.intellij.junit:junit` (the IDE's JUnit detection: JUnit4Framework,
      JupiterFramework, JUnitUtil) and `junit-rt`/`junit-v5-rt` (the IDE's runners, whose TeamCity output the host's
      test report already reads).
-  5. Data flow: the services its inspections ask for are registered (see the open questions); what remains is why
-     their reports on simple samples are missing or depend on what ran before.
+  5. Data flow: done (see the open questions for what remains: library bytecode inference).
   6. Release preparation of 0.5.0: README (Java, Maven, Gradle), CHANGELOG, the VS Code extension's README and
      activation, the java-playground's scenarios as the manual checklist, VSIX; merge and push wait for the user.
 - After 0.5.0, candidates (each its own decision): 0.4.1's Move; debugging over BSP's `debugSession/start` (Bloop

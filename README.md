@@ -241,8 +241,8 @@ partial, indexes are kept in memory, and each process serves one workspace.
   Inspect Code (`scalaAnalyzer/inspect`) runs only these inspections, on the Scala and Java sources that the build
   does not mark as generated; it does not report syntax, type or compiler errors. The VS Code extension shows its result in a separate
   list and omits files whose live diagnostics are already shown; other clients receive every file's problems and
-  must avoid showing them twice. The data-flow inspections of Java sources (DataFlowIssue, ConstantValue,
-  PointlessBooleanExpression and others) run, but do not yet report reliably: they can miss what the IDE reports.
+  must avoid showing them twice. The data-flow inspections of Java sources (DataFlowIssue, ConstantValue and others)
+  do not infer facts from library bytecode, as the IDE does, so they can miss what depends on them.
   Dialog-dependent actions, file/package moves and optional automatic renames are
   unavailable; code actions are limited to current-file previews.
 - Unwrap actions are offered with every code-action request at the caret, in the order of the IDE's Unwrap popup,

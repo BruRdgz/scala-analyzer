@@ -54,7 +54,9 @@
   (read from its descriptors), minus 5 that need what the host does not have, each listed with its reason. Their
   problems are in the diagnostics and in Inspect Code (also over MCP), with the inspections' fixes and the
   `//noinspection` and `@SuppressWarnings` suppressions in the lightbulb. The data-flow inspections (DataFlowIssue,
-  ConstantValue and others) run without library bytecode inference, and do not yet report reliably.
+  ConstantValue, PointlessBooleanExpression and others) run, without the facts the IDE infers from library bytecode.
+- Java constant expressions are evaluated (the Java plugin's evaluator was missing): inspections and fixes that ask
+  for a constant's value, such as `b && true` or a `final` field's, now get it.
 - Java documents have implementations, call and type hierarchies, and Go to Super (from a lambda, the functional
   interface's method); the VS Code commands Go to Super and Go to Test are offered in Java files.
 - Override and Implement Members work on Java classes, with the IDE's dialog's order and defaults (`@Override`, a call
