@@ -67,6 +67,12 @@
   rename of the new variable, and Inline variable (every usage, or the one under the caret).
 - Java main classes have Run main code lenses, as the IDE's run markers: static and (Java 21+) instance `main`
   methods, nested classes by their binary name.
+- Java completion runs the Java plugin's other completion contributors: names for a new variable from its type,
+  javadoc tags and references, the qualifier as an argument, `main`'s `args`, loggers.
+- Type Info (the VS Code command and MCP's `type_of`) works in Java files: the type of the selected expression, or of
+  the innermost one at the caret.
+- A rename of a Java element to a Java keyword is refused, and Java references, rename and navigation decide the
+  element at a position (a constructor, `this`, `super`) as the Java plugin does.
 - Scala parameter-name hints follow the IDE's default exclusion list, which the Scala filter shares with Java: calls
   such as setters (`*.set*(*)`), `Math` methods or `println` no longer show parameter names.
 

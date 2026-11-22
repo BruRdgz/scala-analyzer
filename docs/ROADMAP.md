@@ -277,10 +277,10 @@ milestones, not one release; each wave ends with the full suite and its own comm
     keyword provider is registered), two Java completion contributors that need the IDE's UI (see
     `HostBootstrap.JavaCompletionContributors`; the others, loaded from java-backend's descriptor since, are exercised
     by tests only for variable names), the Javadoc annotator (Javadoc errors are not reported),
-    surround and unwrap descriptors, split/join list contexts, the type-info provider (Type Info is Scala-only), the
+    surround and unwrap descriptors, split/join list contexts, the
     reflection reference contributor (`Class.forName("...")` strings), and the delegates of refactorings the host does
-    not offer yet (safe delete, pull up, change signature...). The target-element evaluator and the names validator
-    are registered since.
+    not offer yet (safe delete, pull up, change signature...). The target-element evaluator, the names validator and
+    the type-info provider (Type Info on Java) are registered or used since.
   - Java error fixes that change the IDE's project model (add a library or module to a classpath) are not offered.
 - Plan to finish the branch (2026-11-22), in order, each step with its tests, the full suite and a commit:
   1. Navigation on Java documents: implementations, call and type hierarchies (the host's operations are already

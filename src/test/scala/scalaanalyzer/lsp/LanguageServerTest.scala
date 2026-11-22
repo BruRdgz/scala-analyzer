@@ -1636,6 +1636,37 @@ class LanguageServerTest extends munit.FunSuite {
     } finally change(original, 43)
   }
 
+  // The oracle is the Java plugin's JavaTypeProvider, which the IDE's Type Info shows for Java: the presentable type of
+  // the selected expression (white space around a selection ignored), or of the innermost one at the caret.
+  test("type info of a Java buffer shows the type of the expression at the caret or selected") {
+    val javaFile = fixture.resolve("core/src/main/java/core/Shout.java")
+    val text = Seq(
+      "package core;",
+      "class Shout {",
+      "  java.util.List<String> names() { return java.util.List.of(\"a\"); }",
+      "  int n() { int count = names().size(); return count; }",
+      "}",
+    ).mkString("\n")
+    val service = server.getTextDocumentService
+    def change(value: String, version: Int): Unit = service.didChange(new DidChangeTextDocumentParams(
+      new VersionedTextDocumentIdentifier(javaFile.toUri.toString, version), JavaList.of(new TextDocumentContentChangeEvent(value))))
+    def typeInfo(range: Range): String =
+      server.typeInfo(new HostProtocol.TypeInfoParams(document(javaFile), range)).get(1, TimeUnit.MINUTES)
+    val line = text.split("\n")(3)
+    def at(column: Int) = new Position(3, column)
+    try {
+      change(text, 200)
+      val call = line.indexOf("names()")
+      // ` names()`: the space before the call is trimmed.
+      assertEquals(typeInfo(new Range(at(call - 1), at(call + "names()".length))), "List<String>")
+      val returned = line.lastIndexOf("count")
+      assertEquals(typeInfo(new Range(at(returned), at(returned))), "int")
+    } finally {
+      change(Files.readString(javaFile), 201)
+      service.documentSymbol(new DocumentSymbolParams(document(javaFile))).get(1, TimeUnit.MINUTES)
+    }
+  }
+
   test("folds imports, doc comments and bodies, leaving closing braces visible") {
     val folds = server.getTextDocumentService.foldingRange(new FoldingRangeRequestParams(document(counter)))
       .get(1, TimeUnit.MINUTES).asScala.toSeq

@@ -155,7 +155,7 @@
       "editor/context": [
         {
           "command": "scalaAnalyzer.typeInfo",
-          "when": "editorLangId == scala",
+          "when": "editorLangId == scala || editorLangId == java",
           "group": "navigation"
         },
         {
@@ -229,7 +229,7 @@
         },
         {
           "command": "scalaAnalyzer.typeInfo",
-          "when": "editorLangId == scala"
+          "when": "editorLangId == scala || editorLangId == java"
         },
         {
           "command": "scalaAnalyzer.goToSuper",
