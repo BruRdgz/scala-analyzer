@@ -116,6 +116,9 @@ final class ScalaLanguageServer(
   /** Whether the client answers `workspace/configuration` requests. */
   @volatile private var readsConfiguration = false
 
+  /** The inlay hint toggles last applied to the host; read and written on the documents thread. */
+  private var appliedInlayHintToggles: Option[InlayHints.Toggles] = None
+
   /** Whether the client accepts dynamic registration of configuration-change notifications. */
   @volatile private var watchesConfiguration = false
 
@@ -291,8 +294,14 @@ final class ScalaLanguageServer(
 
     client.configuration(new ConfigurationParams(JavaList.of(item)))
       .thenAcceptAsync(answers => {
-        host.configureInlayHints(inlayHintToggles(answers.asScala.headOption.orNull))
-        refreshInlayHints()
+        val toggles = inlayHintToggles(answers.asScala.headOption.orNull)
+
+        // Applying takes the host's write lock, which cancels the queries in flight: do it only for a real change.
+        if (!appliedInlayHintToggles.contains(toggles)) {
+          host.configureInlayHints(toggles)
+          appliedInlayHintToggles = Some(toggles)
+          refreshInlayHints()
+        }
       }, documents)
       .exceptionally { error =>
         HostLog.warn("could not read the inlay hint settings", error)
@@ -525,9 +534,11 @@ final class ScalaLanguageServer(
     if (readsConfiguration) readInlayHintSettings()
 
     if (readsConfiguration && watchesConfiguration) {
-      // The notification carries no settings the server needs: it reads them again, as after `initialized`.
-      val registration =
-        new Registration("scala-analyzer-configuration", "workspace/didChangeConfiguration", new JsonObject)
+      // The notification carries no settings the server needs: it reads them again, as after `initialized`. Only the
+      // section it reads changes it.
+      val options = new JsonObject
+      options.addProperty("section", InlayHintSettings)
+      val registration = new Registration("scala-analyzer-configuration", "workspace/didChangeConfiguration", options)
       client.registerCapability(new RegistrationParams(JavaList.of(registration))).exceptionally { error =>
         HostLog.warn("could not register for configuration changes", error)
         null
@@ -1576,13 +1587,6 @@ final class ScalaLanguageServer(
       }
     }
 
-    /** A workspace edit that makes `changes` to `version` of the document at `uri`. */
-    private def versionedEdit(uri: String, version: Integer, changes: Seq[TextChange]): WorkspaceEdit = {
-      val edit = new TextDocumentEdit(new VersionedTextDocumentIdentifier(uri, version), textEdits(changes))
-
-      new WorkspaceEdit(java.util.List.of(LspEither.forLeft[TextDocumentEdit, ResourceOperation](edit)))
-    }
-
     /**
      * Returns the symbol-name range that a following rename request may edit.
      *
@@ -1934,15 +1938,17 @@ final class ScalaLanguageServer(
     new SignatureHelp(signatures.asJava, found.active.map(Integer.valueOf).getOrElse(Integer.valueOf(0)), null)
   }
 
+  /** A workspace edit that makes `changes` to `version` of the document at `uri`. */
+  private def versionedEdit(uri: String, version: Integer, changes: Seq[TextChange]): WorkspaceEdit = {
+    val edit = new TextDocumentEdit(new VersionedTextDocumentIdentifier(uri, version), textEdits(changes))
+
+    new WorkspaceEdit(java.util.List.of(LspEither.forLeft[TextDocumentEdit, ResourceOperation](edit)))
+  }
+
   /** Asks the client to apply text changes to the given version of a document. */
   private def applyEdit(uri: String, version: Integer, changes: Seq[TextChange], label: String)
-      : CompletableFuture[ApplyWorkspaceEditResponse] = {
-    val edit = new TextDocumentEdit(new VersionedTextDocumentIdentifier(uri, version), textEdits(changes))
-    val workspaceEdit = new WorkspaceEdit(
-      java.util.List.of(LspEither.forLeft[TextDocumentEdit, ResourceOperation](edit)))
-
-    client.applyEdit(new ApplyWorkspaceEditParams(workspaceEdit, label))
-  }
+      : CompletableFuture[ApplyWorkspaceEditResponse] =
+    client.applyEdit(new ApplyWorkspaceEditParams(versionedEdit(uri, version, changes), label))
 
   /** Applies a versioned insertion follow-up and moves the caret only after the client accepts its edits. */
   private def applyFollowUp(uri: String, version: Integer, followUp: CompletionFollowUp): Unit =
@@ -1967,8 +1973,8 @@ final class ScalaLanguageServer(
         "version"))
     case Some(request) =>
       onSource("override members", new TextDocumentIdentifier(request.uri), null) { (s, path) =>
-        if (versions.get(path) != request.version) throw new ProcessCanceledException
-        applyEdit(request.uri, versions.get(path), s.overrideMembers(path, request.at, request.ids), "override members")
+        if (openVersion(path) != request.version) throw new ProcessCanceledException
+        applyEdit(request.uri, openVersion(path), s.overrideMembers(path, request.at, request.ids), "override members")
         null
       }
   }

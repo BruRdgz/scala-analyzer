@@ -83,6 +83,18 @@ private[scalaanalyzer] object CaretTargets {
     }
   }
 
+  /**
+   * The elements [[at]] finds at a caret: those referenced, or else the declared one.
+   *
+   * @param file source being queried
+   * @param offset caret offset in UTF-16 code units
+   * @return the elements of the target, in the order the lookup gives them; empty when there is no target
+   */
+  def elementsAt(file: PsiFile, offset: Int): Seq[PsiElement] = at(file, offset).toSeq.flatMap {
+    case Target.Referenced(elements) => elements
+    case Target.Declared(element) => Seq(element)
+  }
+
   /** The platform's `namedElement`: the named element of the leaf at the caret, or else of the leaf before it. */
   private def declaredAround(file: PsiFile, offset: Int): Option[Candidate] =
     PsiTreeUtilKt.leavesAroundOffset(file, offset).asScala.iterator.map(_.getFirst).flatMap { leaf =>

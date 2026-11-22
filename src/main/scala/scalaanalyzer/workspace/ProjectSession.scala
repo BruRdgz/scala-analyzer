@@ -120,14 +120,20 @@ final class ProjectSession private (
 
   /**
    * Checks whether creating or deleting a file can change the build's sources: the file is a registered source, or
-   * it is under a source directory that the build lists.
+   * it is under a source directory that the build lists, or it is a Scala or Java file directly in a module's base
+   * directory (sbt `sourcesInBase`, which BSP lists as file items).
    *
    * Takes the import guard's read lock, as `isSource` does.
    *
    * @param path created or deleted file
    * @return `true` when importing the build again can add or remove that file as a source
    */
-  def affectsSources(path: Path): Boolean = isSource(path) || imported.exists(_.sourceDirectories.exists(path.startsWith))
+  def affectsSources(path: Path): Boolean = {
+    val name = path.getFileName.toString
+    val inModuleBase = (name.endsWith(".scala") || name.endsWith(".java")) && isModuleBase(path.getParent)
+
+    isSource(path) || inModuleBase || imported.exists(_.sourceDirectories.exists(path.startsWith))
+  }
 
   /**
    * Checks whether a directory is the base directory of an imported module.

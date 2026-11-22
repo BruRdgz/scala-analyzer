@@ -20,7 +20,7 @@ import org.jetbrains.plugins.scala.overrideImplement.{
   ScalaOIUtil, ScalaOverridableMember,
 }
 
-import scalaanalyzer.platform.{HostLock, RequestEditor}
+import scalaanalyzer.platform.{HostLock, HostLog, RequestEditor}
 
 import java.lang.reflect.InvocationTargetException
 
@@ -196,8 +196,17 @@ object MemberOverrides {
    * uses, insists on the event thread. The preview's session, its copy and its postponed formatting all belong to the
    * thread that runs it, so the whole preview goes there, as a query of its own (see
    * [[scalaanalyzer.platform.HostLock.queryOnDispatchThread]]).
+   *
+   * Rejects the preview when the platform logged an error on the dispatch thread meanwhile, as every other code
+   * action's preview does (see `CodeActions.preview`).
    */
-  private def inserting[A](preview: => A): A = HostLock.queryOnDispatchThread(preview)
+  private def inserting[A](preview: => A): A = HostLock.queryOnDispatchThread {
+    val errors = HostLog.threadCount(HostLog.Level.Error)
+    val result = preview
+    if (HostLog.threadCount(HostLog.Level.Error) != errors)
+      throw new UnsupportedOperationException("An error was logged while previewing this action.")
+    result
+  }
 
   /**
    * Runs a preview on the copy of a Java file. The Java plugin's insertion needs no dispatch thread: it is what the

@@ -688,13 +688,10 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
     }
     val targets =
       if (pluginTargets.nonEmpty) pluginTargets
-      else CaretTargets.at(sourceFile, atOffset).toSeq.flatMap {
-        case CaretTargets.Target.Referenced(elements) => elements
-        // The IDE's Go to Declaration falls through from a declaration to its own element (its Go to Declaration or
-        // Usages then shows the usages); a client that asked from a declaration expects that location back, and
-        // asks for the usages itself when it receives the position it asked from.
-        case CaretTargets.Target.Declared(element) => Seq(element)
-      }
+      // The IDE's Go to Declaration falls through from a declaration to its own element (its Go to Declaration or
+      // Usages then shows the usages); a client that asked from a declaration expects that location back, and
+      // asks for the usages itself when it receives the position it asked from.
+      else CaretTargets.elementsAt(sourceFile, atOffset)
 
     locationsOf(targets)
   }
@@ -774,10 +771,7 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
   def typeDefinition(path: Path, at: LineColumn): Seq[(Path, LineColumn)] = host.read {
     val sourceFile = file(path)
     val atOffset = offset(document(sourceFile), at)
-    val symbols = CaretTargets.at(sourceFile, atOffset).toSeq.flatMap {
-      case CaretTargets.Target.Referenced(elements) => elements
-      case CaretTargets.Target.Declared(element) => Seq(element)
-    }
+    val symbols = CaretTargets.elementsAt(sourceFile, atOffset)
 
     val types = if (sourceFile.isInstanceOf[PsiJavaFile]) symbols.flatMap {
       case clazz: PsiClass => Seq(clazz)
@@ -790,7 +784,7 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
       Option(new ScalaGotoTypeDeclarationProvider().getSymbolTypeDeclarations(s)).toSeq.flatten
     }
 
-    types.flatMap(sourceLocation).distinct.map(location => location.path -> location.position)
+    locationsInOrder(types)
   }
 
   /** Where a declaration's name is in its file; an empty range at its start for one without a name identifier. */
@@ -1246,10 +1240,7 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
   /** The declaration and references of the named symbol at `atOffset` that lie in `sourceFile`, with write markers. */
   private def symbolOccurrences(sourceFile: PsiFile, atOffset: Int): Seq[Occurrence] = {
     val sourceDocument = document(sourceFile)
-    val targets = CaretTargets.at(sourceFile, atOffset).toSeq.flatMap {
-      case CaretTargets.Target.Referenced(elements) => elements
-      case CaretTargets.Target.Declared(element) => Seq(element)
-    }
+    val targets = CaretTargets.elementsAt(sourceFile, atOffset)
 
     targets.collect { case named: PsiNamedElement if named.getName != null => named }.flatMap { named =>
       val access: ReadWriteAccessDetector = sourceFile match {

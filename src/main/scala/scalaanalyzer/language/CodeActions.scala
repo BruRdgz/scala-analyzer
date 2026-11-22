@@ -65,6 +65,9 @@ object CodeActions {
     "com.intellij.codeInsight.intention.impl.AddOnDemandStaticImportToAutoImportAction",
   )
 
+  /** One unwrapper of a descriptor, by its position in the descriptor's list, with the title the popup gives it. */
+  private final case class Unwrapping(descriptor: UnwrapDescriptor, index: Int, title: String)
+
   /** Lazily created plugin action, the LSP action kind used for its response and the problems it is a fix for. */
   private final case class Candidate(
     name: String,
@@ -133,7 +136,7 @@ object CodeActions {
 final class CodeActions(scalaIntentionClasses: Seq[String], javaIntentionClasses: Seq[String],
     descriptorClasses: Seq[String], unwrapClasses: Seq[String], javaDescriptorClasses: Seq[String],
     javaUnwrapClasses: Seq[String]) {
-  import CodeActions.{Candidate, Choice, ImplementMembers}
+  import CodeActions.{Candidate, Choice, ImplementMembers, Unwrapping}
 
   /**
    * Previews the language's import optimizer on a file copy: the plugin's for a Scala file, the platform's for a Java
@@ -185,13 +188,13 @@ final class CodeActions(scalaIntentionClasses: Seq[String], javaIntentionClasses
             merged(intentionChoices(file, range, editor, fixes ++ intentionCandidates(file))) ++
               surrounded(javaFile, range, javaDescriptorClasses) ++
               unwrapped(javaFile, range, editor, javaUnwrapClasses) ++ inlinings(javaFile, range)
-          case _ => intentionChoices(file, range, editor, intentionCandidates(file)).distinct
+          case _ => merged(intentionChoices(file, range, editor, intentionCandidates(file)))
         }
     }
 
   /**
-   * One choice per action, as the IDE's lightbulb lists them: errors that overlap at a Java reference (an unknown type
-   * and its unresolved name) each offer the same fix, which becomes one choice fixing all of them.
+   * One choice per action, as the IDE's lightbulb lists them: problems that offer the same fix (an unknown type and
+   * its unresolved name in Java; Optimize imports for each unused import) become one choice fixing all of them.
    */
   private def merged(choices: Seq[Choice]): Seq[Choice] = {
     val byAction = mutable.LinkedHashMap.empty[(String, String, Seq[ChangeEngine.Edit], Option[String]), Choice]
@@ -211,8 +214,9 @@ final class CodeActions(scalaIntentionClasses: Seq[String], javaIntentionClasses
     val fixes = fixCandidates(range, problems).filterNot(isImplementMembersFix)
     val choices = intentionChoices(file, range, editor, fixes ++ intentionCandidates(file))
 
-    (typeImports(file, range, problems) ++ choices ++ surrounded(file, range, descriptorClasses) ++
-      unwrapped(file, range, editor, unwrapClasses) ++ inlinings(file, range)).distinct
+    merged(
+      typeImports(file, range, problems) ++ choices ++ surrounded(file, range, descriptorClasses) ++
+        unwrapped(file, range, editor, unwrapClasses) ++ inlinings(file, range))
   }
 
   /** The registered intentions of the file's language, as candidates; none for a file of another language. */
@@ -390,11 +394,23 @@ final class CodeActions(scalaIntentionClasses: Seq[String], javaIntentionClasses
     val project = file.getProject
 
     classes.flatMap { name =>
-      // `classes` holds unwrap-descriptor implementations registered in the plugins' descriptors.
-      val descriptor = Class.forName(name).getConstructor().newInstance().asInstanceOf[UnwrapDescriptor]
+      val found =
+        try {
+          // `classes` holds unwrap-descriptor implementations registered in the plugins' descriptors.
+          val descriptor = Class.forName(name).getConstructor().newInstance().asInstanceOf[UnwrapDescriptor]
+          val unwrappers = descriptor.collectUnwrappers(project, editor, file).asScala.toSeq
 
-      descriptor.collectUnwrappers(project, editor, file).asScala.toSeq.zipWithIndex.map { case (found, index) =>
-        val title = found.getSecond.getDescription(found.getFirst)
+          unwrappers.zipWithIndex.map { case (unwrapper, index) =>
+            Unwrapping(descriptor, index, unwrapper.getSecond.getDescription(unwrapper.getFirst))
+          }
+        } catch {
+          case e: ProcessCanceledException => throw e
+          case e @ (NonFatal(_) | _: LinkageError) =>
+            HostLog.warn(s"unwrap descriptor ${name.split('.').last} could not be looked up", e)
+            Seq.empty
+        }
+
+      found.map { case Unwrapping(descriptor, index, title) =>
         try {
           val (result, _) = previewFile(file) { copy =>
             val previewEditor = IntentionPreviewUtils.getPreviewEditor

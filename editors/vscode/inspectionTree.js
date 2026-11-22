@@ -10,7 +10,7 @@ const vscode = require('vscode');
  * @typedef {{ id: string, displayName: string, groupPath: string[] }} InspectionDescription
  * @typedef {{ uri: vscode.Uri, diagnostics: vscode.Diagnostic[] }} InspectedFile
  * @typedef {{
- *   kind: 'group' | 'inspection' | 'file' | 'problem', id: string, label: string, parent?: Node, children: Node[],
+ *   kind: 'group' | 'inspection' | 'file' | 'problem', id: string, label: string, key?: string, parent?: Node, children: Node[],
  *   uri?: vscode.Uri, diagnostic?: vscode.Diagnostic, range?: vscode.Range,
  * }} Node
  */
@@ -49,12 +49,12 @@ function buildTree(files, inspections) {
   /** @type {Node[]} */
   const roots = [];
 
-  /** Returns the child of `parent` with this kind and label, adding it when it is not there yet. */
-  const childOf = (parent, kind, label, props = {}) => {
+  /** Returns the child of `parent` with this kind and key (the label by default), adding it when it is not there yet. */
+  const childOf = (parent, kind, label, props = {}, key = label) => {
     const siblings = parent ? parent.children : roots;
-    let node = siblings.find(sibling => sibling.kind === kind && sibling.label === label);
+    let node = siblings.find(sibling => sibling.kind === kind && sibling.key === key);
     if (!node) {
-      node = { kind, label, id: `${parent?.id ?? ''}/${kind}:${label}`, parent, children: [], ...props };
+      node = { kind, label, key, id: `${parent?.id ?? ''}/${kind}:${key}`, parent, children: [], ...props };
       siblings.push(node);
     }
     return node;
@@ -66,7 +66,7 @@ function buildTree(files, inspections) {
       const { displayName, groupPath } = described.get(code) ?? { displayName: code, groupPath: [] };
       const group = groupPath.reduce((parent, name) => childOf(parent, 'group', name), undefined);
       const inspection = childOf(group, 'inspection', displayName);
-      const file = childOf(inspection, 'file', path.basename(uri.fsPath), { uri });
+      const file = childOf(inspection, 'file', path.basename(uri.fsPath), { uri }, uri.toString());
       file.children.push({ kind: 'problem', id: `${file.id}/${index}`, label: diagnostic.message.split('\n')[0], parent: file,
         children: [], uri, diagnostic, range: diagnostic.range });
     });

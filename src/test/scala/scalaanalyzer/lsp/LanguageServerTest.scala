@@ -1624,10 +1624,18 @@ class LanguageServerTest extends munit.FunSuite {
 
   /** The client's inlay hint settings change: the server reads them and asks for the hints again. */
   private def settings(answer: JsonObject): Unit = {
+    sendSettings(answer)
+    assert(Client.hintRefreshes.poll(1, TimeUnit.MINUTES) != null, "the server did not ask for the hints again")
+  }
+
+  /**
+   * Sends the client's inlay hint settings without waiting for a refresh: the server asks for the hints again only when
+   * they changed, which a test's final reset cannot know.
+   */
+  private def sendSettings(answer: JsonObject): Unit = {
     Client.hintRefreshes.clear()
     Client.inlayHintSettings = answer
     server.getWorkspaceService.didChangeConfiguration(new DidChangeConfigurationParams(answer))
-    assert(Client.hintRefreshes.poll(1, TimeUnit.MINUTES) != null, "the server did not ask for the hints again")
   }
 
   test("inlay hints follow the settings the client answers") {
@@ -1657,8 +1665,12 @@ class LanguageServerTest extends munit.FunSuite {
 
       settings(new JsonObject)
       assert(labels().contains(": List[Int]") && !labels().contains("timeout = "), s"an empty answer restores the defaults: ${labels()}")
+
+      // The same settings again (another setting of the client changed): nothing to apply, so no refresh.
+      sendSettings(new JsonObject)
+      assertEquals(Client.hintRefreshes.poll(5, TimeUnit.SECONDS), null)
     } finally {
-      settings(new JsonObject)
+      sendSettings(new JsonObject)
       change(original, 383)
     }
   }
@@ -1684,7 +1696,7 @@ class LanguageServerTest extends munit.FunSuite {
       xRay(false)
       assert(!labels().contains(": List[Int]"), labels())
     } finally {
-      settings(new JsonObject)
+      sendSettings(new JsonObject)
       service.didClose(new DidCloseTextDocumentParams(document(greet3)))
     }
   }

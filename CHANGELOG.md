@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Inspection Results lists two files of the same name (two `package.scala`) as two nodes.
+- A Scala or Java file created directly in a module's base directory (sbt's `sourcesInBase`) imports the build again.
+- Implement and Override members previews are rejected when the platform logged an error meanwhile, as other previews are.
+- One failing unwrapper no longer fails the whole code action request.
+- Code actions that several problems offer identically (Optimize imports per unused import) show once.
+- Changing a VS Code setting other than the inlay hint ones no longer cancels queries and refreshes the hints.
+- Override members on a document closed meanwhile no longer sends an edit to a stale version.
 - Resolving an inlay hint after a request for a range of the file resolves the hint that was asked for; the hints of a
   range were numbered within the range, not within the file.
 - Maven and Gradle run on the `JAVA_HOME` VS Code was started with, not on the extension's `scalaAnalyzer.javaHome`,
