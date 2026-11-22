@@ -114,8 +114,8 @@ object CodeActions {
 }
 
 /**
- * Previews intentions, the fixes of problems (the plugin's annotator fixes for Scala files, the Java plugin's error
- * fixes for Java files), and for Scala files surround and unwrap actions and inlinings, as source edits.
+ * Previews intentions, the fixes of problems (the plugin's annotator and inspection fixes for Scala files, the Java
+ * plugin's error and inspection fixes for Java files), and for Scala files surround and unwrap actions and inlinings, as source edits.
  *
  * Callers hold PSI read access. Actions run against copies through the platform's preview contract;
  * unsupported previews are disabled with a reason when the action is known to be available.

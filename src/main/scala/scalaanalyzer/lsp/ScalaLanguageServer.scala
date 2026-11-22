@@ -715,7 +715,8 @@ final class ScalaLanguageServer(
     }
 
   /**
-   * Runs the selected inspections over the project's Scala sources and answers their problems; nothing is published.
+   * Runs the selected inspections over the project's Scala and Java sources and answers their problems; nothing is
+   * published.
    *
    * Runs on the builds thread, as a compile does, and is shown as progress with the file being inspected. Each source is
    * read on its own, so edits go on between sources. A client's cancellation ends the run before the next source.

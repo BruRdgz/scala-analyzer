@@ -430,17 +430,20 @@ final class ProjectSession private (
   }
 
   /**
-   * Lists the registered Scala sources that a project-wide inspection covers.
+   * Lists the registered Scala and Java sources that a project-wide inspection covers.
    *
-   * Sources the build marks as generated are left out, as are Java sources. Takes no lock: during an import the
-   * registry can change, and `inspect` answers for a source that has left it. Does not check the session's state.
+   * Sources the build marks as generated are left out. Takes no lock: during an import the registry can change, and
+   * `inspect` answers for a source that has left it. Does not check the session's state.
    *
-   * @return the Scala source paths of the last imported modules that are registered now, sorted by path
+   * @return the Scala and Java source paths of the last imported modules that are registered now, sorted by path
    */
   def inspectableSources: Seq[Path] = {
     val generated = imported.flatMap(_.generatedSources).toSet
 
-    sourceFiles.filter(path => path.toString.endsWith(".scala") && !generated(path)).sorted
+    sourceFiles.filter { path =>
+      val name = path.toString
+      (name.endsWith(".scala") || name.endsWith(".java")) && !generated(path)
+    }.sorted
   }
 
   /**
@@ -450,7 +453,8 @@ final class ProjectSession private (
    * buffer, saved or not, and runs no annotator or compiler: see `problems` for the live diagnostics.
    *
    * @param path registered project-source path
-   * @return the inspection problems; empty for a source that is not Scala, or that an import removed meanwhile
+   * @return the inspection problems; empty for a source that is neither Scala nor Java, or that an import removed
+   *         meanwhile
    */
   def inspect(path: Path): Seq[FileProblem] = {
     val readLock = importSnapshotLock.readLock()

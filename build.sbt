@@ -265,7 +265,9 @@ lazy val root = (project in file("."))
     // The language and MCP servers' fixture modules and the measured adapter ledger each need their own host JVM:
     // other suites may open the same modules or record calls outside the surface scenario.
     Test / testGrouping := {
-      val isolated = Set("scalaanalyzer.lsp.LanguageServerTest", "scalaanalyzer.mcp.McpServerTest", "scalaanalyzer.AdapterSurfaceTest")
+      // The Java inspections' audit runs the excluded inspections too, whose unanswered calls other suites would see.
+      val isolated = Set("scalaanalyzer.lsp.LanguageServerTest", "scalaanalyzer.mcp.McpServerTest",
+        "scalaanalyzer.AdapterSurfaceTest", "scalaanalyzer.JavaInspectionsTest")
       val (own, shared) = (Test / definedTests).value.partition(test => isolated(test.name))
       val fork = Tests.SubProcess((Test / forkOptions).value)
       Seq(Tests.Group("shared", shared, fork)) ++ own.map(test => Tests.Group(test.name, Seq(test), fork))

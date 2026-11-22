@@ -1,5 +1,6 @@
 package scalaanalyzer.platform
 
+import com.intellij.java.backend.JavaBackendClassForClassPath
 import com.intellij.openapi.extensions.ExtensionPoint
 import com.intellij.openapi.util.registry.RegistryKeyDescriptor
 import javax.xml.parsers.DocumentBuilderFactory
@@ -112,7 +113,9 @@ object Descriptors {
    */
   def scalaRegistryKeys(loader: ClassLoader): Map[String, RegistryKeyDescriptor] = {
     val descriptors = Seq("META-INF/scala-plugin-common.xml", "META-INF/sbt.xml", "META-INF/codeInsight.xml",
-      "META-INF/scala-meta-impl.xml", "intellij.java.psi.impl.xml")
+      "META-INF/scala-meta-impl.xml", "intellij.java.psi.impl.xml",
+      // The Java inspections' key: whether the result-ignored inspection honors inferred purity.
+      "META-INF/InspectionGadgets.xml")
 
     descriptors.flatMap { path =>
       val input = loader.getResourceAsStream(path)
@@ -189,6 +192,29 @@ object Descriptors {
       ExtensionBean(attributes, childText)
     }
   }
+
+  /**
+   * The jar of java-backend, a descriptor-only artifact: the Java plugin's `JavaPlugin.xml`, `InspectionGadgets.xml`
+   * and `Inspections.xml`. Located through the one class it holds.
+   *
+   * @return the path of the jar on the host's class path
+   */
+  def javaBackendJar: Path =
+    Path.of(classOf[JavaBackendClassForClassPath].getProtectionDomain.getCodeSource.getLocation.toURI)
+
+  /**
+   * Reads the local inspections that the IDE's default profile enables for Java: those of java-backend's
+   * `InspectionGadgets.xml` and `Inspections.xml` with the `JAVA` language that are `enabledByDefault`. Inspections of
+   * other languages (UAST, XML, HTML) are left out, and so are the global inspections, which are another extension.
+   *
+   * Data only, as [[scalaExtensionBeans]]: nothing is instantiated here.
+   *
+   * @return the registrations, in the order the jar's descriptors list them
+   */
+  def javaLocalInspections: Seq[ExtensionBean] =
+    scalaExtensionBeans(Seq(javaBackendJar), "com.intellij.localInspection").filter { bean =>
+      bean.attributes.get("language").contains("JAVA") && bean.attributes.get("enabledByDefault").contains("true")
+    }
 
   /** One `.xml` file inside a jar: its path within the jar and its raw content. */
   private final case class XmlEntry(name: String, bytes: Array[Byte])

@@ -32,12 +32,12 @@ It exposes editor features through the **Language Server Protocol (LSP)** and im
 
 | Area | Capabilities |
 | --- | --- |
-| Diagnostics | Scala plugin and compiler diagnostics; current-buffer compilation for Scala 3; selected native inspections, also over the whole project (Inspect Code, listed by group, inspection and file in VS Code's Inspection Results view). |
+| Diagnostics | Scala plugin and compiler diagnostics; current-buffer compilation for Scala 3; selected native inspections and, in Java files, the Java plugin's default inspections, also over the whole project (Inspect Code, listed by group, inspection and file in VS Code's Inspection Results view). |
 | Completion | Automatic imports, insertion handlers, postfix templates (`expr.if`, `.match`, `.for`, `.var`, `.not`...) and signature help (also in Java files). |
 | Inlay hints | Inferred types, parameter names, implicit arguments and conversions, method chains. Type names are links to their declarations, an inferred definition type can be written into the source, and `scalaAnalyzer.inlayHints.*` selects the kinds shown. Java files get the IDE's parameter-name hints, with its default options. |
 | Navigation | Definitions (through the plugin's Go to Declaration), type definitions, references, implementations, go to super, go to test (from a class to its tests and back), call/type hierarchies and workspace symbols; library sources and decompiled classes. |
 | Documentation | Markdown hover with declaration context, parameters, return values and linked references. |
-| Editing | Rename and references (also across Java files), organize imports (also in Java files), previewable quick fixes and intentions (Java files get the Java plugin's error fixes and intentions), surround and unwrap actions; implement and override members; split/join lists and flip comma; Inline for `val`s, `def`s and type aliases; Extract to val and Extract method. |
+| Editing | Rename and references (also across Java files), organize imports (also in Java files), previewable quick fixes and intentions (Java files get the Java plugin's error and inspection fixes and intentions), surround and unwrap actions; implement and override members; split/join lists and flip comma; Inline for `val`s, `def`s and type aliases; Extract to val and Extract method. |
 | Formatting | Whole-file scalafmt or IntelliJ formatting; range formatting through IntelliJ. Java files always use the IntelliJ formatter. |
 | Tests | Run ScalaTest, specs2 and MUnit suites/tests, and uTest suites, from code lenses; readable output and a result summary. |
 | Run | Run objects with a `main` method, `App` objects and Scala 3 `@main` methods from code lenses; output and an exit summary. |
@@ -143,8 +143,8 @@ importing until it is ready.
 | `type_of` | The type of a symbol or of an expression, as the IDE's Type Info. |
 | `describe` | The signature and documentation the IDE shows on hover, in Markdown. |
 | `outline` | The declarations of a file as an indented tree, with the line of each name. Takes `file` only. |
-| `diagnostics` | The problems the editor shows, for a `file` or for every source, as `path:line:column  severity: message [source]`: the Scala plugin's annotator and inspections, plus the compiler's diagnostics of the current text for Scala 3 sources. Scala 2 compiler errors come only from a build compile, which the server does not run, so Scala 2 and Java sources have the plugin's own analysis only. |
-| `inspect` | The IDE's Inspect Code over a Scala `file` or every Scala source (generated ones excluded): the selected inspections only, each labelled with its name. |
+| `diagnostics` | The problems the editor shows, for a `file` or for every source, as `path:line:column  severity: message [source]`: the Scala plugin's annotator and inspections, plus the compiler's diagnostics of the current text for Scala 3 sources. Scala 2 compiler errors come only from a build compile, which the server does not run, so Scala 2 and Java sources have the plugin's own analysis only (for Java, its errors and default inspections). |
+| `inspect` | The IDE's Inspect Code over a Scala or Java `file` or every Scala and Java source (generated ones excluded): the selected inspections only, each labelled with its name. |
 
 Every tool but `project_status`, `find_symbol`, `outline`, `diagnostics` and `inspect` names its target in one of two
 ways: `symbol`, a name qualified as far as needed to be unambiguous (`core.Greeting`, `Greeting.text`; the answer lists
@@ -232,11 +232,13 @@ partial, indexes are kept in memory, and each process serves one workspace.
   `--enable-preview` selects the preview level). A module whose build reports none, or a version the server does not
   know, is read at the highest level the server supports, so a feature newer than the build's release goes unreported.
   sbt does not report javac options over BSP, so the Java sources of sbt modules are always read at that level.
-- Native inspections cover deprecation, selected redundancies, explicit unused imports, unannotated
-  declarations confined to the file, and the collection inspections that the IDE enables by default.
-  Wildcard/given import warnings and whole-project dead-code analysis are outside this scope. Inspect Code
-  (`scalaAnalyzer/inspect`) runs only these inspections, on the Scala sources that the build does not mark as
-  generated; it does not report syntax, type or compiler errors. The VS Code extension shows its result in a separate
+- Native inspections of Scala sources cover deprecation, selected redundancies, explicit unused imports, unannotated
+  declarations confined to the file, and the collection inspections that the IDE enables by default. Java sources
+  get the Java plugin's local inspections that the IDE's default profile enables, less those that fail in the host
+  (see `Inspections.JavaExclusions`), with the IDE's `@SuppressWarnings` and `//noinspection` suppression; the global
+  inspections (unused declarations across files, for one) are not run. Wildcard/given import warnings and whole-project dead-code analysis are outside this scope.
+  Inspect Code (`scalaAnalyzer/inspect`) runs only these inspections, on the Scala and Java sources that the build
+  does not mark as generated; it does not report syntax, type or compiler errors. The VS Code extension shows its result in a separate
   list and omits files whose live diagnostics are already shown; other clients receive every file's problems and
   must avoid showing them twice. Dialog-dependent actions, file/package moves and optional automatic renames are
   unavailable; code actions are limited to current-file previews.

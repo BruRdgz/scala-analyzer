@@ -89,6 +89,18 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
   private final case class PluginReading(general: Seq[FileProblem], previousInspections: Option[Seq[FileProblem]],
     compilerHighlighted: Boolean, text: String, stamp: Long)
 
+  /** The label of the problems of the Scala plugin. */
+  private val ScalaSource = "scala-plugin"
+
+  /** The label of the problems of the Java plugin. */
+  private val JavaSource = "java-plugin"
+
+  /** The label of the problems that the plugin of `file`'s language reports. */
+  private def pluginSource(file: PsiFile): String = file match {
+    case _: PsiJavaFile => JavaSource
+    case _ => ScalaSource
+  }
+
   /** Gets the in-memory document owned by the platform for `file`. */
   private def document(file: PsiFile): Document = PsiDocumentManager.getInstance(host.project).getDocument(file)
 
@@ -438,11 +450,13 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
    *
    * A Scala file has the plugin's problems of at least weak-warning severity. When the host takes its errors from
    * the build's compiler, the compiler's problems follow: a Scala 3 `spec` compiles the current buffer, anything
-   * else reuses `lastBuildProblems`. A Java file has the platform's syntax and semantic problems, without javac.
+   * else reuses `lastBuildProblems`. A Java file has the platform's syntax and semantic problems, without javac, and
+   * the Java plugin's default inspections of at least weak-warning severity.
    *
    * The inspections of a large Scala file can take seconds after each edit, so when they have to run, `early` gets
    * the other problems first, with the previous inspection problems where the edits moved them (see
    * [[ScalaPsiHost.previousInspectionDiagnostics]]), as the IDE shows its general highlighting before its inspections.
+   * A Java file's problems all come at the end.
    *
    * @param path registered project-source path
    * @param spec compile settings of the source's module, if it has any
@@ -459,8 +473,8 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
         val reading = host.read {
           val sourceDocument = document(scalaFile)
 
-          PluginReading(pluginProblems(sourceDocument, host.generalDiagnostics(scalaFile)),
-            host.previousInspectionDiagnostics(scalaFile).map(pluginProblems(sourceDocument, _)),
+          PluginReading(pluginProblems(sourceDocument, host.generalDiagnostics(scalaFile), ScalaSource),
+            host.previousInspectionDiagnostics(scalaFile).map(pluginProblems(sourceDocument, _, ScalaSource)),
             host.isCompilerHighlighted(scalaFile), sourceDocument.getText, sourceDocument.getModificationStamp)
         }
 
@@ -481,39 +495,41 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
           val sourceDocument = document(scalaFile)
           // The other problems are of the text read first: with another, the result would mix two versions.
           if (sourceDocument.getModificationStamp != reading.stamp) throw new ProcessCanceledException()
-          pluginProblems(sourceDocument, host.inspectionDiagnostics(scalaFile))
+          pluginProblems(sourceDocument, host.inspectionDiagnostics(scalaFile), ScalaSource)
         }
 
         reading.general ++ inspected ++ fromCompiler
       case javaFile: PsiJavaFile => host.read {
         val sourceDocument = document(javaFile)
 
-        host.diagnostics(javaFile).map { problem =>
-          FileProblem(problemSeverity(problem.severity), position(sourceDocument, problem.range.getStartOffset),
-            position(sourceDocument, problem.range.getEndOffset), problem.message, "java-plugin")
-        }
+        pluginProblems(sourceDocument, host.diagnostics(javaFile) ++ host.inspectionDiagnostics(javaFile), JavaSource)
       }
       case _ => Seq.empty
     }
 
   /**
-   * Collects the problems of the plugin's selected inspections in a Scala source, without the annotator, the syntax
+   * Collects the problems of the selected inspections in a Scala or Java source, without the annotator, the syntax
    * check or any compiler.
    *
    * @param path registered project-source path
-   * @return the inspection problems of at least weak-warning severity, labelled `scala-plugin`; empty for a source
-   *         that is not Scala
+   * @return the inspection problems of at least weak-warning severity, labelled `scala-plugin` or `java-plugin`;
+   *         empty for a source that is neither Scala nor Java
    */
   def inspect(path: Path): Seq[FileProblem] = file(path) match {
-    case scalaFile: ScalaFile => host.read(pluginProblems(document(scalaFile), host.inspect(scalaFile)))
+    case scalaFile: ScalaFile => host.read(pluginProblems(document(scalaFile), host.inspect(scalaFile), ScalaSource))
+    case javaFile: PsiJavaFile => host.read(pluginProblems(document(javaFile), host.inspect(javaFile), JavaSource))
     case _ => Seq.empty
   }
 
-  /** Converts the plugin's problems of at least weak-warning severity to the document's coordinates; the caller reads. */
-  private def pluginProblems(sourceDocument: Document, found: Seq[Diagnostic]): Seq[FileProblem] =
+  /**
+   * Converts the plugin's problems of at least weak-warning severity to the document's coordinates; the caller reads.
+   *
+   * @param source the label of the plugin that reported them
+   */
+  private def pluginProblems(sourceDocument: Document, found: Seq[Diagnostic], source: String): Seq[FileProblem] =
     found.filter(_.severity.compareTo(HighlightSeverity.WEAK_WARNING) >= 0).map { p =>
       FileProblem(problemSeverity(p.severity), position(sourceDocument, p.range.getStartOffset),
-        position(sourceDocument, p.range.getEndOffset), p.message, "scala-plugin", p.inspectionId,
+        position(sourceDocument, p.range.getEndOffset), p.message, source, p.inspectionId,
         p.deprecated, p.unnecessary)
     }
 
@@ -809,7 +825,7 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
    * ancestor kind. A Scala file has the plugin's fixes, intentions, surround, unwrap, inline and extract actions, and
    * Implement members, which is previewed only when `only` accepts its kind and not at all for a caller that
    * `resolvesEdits`. A Java file has the Java plugin's intentions, as `refactor.rewrite` like the Scala ones, the fixes of
-   * its errors as `quickfix`, and Organize imports, which the platform's Java import optimizer computes.
+   * its errors and inspection problems as `quickfix`, and Organize imports, which the platform's Java import optimizer computes.
    *
    * @param path registered project-source path
    * @param start selection start
@@ -856,10 +872,12 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
         // The reads above are separate, and an edit between them would mix two versions of the text in the result.
         if (sourceDocument.getModificationStamp != stamp) throw new ProcessCanceledException()
         choices.map { choice =>
-          CodeActionResult(choice.title, choice.kind, choice.disabled, pluginProblems(sourceDocument, choice.problems)) ->
+          CodeActionResult(choice.title, choice.kind, choice.disabled,
+            pluginProblems(sourceDocument, choice.problems, pluginSource(sourceFile))) ->
             Some(choice.edits.map(textChange(sourceDocument, _)))
         } ++ deferred.map { action =>
-          CodeActionResult(action.title, action.kind, None, pluginProblems(sourceDocument, action.problems)) -> None
+          CodeActionResult(action.title, action.kind, None,
+            pluginProblems(sourceDocument, action.problems, pluginSource(sourceFile))) -> None
         } ++ extractions.map { offer =>
           CodeActionResult(offer.title, "refactor.extract", None, Seq.empty, Some(offer.refactoring)) -> None
         }

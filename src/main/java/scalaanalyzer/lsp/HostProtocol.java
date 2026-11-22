@@ -324,11 +324,11 @@ public final class HostProtocol {
     CompletableFuture<Void> reimport();
 
     /**
-     * Runs the host's selected inspections over the project's Scala sources and returns their problems, as the IDE's
-     * Inspect Code does.
+     * Runs the host's selected inspections over the project's Scala and Java sources and returns their problems, as the
+     * IDE's Inspect Code does.
      *
      * Only inspections run: no syntax errors, annotator problems or compiler diagnostics. Generated sources are
-     * skipped, and so are Java sources. The request reads each source's current buffer, saved or not, and publishes
+     * skipped. The request reads each source's current buffer, saved or not, and publishes
      * nothing: the client decides how to show the result. It runs apart from document requests, is shown as progress
      * and ends early, answering a cancellation error, when the client cancels it.
      *

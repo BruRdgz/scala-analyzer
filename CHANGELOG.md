@@ -50,6 +50,11 @@
 - Java errors have the IDE's quick fixes, from the Java plugin's error fix providers (read from its JavaPlugin.xml):
   casts, `throws` clauses, try/catch, changed types, and an import choice per class an unresolved name can be. They are
   computed for the errors a code-action request touches, not in every diagnostics pass.
+- Java files get the IDE's default Java inspections: the 432 local inspections the Java plugin enables by default
+  (read from its descriptors), minus 19 that need what the host does not have, each listed with its reason. Their
+  problems are in the diagnostics and in Inspect Code (also over MCP), with the inspections' fixes and the
+  `//noinspection` and `@SuppressWarnings` suppressions in the lightbulb. Nine data-flow inspections (DataFlowIssue,
+  ConstantExpression and others) are among the excluded ones.
 - Scala parameter-name hints follow the IDE's default exclusion list, which the Scala filter shares with Java: calls
   such as setters (`*.set*(*)`), `Math` methods or `println` no longer show parameter names.
 

@@ -2282,17 +2282,38 @@ class LanguageServerTest extends munit.FunSuite {
     .sorted
     .toSeq
 
-  test("inspects every Scala source of the build, listing the problems of those that have some") {
+  test("inspects every Scala and Java source of the build, listing the problems of those that have some") {
     val report = server.inspect().get(5, TimeUnit.MINUTES)
     // Counter.scala imports `mutable` (line 2) and `Try` (line 3) without using them.
     assertEquals(inspected(report, counter, "ScalaUnusedImport"), Seq(2, 3))
     assert(!report.files.asScala.exists(_.getUri == greeting.toUri.toString), "Greeting.scala has no problems")
     assert(report.files.asScala.forall(file => !file.getDiagnostics.isEmpty && file.getVersion == null), report.files)
-    // Java sources are not inspected.
-    val scalaSources = Seq("app", "core", "core3").flatMap { module =>
+    val sources = Seq("app", "core", "core3").flatMap { module =>
       Using.resource(Files.walk(fixture.resolve(module).resolve("src")))(_.iterator().asScala.toVector)
-    }.filter(_.toString.endsWith(".scala"))
-    assertEquals(report.filesInspected, scalaSources.size)
+    }.filter(path => path.toString.endsWith(".scala") || path.toString.endsWith(".java"))
+    assertEquals(report.filesInspected, sources.size)
+  }
+
+  test("Inspect Code lists the problems of a Java source's buffer, described with the Java plugin's name and group") {
+    val javaFile = fixture.resolve("core/src/main/java/core/Shout.java")
+    val original = Files.readString(javaFile)
+    val text = "package core;\nclass Shout { boolean f(String s) { return s == \"x\"; } }\n"
+    val service = server.getTextDocumentService
+    try {
+      service.didOpen(new DidOpenTextDocumentParams(new TextDocumentItem(javaFile.toUri.toString, "java", 240, text)))
+      // The document's own diagnostics carry the inspection's problem too; once they arrive, the buffer is the new text.
+      val published = diagnosticsOf(javaFile, 240)
+      val equality = published.filter(problem => Option(problem.getCode).exists(_.getLeft == "StringEquality"))
+      assertEquals(equality.map(_.getSource), Seq("java-plugin"), published.toString)
+      val report = server.inspect().get(5, TimeUnit.MINUTES)
+      assertEquals(inspected(report, javaFile, "StringEquality"), Seq(1))
+      val description = report.inspections.asScala.find(_.id == "StringEquality").getOrElse(fail(report.inspections.toString))
+      assertEquals(description.displayName, "String comparison using '==', instead of 'equals()'")
+      // GUESSED: the group path is the registration's `groupPath` and the name of its `groupKey`.
+      assertEquals(description.groupPath.asScala.toSeq, Seq("Java", "Probable bugs"))
+    } finally service.didChange(new DidChangeTextDocumentParams(
+      new VersionedTextDocumentIdentifier(javaFile.toUri.toString, 241),
+      JavaList.of(new TextDocumentContentChangeEvent(original))))
   }
 
   test("an inspection report describes each inspection that reported, with the plugin's name and group") {

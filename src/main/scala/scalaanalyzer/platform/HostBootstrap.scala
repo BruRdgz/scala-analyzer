@@ -56,9 +56,10 @@ import com.intellij.util.indexing.FileBasedIndex
 import com.intellij.util.messages.impl.MessageBusFactoryImpl
 import com.intellij.codeInsight.{
   AnnotationCacheOwnerNormalizer, AutoPopupController, AutoPopupControllerHelper, CodeInsightSettings,
-  ContextNullabilityInfo, CustomExceptionHandler, ExternalAnnotationsManager, FileModificationService, ImportFilter,
-  InferredAnnotationsManager, JavaIdeCodeInsightSettings, JavaProjectCodeInsightSettings, NullableNotNullManager,
-  TailTypeFactory, TargetElementUtil, TargetElementUtilBase, TestFrameworks, TestFrameworksImpl
+  ConcurrencyAnnotationsManager, ContextNullabilityInfo, CustomExceptionHandler, ExternalAnnotationsManager,
+  FileModificationService, ImportFilter, InferredAnnotationsManager, JavaIdeCodeInsightSettings,
+  JavaProjectCodeInsightSettings, NullableNotNullManager, StaticAnalysisAnnotationManager, TailTypeFactory,
+  TargetElementUtil, TargetElementUtilBase, TestFrameworks, TestFrameworksImpl
 }
 import com.intellij.codeInsight.completion.{
   CompletionService, CompletionType, FrontendFriendlyTailTypeFactory, InternalCompletionSettings,
@@ -75,7 +76,12 @@ import com.intellij.codeInsight.multiverse.{CodeInsightContextManager, CodeInsig
 import com.intellij.codeInsight.navigation.{ClassImplementationsSearch, MethodImplementationsSearch}
 import com.intellij.codeInsight.runner.JavaMainMethodProvider
 import com.intellij.codeInsight.template.TemplateManager
-import com.intellij.codeInspection.{GlobalInspectionContext, InspectionManager, InspectionManagerBase, SuppressManager}
+import com.intellij.codeInspection.{
+  BatchSuppressManager, BatchSuppressManagerImpl, GlobalInspectionContext, InspectionManager, InspectionManagerBase,
+  SuppressManager
+}
+import com.intellij.codeInspection.bulkOperation.BulkMethodInfoProvider
+import com.intellij.codeInspection.naming.NamingConvention
 import com.intellij.codeInspection.ex.{EntryPointsManager, EntryPointsManagerBase}
 import com.intellij.concurrency.JobLauncher
 import com.intellij.core.{CoreJavaFileCodeStyleFacade, CoreJobLauncher, CorePsiPackageImplementationHelper}
@@ -89,7 +95,6 @@ import com.intellij.ide.fileTemplates.FileTemplateManager
 import com.intellij.ide.highlighter.{JavaClassFileType, JavaFileType}
 import com.intellij.ide.util.PropertiesComponent
 import com.intellij.internal.statistic.eventLog.{StatisticsEventLogProvidersHolder, StatisticsEventLoggerProvider}
-import com.intellij.java.backend.JavaBackendClassForClassPath
 import com.intellij.java.codeserver.highlighting.JavaErrorFilter
 import com.intellij.java.frontback.psi.impl.syntax.JavaSyntaxDefinitionExtension
 import com.intellij.java.impl.template.{JavaTemplateCodeInsightSupport, JavaTemplateImportSupport}
@@ -103,7 +108,7 @@ import com.intellij.lang.folding.CustomFoldingProvider
 import com.intellij.lang.impl.modcommand.ModCommandServiceImpl
 import com.intellij.lang.injection.InjectedLanguageManager
 import com.intellij.lang.java.{
-  JavaFindUsagesProvider, JavaFormattingModelBuilder, JavaImportOptimizer, JavaParserDefinition,
+  JavaCommenter, JavaFindUsagesProvider, JavaFormattingModelBuilder, JavaImportOptimizer, JavaParserDefinition,
   JavaSyntaxHighlighterFactory,
 }
 import com.intellij.lang.java.syntax.JavaElementTypeConverterExtension
@@ -203,10 +208,12 @@ import com.intellij.psi.impl.source.codeStyle.{
   CodeStyleManagerImpl, ImportHelper, IndentHelper, IndentHelperImpl, JavaCodeStyleManagerImpl,
   JavaReferenceAdjuster, PostFormatProcessor, PreFormatProcessor
 }
+import com.intellij.psi.impl.source.javadoc.JavadocManagerImpl
 import com.intellij.psi.impl.source.resolve.{JavaResolveCache, PsiResolveHelperImpl, ResolveCache}
 import com.intellij.psi.impl.source.resolve.reference.{ReferenceProvidersRegistry, ReferenceProvidersRegistryImpl}
 import com.intellij.psi.impl.source.tree.{JavaASTFactory, JavaTreeGenerator}
 import com.intellij.psi.impl.source.tree.mvcc.{PsiVersioningGarbageCollector, PsiVersioningServiceImpl}
+import com.intellij.psi.javadoc.JavadocManager
 import com.intellij.psi.search.{
   EverythingGlobalScope, FilenameIndex, PredefinedSearchScopeProvider, ProjectScopeBuilder, PsiSearchHelper,
   PsiShortNamesCache
@@ -540,19 +547,6 @@ private[scalaanalyzer] object HostBootstrap {
      * descriptor lists them under the Java plugin; the host takes the same implementations from it.
      */
     private def registerJavaErrorFixes(): Unit = {
-      val location = classOf[JavaBackendClassForClassPath].getProtectionDomain.getCodeSource.getLocation
-      val javaBackendJar = Path.of(location.toURI)
-
-      /** Declares an extension point and registers the implementations JavaPlugin.xml lists for it. */
-      def registerListed[T <: AnyRef](epName: String, extensionType: Class[T]): Unit = {
-        // `declare` yields the registry of the descriptor's interface, which `extensionType` names.
-        val extensions = declare(epName).asInstanceOf[ExtensionPointImpl[T]]
-        val listed = Descriptors.scalaExtensions(Seq(javaBackendJar), epName)
-        if (listed.isEmpty) throw new IllegalStateException(s"no extensions registered for $epName in JavaPlugin.xml")
-        for (name <- listed)
-          extensions.registerExtension(newPrivate(Class.forName(name).asSubclass(extensionType)), root)
-      }
-
       // DefaultJavaErrorFixProvider takes the factory when it is constructed.
       appServices.register(classOf[QuickFixFactory])(new QuickFixFactoryImpl)
       registerListed("com.intellij.java.errorFixProvider", classOf[JavaErrorFixProvider])
@@ -572,6 +566,47 @@ private[scalaanalyzer] object HostBootstrap {
       declare("org.jetbrains.uast.uastLanguagePlugin")
       CoreApplicationEnvironment.registerExtensionPoint(area, "com.intellij.codeInsight.externalLibraryResolver",
         classOf[ExternalLibraryResolver])
+    }
+
+    /**
+     * Declares an extension point and registers the implementations that java-backend's descriptors list for it, in
+     * their order; fails if they list none.
+     */
+    private def registerListed[T <: AnyRef](epName: String, extensionType: Class[T]): Unit = {
+      // `declare` yields the registry of the descriptor's interface, which `extensionType` names.
+      val extensions = declare(epName).asInstanceOf[ExtensionPointImpl[T]]
+      val listed = Descriptors.scalaExtensions(Seq(Descriptors.javaBackendJar), epName)
+      if (listed.isEmpty) throw new IllegalStateException(s"no extensions registered for $epName in java-backend")
+      for (name <- listed)
+        extensions.registerExtension(newPrivate(Class.forName(name).asSubclass(extensionType)), root)
+    }
+
+    /**
+     * What the Java inspections read, as java-backend's descriptors register it: the batch-suppression service, the
+     * annotation names the analysis recognizes, and the extension points with the extensions the descriptors list, or
+     * with none where the extensions belong to frameworks the host has no support for.
+     */
+    private def registerJavaInspectionSupport(): Unit = {
+      // `@SuppressWarnings` and `//noinspection` for Java, which the inspections ask whether a problem is suppressed.
+      appServices.register(classOf[BatchSuppressManager])(new BatchSuppressManagerImpl)
+      // The contract, internal-API and unstable-API annotations that the analysis recognizes by name.
+      appServices.register(classOf[StaticAnalysisAnnotationManager])(new StaticAnalysisAnnotationManager)
+      // The class naming conventions: the first that applies to a class checks its name, so the descriptor's order
+      // (it lists each after the previous, the last one as `last`) is kept. The inspection also watches the
+      // registrations of local inspections (an extension point of the platform), of which the host registers none.
+      declare("com.intellij.localInspection")
+      registerListed("com.intellij.naming.convention.class", classOf[NamingConvention[?]])
+      // The collection methods that have a bulk counterpart, from the JDK.
+      registerListed("com.intellij.java.inspection.bulkMethodInfo", classOf[BulkMethodInfoProvider])
+      // No descriptor of java-backend registers an extension of these: they come from other plugins (extra language
+      // features, frameworks whose fields must not be final, such as Lombok's), which the host does not load.
+      declare("com.intellij.java.languageFeatureProvider")
+      declare("com.intellij.canBeFinal")
+      // The descriptor lists the loggers of the common logging libraries, each available when its library is among
+      // the module's. That check is JavaLibraryUtil's, whose cache depends on a library tracker service that the host
+      // does not register. With none, the `System.out` inspection offers no conversion to a logger call and still
+      // reports the use.
+      declare("com.intellij.jvm.logging")
     }
 
     /** Registers a descriptor-declared extension point and returns its platform registry; fails if undeclared. */
@@ -781,6 +816,7 @@ private[scalaanalyzer] object HostBootstrap {
       CoreApplicationEnvironment.registerExtensionPoint(area, CustomExceptionHandler.KEY.getName,
         classOf[CustomExceptionHandler])
       registerJavaErrorFixes()
+      registerJavaInspectionSupport()
       // The element type is erased; AnyRef only names it.
       declare("com.intellij.implicitClassSearch").asInstanceOf[ExtensionPointImpl[AnyRef]]
         .registerExtension(new ImplicitClassesSearcher, root)
@@ -1267,6 +1303,8 @@ private[scalaanalyzer] object HostBootstrap {
       SyntaxHighlighterFactory.LANGUAGE_FACTORY.addExplicitExtension(JavaLanguage.INSTANCE,
         new JavaSyntaxHighlighterFactory)
       LanguageCommenters.INSTANCE.addExplicitExtension(ScalaLanguage.INSTANCE, new ScalaCommenter)
+      // Java's comment syntax, which the Java inspections' `//noinspection` suppression writes.
+      LanguageCommenters.INSTANCE.addExplicitExtension(JavaLanguage.INSTANCE, new JavaCommenter)
       // The platform descriptor's default enables whitespace expansion. Other advanced settings remain unsupported.
       appServices.register(classOf[AdvancedSettings])(new AdvancedSettings {
         override protected def getSetting(id: String): AnyRef = id match {
@@ -1746,6 +1784,13 @@ private[scalaanalyzer] object HostBootstrap {
         override def getPackageNameByDirectory(dir: VirtualFile): String = null
       })
       projectServices.register(classOf[JavaResolveCache])(new JavaResolveCache(project))
+      // The javadoc tags and where each is valid, which the javadoc inspections check comments against. The tags that
+      // plugins add come from two extension points that nothing in the host extends.
+      declare("com.intellij.javadocTagInfo")
+      declare("com.intellij.customJavadocTagProvider")
+      projectServices.register(classOf[JavadocManager])(new JavadocManagerImpl(project))
+      // The names of the annotations that mark thread-safety, which the too-broad-scope inspection reads.
+      projectServices.register(classOf[ConcurrencyAnnotationsManager])(new ConcurrencyAnnotationsManager)
       // The project's default Java language level, which a class's declarations are processed at: the highest, the
       // level of a file with no module. A module's sources have their own (see `sourceLanguageLevel`), which
       // PsiJavaFile.getLanguageLevel reads through JavaPsiImplementationHelper, so this stays the project's.
@@ -1774,6 +1819,7 @@ private[scalaanalyzer] object HostBootstrap {
       // External (XML) annotations of library classes: the host attaches none.
       projectServices.register(classOf[ExternalAnnotationsManager])(new Host_ExternalAnnotationsManager(dispatch {
         case ("ExternalAnnotationsManager.findExternalAnnotationsFiles", _) => null
+        case ("ExternalAnnotationsManager.findExternalAnnotation", _) => null
         case ("ExternalAnnotationsManager.findExternalAnnotations", Array(_)) => PsiAnnotation.EMPTY_ARRAY
         case ("ExternalAnnotationsManager.findExternalAnnotations", Array(_, _)) => java.util.List.of()
       }))
@@ -1923,7 +1969,12 @@ private[scalaanalyzer] object HostBootstrap {
         case ("InjectedLanguageManager.isInjectedViewProvider", _) => java.lang.Boolean.FALSE
         case ("InjectedLanguageManager.getCachedInjectedDocumentsInRange", _) => java.util.List.of()
         // There are no registered injectors, so enumeration has no injected fragments to visit.
-        case ("InjectedLanguageManager.enumerate", _) => null
+        case ("InjectedLanguageManager.enumerate" | "InjectedLanguageManager.enumerateEx", _) => null
+        // No element is in an injected file, so none has a host.
+        case ("InjectedLanguageManager.getInjectionHost", _) => null
+        // Without escaping by an injection, the text of a node is its unescaped text (as the platform gathers it from
+        // the leaves, which carry no unescaped text of their own here).
+        case ("InjectedLanguageManager.getUnescapedText", Array(node: PsiElement)) => node.getText
         // Without injected files every element is in its host file, so its ranges are already host ranges.
         case ("InjectedLanguageManager.injectedToHost", Array(_: PsiElement, range: TextRange)) => range
       }))
@@ -2043,7 +2094,8 @@ private[scalaanalyzer] object HostBootstrap {
           javaIntentions(),
           Descriptors.scalaExtensions(config.scalaPluginJars, "com.intellij.lang.surroundDescriptor"),
           Descriptors.scalaExtensions(config.scalaPluginJars, "com.intellij.lang.unwrapDescriptor")),
-        new Inspections(Descriptors.scalaExtensionBeans(config.scalaPluginJars, "com.intellij.localInspection")))
+        new Inspections(Descriptors.scalaExtensionBeans(config.scalaPluginJars, "com.intellij.localInspection"),
+          Descriptors.javaLocalInspections))
     }
   }
 

@@ -1,0 +1,248 @@
+package audit;
+
+import java.io.IOException;
+import java.io.StringReader;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.Set;
+import java.util.function.Function;
+import java.util.stream.Collectors;
+
+/**
+ * Constructs the default Java inspections look at: declarations of every kind, control flow, strings, generics,
+ * lambdas and streams, exceptions, deprecated members and code that is redundant on purpose.
+ *
+ * @param <T> the element type
+ */
+public class Corpus<T extends Comparable<T>> implements Comparable<Corpus<T>> {
+  public static final int LIMIT = 10;
+  private static int counter;
+  private final List<T> items = new ArrayList<>();
+  protected String name;
+  int shared;
+
+  /**
+   * Creates a corpus.
+   *
+   * @param name what it is called
+   */
+  public Corpus(String name) {
+    this.name = name;
+  }
+
+  enum Color {
+    RED, GREEN, BLUE;
+
+    Color next() {
+      return values()[(ordinal() + 1) % values().length];
+    }
+  }
+
+  record Point(int x, int y) {
+    Point {
+      if (x < 0) throw new IllegalArgumentException("x");
+    }
+
+    double norm() {
+      return Math.sqrt(x * x + y * y);
+    }
+  }
+
+  sealed interface Shape permits Circle, Square {}
+
+  record Circle(double radius) implements Shape {}
+
+  record Square(double side) implements Shape {}
+
+  interface Visitor<R> {
+    R visit(Shape shape);
+
+    default R twice(Shape shape) {
+      visit(shape);
+      return visit(shape);
+    }
+  }
+
+  static abstract class Base {
+    abstract void run();
+
+    @Override
+    public boolean equals(Object other) {
+      return other == this;
+    }
+  }
+
+  @interface Marker {
+    String value() default "";
+  }
+
+  boolean sameName(String other) {
+    if (name == "x") {
+      return true;
+    }
+    return name == other || other.equals(name);
+  }
+
+  int sum(List<Integer> values) {
+    int total = 0;
+    for (int i = 0; i < values.size(); i++) {
+      total += values.get(i);
+    }
+    for (Integer value : values) {
+      total += value;
+    }
+    while (total > 100) {
+      total--;
+    }
+    do {
+      total++;
+    } while (total < 0);
+    return total;
+  }
+
+  String describe(Object value) {
+    if (value instanceof String text) {
+      return text;
+    }
+    return String.valueOf(value);
+  }
+
+  double area(Shape shape) {
+    return switch (shape) {
+      case Circle c -> Math.PI * c.radius() * c.radius();
+      case Square s -> s.side() * s.side();
+    };
+  }
+
+  String label(Color color) {
+    return switch (color) {
+      case RED -> "r";
+      case GREEN -> "g";
+      default -> "b";
+    };
+  }
+
+  int legacySwitch(int n) {
+    switch (n) {
+      case 1:
+        return 1;
+      case 2:
+        return 2;
+      default:
+        return 0;
+    }
+  }
+
+  List<String> upper(List<String> in) {
+    return in.stream().filter(s -> !s.isEmpty()).map(String::toUpperCase).collect(Collectors.toList());
+  }
+
+  Map<String, Integer> counts(List<String> words) {
+    Map<String, Integer> counts = new HashMap<>();
+    for (String word : words) {
+      counts.put(word, counts.getOrDefault(word, 0) + 1);
+    }
+    return counts;
+  }
+
+  Optional<T> first() {
+    return items.isEmpty() ? Optional.empty() : Optional.of(items.get(0));
+  }
+
+  void read() {
+    try {
+      if (name == null) {
+        throw new IOException("none");
+      }
+    } catch (IOException e) {
+      e.printStackTrace();
+    } finally {
+      counter++;
+    }
+  }
+
+  void resources() throws IOException {
+    try (StringReader reader = new StringReader(name)) {
+      reader.read();
+    }
+  }
+
+  void emptyCatch() {
+    try {
+      Thread.sleep(1);
+    } catch (InterruptedException e) {
+    }
+  }
+
+  <R> R apply(Function<? super T, ? extends R> function, T value) {
+    return function.apply(value);
+  }
+
+  static int next() {
+    return ++counter;
+  }
+
+  boolean pointless(boolean flag) {
+    return flag == true || !false;
+  }
+
+  boolean constant() {
+    int x = 1;
+    if (x == 1) {
+      return true;
+    }
+    return false;
+  }
+
+  String redundant(String text) {
+    String copy = (String) text;
+    int unused = 5;
+    return new String(copy);
+  }
+
+  String concatenation(int times) {
+    String result = "";
+    for (int i = 0; i < times; i++) {
+      result += i;
+    }
+    StringBuilder builder = new StringBuilder();
+    builder.append("a" + "b");
+    return result + builder;
+  }
+
+  @Deprecated
+  void old() {}
+
+  void caller() {
+    old();
+  }
+
+  @Marker("corpus")
+  @SuppressWarnings("unchecked")
+  List<T> raw() {
+    List list = new ArrayList();
+    return (List<T>) list;
+  }
+
+  Set<String> names() {
+    return Set.of(name);
+  }
+
+  @Override
+  public int compareTo(Corpus<T> other) {
+    return name.compareTo(other.name);
+  }
+
+  @Override
+  public String toString() {
+    return "Corpus " + name + items;
+  }
+
+  public static void main(String[] args) {
+    System.out.println(new Corpus<String>("corpus").describe(args));
+  }
+}

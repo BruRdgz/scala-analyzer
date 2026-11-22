@@ -286,7 +286,9 @@ class McpServerTest extends munit.FunSuite {
 
       val errors = call("diagnostics", """{"severity": "error"}""")
       assert(errors.text.startsWith(s"22 sources checked: 1 problem in 1 file.\n$shown:22:21  error:"), errors.text)
-      assert(call("diagnostics").text.startsWith("22 sources checked: 6 problems in 2 files.\n"))
+      // The fixture's Java source is checked too: the problems the Java plugin finds in it are counted apart.
+      val everything = call("diagnostics").text
+      assert(everything.startsWith(s"22 sources checked: ${6 + inJava(everything)} problems in "), everything)
 
       // The inspections only: the annotator's type mismatch is not among them.
       assertEquals(
@@ -297,13 +299,18 @@ class McpServerTest extends munit.FunSuite {
           s"$shown:23:15  warning: Private value 'unused' is never used [Unused declaration]",
           s"$shown:24:37  warning: Simplify boolean expression [Simplify boolean expression]",
         ).mkString("\n"))
-      // The Java source is not inspected.
-      assert(call("inspect").text.startsWith("21 sources inspected: 5 problems in 2 files.\n"))
+      // The Java source is inspected too.
+      val inspected = call("inspect").text
+      assert(inspected.startsWith(s"22 sources inspected: ${5 + inJava(inspected)} problems in "), inspected)
     } finally Files.writeString(counter, original)
 
     // The restoration is followed too: the error is gone, and what the fixture has itself remains.
     assertEquals(call("diagnostics", s"""{$file, "severity": "error"}"""),
       ToolAnswer(s"No problems at error level or above in $shown.", false))
-    assert(call("diagnostics").text.startsWith("22 sources checked: 3 problems in 2 files.\n"))
+    val remaining = call("diagnostics").text
+    assert(remaining.startsWith(s"22 sources checked: ${3 + inJava(remaining)} problems in "), remaining)
   }
+
+  /** The problems of a report over the whole project that are in a Java source. */
+  private def inJava(report: String): Int = report.linesIterator.count(_.startsWith("core/src/main/java/"))
 }

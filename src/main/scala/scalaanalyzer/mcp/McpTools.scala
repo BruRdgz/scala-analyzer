@@ -242,7 +242,7 @@ private[mcp] object McpTools {
       "annotator and inspections (type mismatches, unresolved names, unused code and the like) and, for Scala 3 " +
       "sources, the compiler's diagnostics of the current text. Scala 2 compiler errors come only from a build " +
       "compile, which this server does not run, so Scala 2 and Java sources are reported by the plugin's own " +
-      "analysis (for Java, without javac). Each problem is a line `path:line:column  severity: message [source, " +
+      "analysis (for Java, its errors and default inspections, without javac). Each problem is a line `path:line:column  severity: message [source, " +
       "inspection name]`. Without `file`, every source is read, which can take minutes on a large project: prefer " +
       "`file` after editing one. Example: {\"file\": \"src/main/scala/example/Counter.scala\", \"severity\": \"error\"}.",
     inputSchema = schema(s"""{
@@ -261,10 +261,10 @@ private[mcp] object McpTools {
   val Inspect: Tool = Tool(
     name = "inspect",
     title = "Inspect code",
-    description = "Runs the IDE's Inspect Code over a Scala source, or over every Scala source of the project except " +
-      "the generated ones: the selected inspections only, such as unused symbols, redundant code and possible " +
-      "simplifications. It does not run the annotator or the compiler, and does not cover Java: `diagnostics` " +
-      "reports those. Each problem is a line `path:line:column  severity: message [inspection name]`. Without " +
+    description = "Runs the IDE's Inspect Code over a Scala or Java source, or over every Scala and Java source of " +
+      "the project except the generated ones: the selected inspections only, such as unused symbols, redundant code " +
+      "and possible simplifications. It does not run the annotator or the compiler: `diagnostics` reports those. " +
+      "Each problem is a line `path:line:column  severity: message [inspection name]`. Without " +
       "`file`, every source is read, which can take minutes on a large project: prefer `file` after editing one. " +
       "Example: {\"file\": \"src/main/scala/example/Counter.scala\"}.",
     inputSchema = schema(s"""{
@@ -272,7 +272,7 @@ private[mcp] object McpTools {
       "properties": {
         "file": {
           "type": "string",
-          "description": "Scala source, relative to the workspace root or absolute. Without it, every Scala source of the project."
+          "description": "Scala or Java source, relative to the workspace root or absolute. Without it, every Scala and Java source of the project."
         },$ProblemOptions
       },
       "additionalProperties": false

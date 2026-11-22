@@ -11,6 +11,7 @@ import com.intellij.openapi.fileTypes.FileTypeRegistry
 import com.intellij.openapi.module.Module
 import com.intellij.openapi.progress.ProcessCanceledException
 import com.intellij.openapi.project.Project
+import com.intellij.openapi.roots.LanguageLevelModuleExtension
 import com.intellij.openapi.util.{Key, TextRange, UserDataHolderBase}
 import com.intellij.openapi.util.text.StringUtil
 import com.intellij.openapi.vfs.VirtualFile
@@ -77,7 +78,8 @@ final case class HostConfig(
  * @param modules         module metadata that the project, file-index, module and scope services answer from
  * @param psiChanged      invalidates the PSI caches after the host changes PSI or the mounted libraries
  * @param actions         code actions built from the plugin's intention and surround descriptors
- * @param inspections     the host's selected native inspections, built from the plugin's local inspection descriptors
+ * @param inspections     the host's selected native inspections, built from the local inspection descriptors of the
+ *                        Scala plugin and of the Java plugin
  */
 final class ScalaPsiHost private[scalaanalyzer] (
   val stateDir: Path,
@@ -648,6 +650,14 @@ final class ScalaPsiHost private[scalaanalyzer] (
       case ("ModuleRootManager.getContentEntries", _) => Array.empty[com.intellij.openapi.roots.ContentEntry]
       // The modules this one depends on; the plugin looks among them for sbt's shared-source modules, which the host has none of.
       case ("ModuleRootManager.getDependencies", _) => hostModule.spec.dependsOn.flatMap(modules.byId).map(_.module).toArray
+      // The module's own Java language level, which the build's javac options give. A module whose build gives none has
+      // no such extension: it uses the project's default level, as the IDE's module of a project default does.
+      case ("ModuleRootManager.getModuleExtension", Array(c: Class[?])) if c == classOf[LanguageLevelModuleExtension] =>
+        hostModule.javaLanguageLevel.map { level =>
+          tableProxy(classOf[LanguageLevelModuleExtension], "LanguageLevelModuleExtension") {
+            case ("getLanguageLevel", _) => level
+          }
+        }.orNull
     })
 
     lazy val module: Module = tableProxy(classOf[Module], "Module") {
@@ -701,10 +711,10 @@ final class ScalaPsiHost private[scalaanalyzer] (
   /**
    * Text actions for the selected range, preserving their annotator fixes and previewing on file copies. A Java file
    * has its intentions and the fixes of its errors, which are computed for the request. For a Scala file, until the
-   * file's general diagnostics are computed, only what the range touches is analyzed, and until its inspections are,
-   * their fixes are left out: the first request on an opened file does not wait for the whole file's analysis, and
-   * editors ask again when the diagnostics arrive. A caller that already shows inspection problems in the range asks
-   * for their fixes with `withInspections`, since the editor will not ask again.
+   * file's general diagnostics are computed, only what the range touches is analyzed. For either language, until the
+   * file's inspections are computed, their fixes are left out: the first request on an opened file does not wait for
+   * the whole file's analysis, and editors ask again when the diagnostics arrive. A caller that already shows
+   * inspection problems in the range asks for their fixes with `withInspections`, since the editor will not ask again.
    *
    * Implement members is offered but not previewed: its preview occupies the host's single dispatch thread, so it runs
    * only when the caller asks for it ([[previewImplementMembers]] or [[implementMembers]]). The extractions are offered
@@ -721,14 +731,14 @@ final class ScalaPsiHost private[scalaanalyzer] (
     file match {
       case scalaFile: ScalaFile =>
         val general = upToDate(scalaFile, generalCache).getOrElse(problemsAround(scalaFile, range))
-        val inspected = upToDate(scalaFile, inspectionCache)
-          .getOrElse(if (withInspections) inspectionDiagnostics(scalaFile) else Seq.empty)
-        val problems = general ++ inspected
+        val problems = general ++ inspectedForActions(scalaFile, withInspections)
 
         CodeActions.Offered(actions.collect(scalaFile, range, problems),
           actions.implementMembersOffer(scalaFile, range, problems), actions.extractionOffers(scalaFile, range))
       case javaFile: PsiJavaFile =>
-        CodeActions.Offered(actions.collect(javaFile, range, javaProblemsAround(javaFile, range)), None, Seq.empty)
+        val problems = javaProblemsAround(javaFile, range) ++ inspectedForActions(javaFile, withInspections)
+
+        CodeActions.Offered(actions.collect(javaFile, range, problems), None, Seq.empty)
       case _ => CodeActions.Offered(actions.collect(file, range, Seq.empty), None, Seq.empty)
     }
   }
@@ -911,10 +921,10 @@ final class ScalaPsiHost private[scalaanalyzer] (
    * Collects the problems of the host's selected native inspections, remembering them for
    * [[previousInspectionDiagnostics]]. The rules of [[diagnostics]] apply.
    *
-   * @param file Scala source to inspect under cancellable read access
-   * @return the part of [[diagnostics]] that is an inspection's
+   * @param file Scala or Java source to inspect under cancellable read access
+   * @return the part of [[diagnostics]] that is an inspection's; a Java source's errors are not among them
    */
-  def inspectionDiagnostics(file: ScalaFile): Seq[Diagnostic] = HostLock.query(cached(file, inspectionCache) {
+  def inspectionDiagnostics(file: PsiFile): Seq[Diagnostic] = HostLock.query(cached(file, inspectionCache) {
     val found = inspections.diagnostics(file)
     remember(file, found)
     found
@@ -925,10 +935,10 @@ final class ScalaPsiHost private[scalaanalyzer] (
    * highlights until its next pass ends: the last ones computed, at the ranges later edits moved them to. Their fixes
    * are left out, since they edit the old text, as are the problems whose text was removed.
    *
-   * @param file Scala source being analyzed, under cancellable read access
+   * @param file Scala or Java source being analyzed, under cancellable read access
    * @return `None` when the inspection problems of the current PSI are computed already; empty before the first time
    */
-  def previousInspectionDiagnostics(file: ScalaFile): Option[Seq[Diagnostic]] = HostLock.query {
+  def previousInspectionDiagnostics(file: PsiFile): Option[Seq[Diagnostic]] = HostLock.query {
     if (upToDate(file, inspectionCache).isDefined) None
     else Some(Option(file.getUserData(lastInspections)).toSeq.flatten.collect {
       case (marker, problem) if marker.isValid => problem.copy(range = marker.getTextRange)
@@ -941,10 +951,10 @@ final class ScalaPsiHost private[scalaanalyzer] (
    * Syntax errors and annotator problems are left out, and nothing is cached: a project-wide run inspects each file
    * once. The rules of [[diagnostics]] for inspections apply.
    *
-   * @param file Scala source to inspect under cancellable read access
+   * @param file Scala or Java source to inspect under cancellable read access
    * @return the inspection problems and their plugin fixes with UTF-16 source ranges
    */
-  def inspect(file: ScalaFile): Seq[Diagnostic] = HostLock.query(inspections.diagnostics(file))
+  def inspect(file: PsiFile): Seq[Diagnostic] = HostLock.query(inspections.diagnostics(file))
 
   /**
    * Describes every inspection that [[inspect]] may report, as the IDE names and groups it.
@@ -953,18 +963,22 @@ final class ScalaPsiHost private[scalaanalyzer] (
    */
   def inspectionDescriptions: Seq[InspectionDescription] = inspections.descriptions
 
+  /** The inspection problems that code actions offer fixes for: the computed ones, or all of them when asked for. */
+  private def inspectedForActions(file: PsiFile, withInspections: Boolean): Seq[Diagnostic] =
+    upToDate(file, inspectionCache).getOrElse(if (withInspections) inspectionDiagnostics(file) else Seq.empty)
+
   /** `compute`'s result for a physical `file` until PSI changes; that of a file with no buffer is computed each time. */
-  private def cached(file: ScalaFile, key: Key[CachedValue[Seq[Diagnostic]]])(compute: => Seq[Diagnostic]): Seq[Diagnostic] =
+  private def cached(file: PsiFile, key: Key[CachedValue[Seq[Diagnostic]]])(compute: => Seq[Diagnostic]): Seq[Diagnostic] =
     if (!file.isPhysical) compute
     else CachedValuesManager.getManager(project).getCachedValue(file, key, () =>
       CachedValueProvider.Result.create(compute, PsiModificationTracker.MODIFICATION_COUNT), false)
 
   /** What `key` holds for `file` while PSI has not changed since it was computed. */
-  private def upToDate(file: ScalaFile, key: Key[CachedValue[Seq[Diagnostic]]]): Option[Seq[Diagnostic]] =
+  private def upToDate(file: PsiFile, key: Key[CachedValue[Seq[Diagnostic]]]): Option[Seq[Diagnostic]] =
     Option(file.getUserData(key)).filter(_.hasUpToDateValue).map(_.getValue)
 
   /** Replaces the inspection problems remembered for `file` with `found`, marking their ranges in its document. */
-  private def remember(file: ScalaFile, found: Seq[Diagnostic]): Unit =
+  private def remember(file: PsiFile, found: Seq[Diagnostic]): Unit =
     Option(PsiDocumentManager.getInstance(project).getDocument(file)).foreach { document =>
       val marked = found.map(problem => document.createRangeMarker(problem.range) -> problem.copy(fixes = Seq.empty))
       // Two computations at once may each replace the other's without disposing them; the document holds markers

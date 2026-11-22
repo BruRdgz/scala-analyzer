@@ -240,16 +240,29 @@ milestones, not one release; each wave ends with the full suite and its own comm
     over `bloop bsp`'s Unix socket, and runs the step again when a build file changes). The JDK that runs the build
     tool is `SCALA_ANALYZER_BUILD_JAVA_HOME` (VS Code: `scalaAnalyzer.buildJavaHome`).
   - Each module's Java language level comes from its javac options; parser and stub builder read the same level.
-  - Wave B, read features: Extend Selection, formatting, signature help and parameter-name hints for Java files.
+  - Wave B, read features: Extend Selection, formatting, signature help, parameter-name hints and semantic tokens.
+  - Wave C so far: organize imports; rename and references on Java documents (a Java interface method renames its
+    Java and Scala overriders); the Java plugin's intentions (119 of 135) and error quick fixes (from java-backend's
+    JavaPlugin.xml); the IDE's default Java local inspections (432 enabled by default, from java-backend's
+    descriptors, minus `Inspections.JavaExclusions`, each excluded with its reason by the audit in
+    `JavaInspectionsTest`; 432 run over its corpus in about 1 s).
 - Decisions:
   - Bloop for both Maven and Gradle (spike E0): Microsoft's build-server-for-gradle publishes no artifact, reports no
     compile diagnostics and has no test or run environment. Bloop answers no `workspace/reload` and has no stdio mode.
   - Java references leave out text occurrences, as the plugin's Scala options do.
   - sbt announces Scala only and never answers `buildTarget/javacOptions`: it is not asked, and the Java sources of
     sbt modules stay at the highest language level.
-- Next: semantic tokens (in progress); then wave C, editing (rename across Java overrides, organize imports, quick
-  fixes and intentions, override/implement, a selected set of Java inspections, and a spike of a descriptor-driven
-  loader for the Java plugin's inspections); then wave D, main and JUnit 4/5 lenses and runs.
+- Open questions from wave C:
+  - Nine data-flow inspections (DataFlowIssue, ConstantExpression, PointlessBooleanExpression, ObviousNullCheck...)
+    are excluded: they cache through `JavaLibraryModificationTracker`, a final project service that subscribes to the
+    IDE's message bus, which the host was designed without. ConstantValue, of the same engine, loads but reports
+    nothing on `int x = 1; if (x == 1)`; to look into with them.
+  - NullableProblems is excluded, and data flow sees no nullability annotations: the host's NullableNotNullManager
+    answers none. The real manager plus the Java plugin's annotation-package supports would change how Scala sees
+    Java's `@Nullable` too, so it needs the type-inference oracle first.
+  - Java error fixes that change the IDE's project model (add a library or module to a classpath) are not offered.
+- Next: override/implement for Java (needs a Velocity subset in HostFileTemplates); then wave D, main and JUnit 4/5
+  lenses and runs.
 - Candidates taken from JetBrains' own LSP extension, "Java and Kotlin by IntelliJ IDEA"
   ([docs](https://www.jetbrains.com/help/intellij-vscode/About-instance.html)), which runs the IDE itself and is
   closed source, so only its documented behavior is a reference:
