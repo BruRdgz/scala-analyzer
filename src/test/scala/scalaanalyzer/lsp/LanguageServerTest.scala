@@ -664,7 +664,9 @@ class LanguageServerTest extends munit.FunSuite {
 
     val invalid = Seq(
       "no kind" -> command("target" -> "file:///project#app/Compile", "mainClass" -> "app.Main"),
-      "an unknown kind" -> command("kind" -> "attach", "target" -> "file:///project#app/Compile", "mainClass" -> "app.Main"),
+      "an unknown kind" -> command("kind" -> "launch", "target" -> "file:///project#app/Compile", "mainClass" -> "app.Main"),
+      "an attach kind without a port" -> command("kind" -> "attach", "target" -> "file:///project#app/Compile", "hostName" -> "localhost"),
+      "an attach kind with a port that is not a number" -> command("kind" -> "attach", "target" -> "file:///project#app/Compile", "hostName" -> "localhost", "port" -> "5005"),
       "a main kind with a test's members" -> command("kind" -> "main", "target" -> "file:///project#core/Test", "suite" -> "core.ExampleMUnit"),
       "a test kind without a framework" -> command("kind" -> "test", "target" -> "file:///project#core/Test", "suite" -> "core.ExampleMUnit"),
     )

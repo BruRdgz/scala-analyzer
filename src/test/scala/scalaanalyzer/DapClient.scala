@@ -65,15 +65,26 @@ final class DapClient(uri: URI) extends munit.Assertions with AutoCloseable {
    *
    * @return the response to `launch`, which [[run]] waits for
    */
-  def start(): CompletableFuture[Void] = {
+  def start(): CompletableFuture[Void] = begin(server.launch(java.util.Map.of("noDebug", false)))
+
+  /**
+   * As [[start]], for a program that already runs: sends `attach` to its JDWP agent, as an editor does.
+   *
+   * @return the response to `attach`, which [[run]] waits for
+   */
+  def startAttached(hostName: String, port: Int): CompletableFuture[Void] =
+    begin(server.attach(java.util.Map.of("hostName", hostName, "port", Int.box(port))))
+
+  /** Initializes the adapter, sends the request that starts the session, and waits until breakpoints are accepted. */
+  private def begin(request: => CompletableFuture[Void]): CompletableFuture[Void] = {
     val initialize = new InitializeRequestArguments
     initialize.setAdapterID("scala-analyzer")
     initialize.setLinesStartAt1(true)
     initialize.setColumnsStartAt1(true)
     await("initialize", server.initialize(initialize))
-    val launched = server.launch(java.util.Map.of("noDebug", false))
+    val started = request
     await("initialized event", ready)
-    launched
+    started
   }
 
   /** Puts a breakpoint at a line of a source and checks that the adapter verified it. */
@@ -105,6 +116,14 @@ final class DapClient(uri: URI) extends munit.Assertions with AutoCloseable {
     val arguments = new ContinueArguments
     arguments.setThreadId(stop.getThreadId)
     await("continue", server.continue_(arguments))
+  }
+
+  /** Steps into the call of the stopped line and waits for the program to stop again. */
+  def stepIn(stop: StoppedEventArguments): StoppedEventArguments = {
+    val arguments = new StepInArguments
+    arguments.setThreadId(stop.getThreadId)
+    await("stepIn", server.stepIn(arguments))
+    nextStop()
   }
 
   /**

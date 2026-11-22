@@ -1995,14 +1995,17 @@ final class ScalaLanguageServer(
    */
   private def executeDebug(params: ExecuteCommandParams): CompletableFuture[AnyRef] = debugSelection(params) match {
     case None => CompletableFuture.failedFuture(requestError(ResponseErrorCode.InvalidParams,
-      s"$StartDebugSession: expected one object with kind (main or test) and the members of $RunMain or $RunTest"))
+      s"$StartDebugSession: expected one object with kind (main, test or attach) and the members of $RunMain or $RunTest, or target, hostName and port"))
     case Some(selection) =>
       answered[AnyRef]("debug", builds.execute) { s =>
         val changed: Set[Path] => Unit = _.foreach(scheduleDiagnostics)
         val uri =
           try withProgress("scala-analyzer: starting the debug session") { _ =>
-            selection.fold(main => s.startMainDebugSession(main.target, main.mainClass, changed),
-              s.startTestDebugSession(_, changed))
+            selection match {
+              case DebugRequest.Main(main) => s.startMainDebugSession(main.target, main.mainClass, changed)
+              case DebugRequest.Test(test) => s.startTestDebugSession(test, changed)
+              case DebugRequest.Attach(target, hostName, port) => s.startAttachDebugSession(target, hostName, port, changed)
+            }
           } catch {
             // A target that does not compile, or a runner the classpath cannot start: the user's to fix, as for a run.
             case e: IllegalStateException => throw requestError(ResponseErrorCode.RequestFailed, e.getMessage)
@@ -2013,14 +2016,20 @@ final class ScalaLanguageServer(
       }
   }
 
-  /** Reads the debug request: a main class or a test selection, by its `kind`. */
-  private def debugSelection(params: ExecuteCommandParams): Option[Either[TestRun.MainSelection, TestRun.Selection]] =
+  /** Reads the debug request: a main class, a test selection, or a running JVM to attach to, by its `kind`. */
+  private def debugSelection(params: ExecuteCommandParams): Option[DebugRequest] =
     for {
       json <- objectArgument(params)
       kind <- stringMember(json, "kind")
       selection <- kind match {
-        case "main" => mainSelection(json).map(Left(_))
-        case "test" => testSelection(json).map(Right(_))
+        case "main" => mainSelection(json).map(DebugRequest.Main(_))
+        case "test" => testSelection(json).map(DebugRequest.Test(_))
+        case "attach" =>
+          for {
+            target <- stringMember(json, "target")
+            hostName <- stringMember(json, "hostName")
+            port <- intMember(json, "port").filter(port => port > 0 && port <= MaxPort)
+          } yield DebugRequest.Attach(target, hostName, port)
         case _ => None
       }
     } yield selection
@@ -2215,9 +2224,20 @@ private val RunMain = "scalaAnalyzer.runMain"
 
 /**
  * The command that starts a debug session. Its argument is the object of [[RunMain]] or [[RunTest]] with a `kind`
- * member, `main` or `test`; it answers `{"uri": "tcp://127.0.0.1:port"}`, the address a DAP client connects to.
+ * member, `main` or `test`, or `{"kind": "attach", "target", "hostName", "port"}` for a JVM that already runs with a
+ * JDWP agent listening there; it answers `{"uri": "tcp://127.0.0.1:port"}`, the address a DAP client connects to.
  */
 private val StartDebugSession = "scalaAnalyzer.startDebugSession"
+
+/** The highest TCP port number. */
+private val MaxPort = 65535
+
+/** What a [[StartDebugSession]] request asks to debug. */
+private enum DebugRequest {
+  case Main(selection: TestRun.MainSelection)
+  case Test(selection: TestRun.Selection)
+  case Attach(target: String, hostName: String, port: Int)
+}
 
 /**
  * The command of the debug code lenses. The server does not execute it and does not list it: the client contributes

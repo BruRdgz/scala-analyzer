@@ -16,7 +16,7 @@ import scalaanalyzer.language.{
 }
 import scalaanalyzer.platform.{HostLock, HostLog}
 
-import java.net.URI
+import java.net.{InetSocketAddress, URI}
 import java.nio.file.{Files, Path}
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicReference
@@ -1045,7 +1045,7 @@ final class ProjectSession private (
     val main = TestRun.MainSelection(target, mainClass)
     val environment = prepareMainRun(target, changed)
 
-    debugSession(target, mainClass, TestRun.mainCommand(main, environment), environment)
+    debugSession(target, mainClass, DebugAdapter.Launch(TestRun.mainCommand(main, environment)), environment)
   }
 
   /**
@@ -1065,15 +1065,37 @@ final class ProjectSession private (
   def startTestDebugSession(selection: TestRun.Selection, changed: Set[Path] => Unit): URI = buildLock.synchronized {
     val environment = prepareTestRun(selection.target, changed)
 
-    debugSession(selection.target, selection.suite, TestRun.testCommand(selection, environment), environment)
+    debugSession(selection.target, selection.suite, DebugAdapter.Launch(TestRun.testCommand(selection, environment)), environment)
   }
 
-  /** Starts the adapter for `command` in the environment of `target`, and keeps it until its session ends. */
-  private def debugSession(target: String, subject: String, command: Seq[String], environment: TestRun.Environment): URI = {
+  /**
+   * Compiles a target and starts a debug session that attaches to a JVM that already runs, listening with JDWP: a DAP
+   * server described with the target's modules, libraries and sources, as for a launched program, but which starts
+   * nothing. Compiling is needed all the same: the source of a frame is found through the target's class directories.
+   *
+   * The session runs until its client disconnects or the program exits, or until this session closes; it never ends
+   * the program. It does not share `TestRun`'s single active run.
+   *
+   * @param target BSP target whose sources the running program was built from
+   * @param hostName host where the program's JDWP agent listens
+   * @param port port where the program's JDWP agent listens
+   * @param changed receives the sources that may need their diagnostics republished, as in `prepareMainRun`
+   * @return the `tcp://host:port` address of the DAP server
+   * @throws IllegalStateException when the target does not compile, or the session is closed or unavailable
+   */
+  def startAttachDebugSession(target: String, hostName: String, port: Int, changed: Set[Path] => Unit): URI =
+    buildLock.synchronized {
+      val environment = prepareMainRun(target, changed)
+
+      debugSession(target, s"$hostName:$port", DebugAdapter.Attach(new InetSocketAddress(hostName, port)), environment)
+    }
+
+  /** Starts the adapter for `program` in the environment of `target`, and keeps it until its session ends. */
+  private def debugSession(target: String, subject: String, program: DebugAdapter.Program, environment: TestRun.Environment): URI = {
     val module = imported.find(_.spec.stableId == target)
       .getOrElse(throw new IllegalStateException(s"$target is not an imported target"))
-    val adapter = DebugAdapter.start(subject, command, module, imported, environment, build.librarySources,
-      host.stateDir.resolve("debug-tools"))
+    val adapter = DebugAdapter.start(subject, program, module, imported, environment, build.librarySources,
+      host.stateDir.resolve("debug-tools"), host.stateDir.resolve("debug-sources"))
 
     debugAdapters.add(adapter)
     adapter.finished.onComplete(_ => debugAdapters.remove(adapter))(using ExecutionContext.parasitic)

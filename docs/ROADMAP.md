@@ -339,7 +339,16 @@ Debugging over DAP, for Scala and Java, in sbt, Maven and Gradle projects alike.
      command `scalaAnalyzer.debug` of the lenses, and a debugger type `scala-analyzer` in the VS Code extension whose
      descriptor factory calls the server command. Left for later: a `DebugConfigurationProvider` that discovers main
      classes and tests (`launch.json` is written by hand today), and the `args`, `jvmOptions` and `env` attributes.
-  3. Attach to a running JVM; library frames shown from the sources the host already materializes.
+  3. Done: attach to a running JVM, and library frames. `scalaAnalyzer.startDebugSession` takes
+     `{"kind": "attach", "target", "hostName", "port"}` (`ProjectSession.startAttachDebugSession`): the target is
+     compiled and described as for a launch, and the adapter's debuggee reports the address instead of starting
+     anything (`DebugAdapter.Attach`); the client's DAP `attach` request, with the same host and port, is handled by the
+     adapter's java-debug. The adapter's stack frame for a library carries a `jar:` URI as `path` and no
+     `sourceReference` (java-debug only converts `file:` URIs), which VS Code cannot open and the `source` request
+     cannot answer. Rather than a DAP proxy as Metals has, the host unpacks each library's source archive once into
+     `debug-sources/` and gives the adapter that directory, so frames are files. Costs disk (the unpacked sources of
+     every library with sources, on the first session) and a pause on that first session. VS Code: `attach`
+     attributes, a configuration provider that defaults `hostName`, snippets.
   4. The host's Scala knowledge: breakpoints verified and moved to valid lines by the plugin's rule, lambda
      breakpoints (DAP `breakpointLocations`), hot code replace after a compile.
 - Later, if useful: Bloop's `debugSession/start` as an alternative where the server announces it.

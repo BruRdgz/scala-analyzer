@@ -7,7 +7,7 @@ import scalaanalyzer.workspace.ProjectSession
 
 import com.intellij.psi.PsiManager
 
-import java.nio.file.Path
+import java.nio.file.{Files, Path}
 
 import scala.concurrent.duration.*
 import scala.jdk.CollectionConverters.*
@@ -116,6 +116,86 @@ class DebugAdapterTest extends munit.FunSuite {
       releaseModules()
     }
   }
+
+  test("debugs a library frame: a step into println shows a file with the Scala library's source") {
+    val session = ProjectSession.open(TestHost.host, fixture)
+    try {
+      val uri = session.startMainDebugSession(fixture.toFile.toURI.toString + "#app/Compile", "app.Main", _ => ())
+      Using.resource(new DapClient(uri)) { client =>
+        import client.{await, server}
+
+        val launched = client.start()
+        client.breakAt(main, printLine)
+        client.run(launched)
+
+        val stop = client.stepIn(client.nextStop())
+        val traceArguments = new StackTraceArguments
+        traceArguments.setThreadId(stop.getThreadId)
+        val top = await("stackTrace", server.stackTrace(traceArguments)).getStackFrames.head
+        val source = top.getSource
+        // The adapter answers no `sourceReference` for a library: the frame's source is a file the host unpacked from the
+        // sources jar, which an editor opens as any other.
+        assertEquals(source.getSourceReference.intValue, 0)
+        assertEquals(source.getName, "Predef.scala")
+        val content = Files.readString(Path.of(source.getPath))
+        assert(content.contains("def println(x: Any)"), content.take(500))
+
+        client.resume(stop)
+        client.awaitEnd()
+      }
+    } finally {
+      session.close()
+      releaseModules()
+    }
+  }
+
+  test("attaches to a running JVM: a breakpoint stops it, and ending the session lets it exit") {
+    val session = ProjectSession.open(TestHost.host, fixture)
+    val target = fixture.toFile.toURI.toString + "#app/Compile"
+    var debuggee: Process = null
+    try {
+      val environment = session.prepareMainRun(target, _ => ())
+      val command = TestRun.mainCommand(TestRun.MainSelection(target, "app.Main"), environment)
+      val builder = new ProcessBuilder((command.head +: Agent +: command.tail).asJava)
+        .directory(Path.of(java.net.URI.create(environment.item.getWorkingDirectory)).toFile)
+        .redirectErrorStream(true)
+      builder.environment().putAll(environment.item.getEnvironmentVariables)
+      debuggee = builder.start()
+      val lines = new java.io.BufferedReader(new java.io.InputStreamReader(debuggee.getInputStream))
+      // The agent announces its port before anything else; a JVM that failed to start prints its error instead.
+      val Listening = """Listening for transport dt_socket at address: (\d+)""".r
+      val port = Iterator.continually(lines.readLine()).takeWhile(_ != null).collectFirst { case Listening(port) => port.toInt }
+        .getOrElse(fail("the JVM did not announce its JDWP port"))
+
+      val uri = session.startAttachDebugSession(target, "127.0.0.1", port, _ => ())
+      Using.resource(new DapClient(uri)) { client =>
+        val attached = client.startAttached("127.0.0.1", port)
+        client.breakAt(main, printLine)
+        client.run(attached)
+
+        val stop = client.nextStop()
+        assertEquals(stop.getReason, "breakpoint")
+        val traceArguments = new StackTraceArguments
+        traceArguments.setThreadId(stop.getThreadId)
+        val top = client.await("stackTrace", client.server.stackTrace(traceArguments)).getStackFrames.head
+        assertEquals(Path.of(top.getSource.getPath), main)
+        assertEquals(top.getLine.intValue, printLine)
+
+        client.resume(stop)
+        val end = client.awaitEnd()
+        assert(Set("terminated", "exited 0")(end), end)
+      }
+      assert(debuggee.waitFor(1, java.util.concurrent.TimeUnit.MINUTES), "the program did not exit")
+      assertEquals(debuggee.exitValue, 0)
+    } finally {
+      if (debuggee != null) debuggee.destroyForcibly()
+      session.close()
+      releaseModules()
+    }
+  }
+
+  /** The JDWP agent of a program the test starts itself: it waits for the debugger and picks a free port. */
+  private val Agent = "-agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=127.0.0.1:0"
 
   /** Releases the fixture's modules from the process-wide host, which other tests of the group open. */
   private def releaseModules(): Unit = {

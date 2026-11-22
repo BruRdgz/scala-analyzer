@@ -7,7 +7,13 @@
   adapter, which the server runs: breakpoints, stepping, variables and expression evaluation in Scala and Java. The
   server command `scalaAnalyzer.startDebugSession` starts a session and answers with the adapter's address, for any
   DAP client; the VS Code extension adds the `scala-analyzer` debugger and its launch configurations (see "Debugging"
-  in the README). No attach yet.
+  in the README).
+- A debug session can attach to a JVM that already runs with a JDWP agent: `scalaAnalyzer.startDebugSession` takes
+  `{"kind": "attach", "target", "hostName", "port"}`, and the VS Code debugger has an `attach` configuration with a
+  snippet. The target is compiled and described as for a launch, so the breakpoints and frames find their sources.
+- A frame in a library shows the library's source when a source archive is known: the server unpacks the archive into
+  `debug-sources/` under its state directory, once, and the debug adapter reports a file of it. (The adapter's own
+  answer is a `jar:` URI that editors cannot open.)
 - JUnit 4 and 5 test classes and methods in Java files have run lenses, found as the IDE's run markers find them and
   run through the IDE's JUnit runner. JUnit 5 runs need `junit-platform-launcher` on the test classpath (see "Running
   tests" in the README). The JUnit plugin's frameworks also make Go to Test know JUnit classes.

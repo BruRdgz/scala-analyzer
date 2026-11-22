@@ -247,17 +247,31 @@ async function debug({ kind, target, mainClass, framework, suite, testName }) {
 }
 
 /**
- * The server's debug request for a launch configuration: a main class, or a test selection when it has a `testClass`.
- * @param {vscode.DebugConfiguration} configuration the session's launch configuration
+ * The server's debug request for a configuration: a running JVM to attach to for an `attach` configuration; otherwise a
+ * main class, or a test selection when it has a `testClass`.
+ * @param {vscode.DebugConfiguration} configuration the session's configuration
  */
-function debugRequest({ buildTarget, mainClass, testClass, framework, testName }) {
+function debugRequest({ request, buildTarget, hostName, port, mainClass, testClass, framework, testName }) {
+  if (request === 'attach') return { kind: 'attach', target: buildTarget, hostName, port: Number(port) };
   if (mainClass) return { kind: 'main', target: buildTarget, mainClass };
   if (testClass) return { kind: 'test', target: buildTarget, framework, suite: testClass, testName };
   throw new Error('a scala-analyzer launch configuration needs a mainClass or a testClass');
 }
 
 /**
- * Starts the debuggee in the server, which compiles its target first, and connects the editor to the session's DAP server.
+ * Fills in what an attach configuration leaves out: VS Code sends the configuration as written, without the defaults of
+ * the schema in package.json, and the debug adapter needs the host to attach to.
+ * @type {vscode.DebugConfigurationProvider}
+ */
+const debugConfigurationProvider = {
+  resolveDebugConfiguration(_folder, configuration) {
+    return configuration.request === 'attach' ? { hostName: 'localhost', ...configuration } : configuration;
+  },
+};
+
+/**
+ * Starts the debuggee in the server, or has it attach to the running one; it compiles the target first, and the editor
+ * connects to the session's DAP server.
  * @type {vscode.DebugAdapterDescriptorFactory}
  */
 const debugAdapterFactory = {
@@ -303,7 +317,9 @@ function registerCommands(context) {
   register('chooseMembersToOverride', needsServer(chooseMembersToOverride));
   register('toggleXRay', toggleXRay);
   register('debug', needsServer(debug));
-  context.subscriptions.push(vscode.debug.registerDebugAdapterDescriptorFactory(debugType, debugAdapterFactory));
+  context.subscriptions.push(
+    vscode.debug.registerDebugAdapterDescriptorFactory(debugType, debugAdapterFactory),
+    vscode.debug.registerDebugConfigurationProvider(debugType, debugConfigurationProvider));
   register('showStatus', needsServer(async () => {
     const report = await client.sendRequest('scalaAnalyzer/status');
     client.outputChannel.appendLine(`status: ${JSON.stringify(report, null, 2)}`);

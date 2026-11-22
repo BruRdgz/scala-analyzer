@@ -151,8 +151,66 @@
                 "description": "The test framework of testClass, which picks the runner."
               }
             }
+          },
+          "attach": {
+            "required": [
+              "buildTarget",
+              "port"
+            ],
+            "properties": {
+              "buildTarget": {
+                "type": "string",
+                "description": "The build target the running program was built from, as the server names it (file:///project#app/Compile). The server compiles it, as for a launch, to find the sources of the program's classes."
+              },
+              "hostName": {
+                "type": "string",
+                "default": "localhost",
+                "description": "The host where the program's JDWP agent listens."
+              },
+              "port": {
+                "type": "number",
+                "description": "The port where the program's JDWP agent listens (-agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=*:5005)."
+              }
+            }
           }
-        }
+        },
+        "configurationSnippets": [
+          {
+            "label": "Scala: debug a main class",
+            "description": "Launch a main class with the debugger.",
+            "body": {
+              "type": "scala-analyzer",
+              "request": "launch",
+              "name": "Debug ${2:app.Main}",
+              "buildTarget": "${1:file:///project#app/Compile}",
+              "mainClass": "${2:app.Main}"
+            }
+          },
+          {
+            "label": "Scala: debug a test suite",
+            "description": "Launch a test suite with the debugger.",
+            "body": {
+              "type": "scala-analyzer",
+              "request": "launch",
+              "name": "Debug ${2:core.ExampleSuite}",
+              "buildTarget": "${1:file:///project#core/Test}",
+              "testClass": "${2:core.ExampleSuite}",
+              "framework": "${3|munit,scalatest,specs2,utest,junit4,junit5|}"
+            }
+          },
+          {
+            "label": "Scala: attach to a running JVM",
+            "description": "Attach the debugger to a JVM started with a JDWP agent.",
+            "body": {
+              "type": "scala-analyzer",
+              "request": "attach",
+              "name": "Attach to ${2:localhost}:${3:5005}",
+              "buildTarget": "${1:file:///project#app/Compile}",
+              "hostName": "${2:localhost}",
+              "port": "^${3:5005}"
+            }
+          }
+        ]
       }
     ],
     "taskDefinitions": [
