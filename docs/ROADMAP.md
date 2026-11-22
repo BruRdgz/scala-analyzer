@@ -326,9 +326,11 @@ Debugging over DAP, for Scala and Java, in sbt, Maven and Gradle projects alike.
     knowledge can be reused: the lines a breakpoint can be put at (`ScalaLineBreakpointType.canPutAt`), the lambdas of
     a line (`ScalaPositionManager.positionsOnLine`, `lambdasOnLine`) and the JVM names of classes (`DebuggerUtil`).
 - Waves, each with its tests, the full suite and a commit:
-  1. Spike: in an integration test, the adapter embedded in the host debugs a fixture's `main`: a breakpoint is hit,
-     the stack and variables are read, an expression is evaluated. Confirms that the dependency loads beside the
-     plugin and the platform.
+  1. Done: in `DebugAdapterTest`, the adapter embedded in the host debugs the sbt fixture's `main`: a breakpoint is
+     hit, the stack and variables are read, expressions are evaluated, the program exits
+     (`ProjectSession.startMainDebugSession`, `build/DebugAdapter.scala`). The plugin's scalameta 4.5 jars are left off
+     the class path: the adapter's runtime evaluator needs scalameta 4.17, and the plugin uses scalameta only for its
+     legacy `scala.meta` macro annotations.
   2. Debug main classes and tests: a Debug code lens beside each Run lens (Scala and Java), a server command that
      starts a session and answers with the DAP address, and in VS Code a debugger type with a descriptor factory and
      launch configurations (`mainClass`, `testClass`, `buildTarget`, `args`, `jvmOptions`, `env`). A test session

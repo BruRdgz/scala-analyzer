@@ -5,8 +5,8 @@ import com.intellij.psi.PsiFile
 
 import scalaanalyzer.{HostModule, LineColumn, LineRange, ScalaPsiHost}
 import scalaanalyzer.build.{
-  BspImport, BuildConnection, CompileSpec, CompilerDiagnostic, DocumentCompiler, ImportedModule, ScalafmtFormatting,
-  TestRun,
+  BspImport, BuildConnection, CompileSpec, CompilerDiagnostic, DebugAdapter, DocumentCompiler, ImportedModule,
+  ScalafmtFormatting, TestRun,
 }
 import scalaanalyzer.language.{
   CodeActionResult, CompletionChoices, CompletionFollowUp, Extract, FileChanges, FileProblem, Fold, HierarchyCall,
@@ -16,11 +16,13 @@ import scalaanalyzer.language.{
 }
 import scalaanalyzer.platform.{HostLock, HostLog}
 
+import java.net.URI
 import java.nio.file.{Files, Path}
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.locks.ReentrantReadWriteLock
 
+import scala.concurrent.ExecutionContext
 import scala.util.Using
 
 /**
@@ -65,6 +67,8 @@ final class ProjectSession private (
   private val documentCompiler = new DocumentCompiler
   /** Formats whole Scala files; closed with the session. */
   private val scalafmt = new ScalafmtFormatting(host.stateDir.resolve("scalafmt"))
+  /** The debug sessions that have not ended; closed with the session. */
+  private val debugAdapters = ConcurrentHashMap.newKeySet[DebugAdapter]()
   /** The build's compiler problems from its last compile, by file (for files the document compiler does not cover). */
   private val buildProblems = new AtomicReference[Map[Path, Seq[CompilerDiagnostic]]](Map.empty)
   /** The failure message recorded by `markUnavailable`; `ensureUsable` rejects requests while it is present. */
@@ -1024,6 +1028,31 @@ final class ProjectSession private (
   def prepareMainRun(target: String, changed: Set[Path] => Unit): TestRun.Environment =
     compiledEnvironment(target, changed)(build.runEnvironment)
 
+  /**
+   * Compiles a target and starts a debug session for one of its main classes: a DAP server, which launches the program
+   * when a client connects to it, with the environment `prepareMainRun` captures.
+   *
+   * The session runs until its client disconnects or the program exits, or until this session closes. It does not
+   * share `TestRun`'s single active run.
+   *
+   * @param target BSP target to compile and to debug a main class of
+   * @param mainClass JVM name of the class that has the `main` method
+   * @param changed receives the sources that may need their diagnostics republished, as in `prepareMainRun`
+   * @return the `tcp://host:port` address of the DAP server
+   * @throws IllegalStateException when the target does not compile, or the session is closed or unavailable
+   */
+  def startMainDebugSession(target: String, mainClass: String, changed: Set[Path] => Unit): URI = buildLock.synchronized {
+    val environment = prepareMainRun(target, changed)
+    val module = imported.find(_.spec.stableId == target)
+      .getOrElse(throw new IllegalStateException(s"$target is not an imported target"))
+    val adapter = DebugAdapter.start(TestRun.MainSelection(target, mainClass), module, imported, environment,
+      build.librarySources, host.stateDir.resolve("debug-tools"))
+
+    debugAdapters.add(adapter)
+    adapter.finished.onComplete(_ => debugAdapters.remove(adapter))(using ExecutionContext.parasitic)
+    adapter.uri
+  }
+
   /** Compiles the target and stores its diagnostics under the BSP guard, then captures its `environment`. */
   private def compiledEnvironment(target: String, changed: Set[Path] => Unit)(
       environment: String => TestRun.Environment): TestRun.Environment = buildLock.synchronized {
@@ -1048,6 +1077,7 @@ final class ProjectSession private (
   override def close(): Unit = buildLock.synchronized {
     if (!closed) {
       closed = true
+      debugAdapters.forEach(_.close())
       Using.resources(build, scalafmt, documentCompiler)((_, _, _) => ())
     }
   }

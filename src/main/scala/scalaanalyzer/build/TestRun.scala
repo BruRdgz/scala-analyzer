@@ -206,7 +206,7 @@ object TestRun {
   final case class Result(summary: String, failed: Boolean = false, ignored: Boolean = false)
 
   /** Reads a server path that is either a file URI or a native path, as the plugin's BSP adapter does. */
-  private def path(value: String): Path =
+  private[build] def path(value: String): Path =
     if (value.startsWith("file:")) Path.of(URI.create(value)) else Path.of(value)
 
   /** Runner main class per framework (the plugin's, and ours for MUnit); all take the same arguments. */
@@ -316,7 +316,7 @@ object TestRun {
   }
 
   /** Builds a JVM command line: `java`, the environment's options, its classpath plus `extraClasspath`, the class. */
-  private def jvmCommand(environment: Environment, extraClasspath: Seq[String], mainClass: String,
+  private[build] def jvmCommand(environment: Environment, extraClasspath: Seq[String], mainClass: String,
                          arguments: Seq[String]): Seq[String] = {
     val classpath = environment.item.getClasspath.asScala.map(entry => path(entry).toString) ++ extraClasspath
 

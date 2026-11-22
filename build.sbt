@@ -106,8 +106,13 @@ lazy val root = (project in file("."))
     scalaPluginJars := {
       val lib = scalaPluginLib.value
       if (!lib.isDirectory) sys.error(s"Scala plugin jars not found at $lib (set SCALA_PLUGIN_LIB)")
-      // The plugin bundles its own Scala runtime; this build provides one.
-      val main = (lib * "*.jar").get.filterNot(f => Set("scala-library.jar", "scala3-library_3.jar")(f.getName))
+      // The plugin bundles its own Scala runtime; this build provides one. It also bundles scalameta 4.5, for its legacy
+      // `scala.meta` macro annotations only; the debug adapter's runtime evaluator needs scalameta 4.17's API, which
+      // the build provides, and two versions of the same packages cannot share the class path.
+      val scalameta = Seq("scalameta_2.13-", "trees_2.13-", "parsers_2.13-", "common_2.13-")
+      val main = (lib * "*.jar").get.filterNot { jar =>
+        Set("scala-library.jar", "scala3-library_3.jar")(jar.getName) || scalameta.exists(jar.getName.startsWith)
+      }
       // Content modules for document symbols and test discovery.
       val modules = Seq("scalaCommunity.structure-view.jar", "scalaCommunity.testing-support.jar",
         "scalaCommunity.testing-support.munit.jar").map(lib / "modules" / _)
@@ -204,7 +209,12 @@ lazy val root = (project in file("."))
       "org.apache.commons" % "commons-text" % "1.12.0" intransitive(),
       // LSP protocol types; the JSON-RPC layer (lsp4j.jsonrpc) comes with the plugin's jars, at this version.
       "org.eclipse.lsp4j" % "org.eclipse.lsp4j" % "0.20.1" intransitive(),
+      // The Debug Adapter Protocol server of Scala Center's debugger: embedded in the host, it debugs the programs the host
+      // launches. Its tools for each Scala version (expression compiler, TASTy decoder) are downloaded on first use.
+      "ch.epfl.scala" %% "scala-debug-adapter" % "4.2.13",
       "org.scalameta" %% "munit" % "1.3.4" % Test,
+      // The DAP client of the debugging tests, at the version of the LSP types.
+      "org.eclipse.lsp4j" % "org.eclipse.lsp4j.debug" % "0.20.1" % Test,
       // 2.13.18 is the plugin's latest 2.13 (ScalaVersion.Latest): its library-highlighting test data is for these sources.
       ("org.scala-lang" % "scala-library" % "2.13.18" % Fixtures intransitive()).withSources(),
       // The plugin's type-inference tests run on Scala 2.12 by default (ScalaSdkOwner.defaultSdkVersion).
@@ -291,12 +301,12 @@ lazy val root = (project in file("."))
       (out / "bin" / "scala-analyzer").setExecutable(true)
       out
     },
-    // The language and MCP servers' fixture modules and the measured adapter ledger each need their own host JVM:
+    // The language, MCP and debug adapter tests' fixture modules and the measured adapter ledger each need their own host JVM:
     // other suites may open the same modules or record calls outside the surface scenario.
     Test / testGrouping := {
       // The Java inspections' audit runs the excluded inspections too, whose unanswered calls other suites would see.
       val isolated = Set("scalaanalyzer.lsp.LanguageServerTest", "scalaanalyzer.mcp.McpServerTest",
-        "scalaanalyzer.AdapterSurfaceTest", "scalaanalyzer.JavaInspectionsTest")
+        "scalaanalyzer.AdapterSurfaceTest", "scalaanalyzer.JavaInspectionsTest", "scalaanalyzer.DebugAdapterTest")
       val (own, shared) = (Test / definedTests).value.partition(test => isolated(test.name))
       val fork = Tests.SubProcess((Test / forkOptions).value)
       Seq(Tests.Group("shared", shared, fork)) ++ own.map(test => Tests.Group(test.name, Seq(test), fork))

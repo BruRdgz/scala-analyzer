@@ -35,6 +35,7 @@ final case class CompileSpec(
  *                          the module once the build is imported again
  * @param baseDirectory the directory the build gives as the target's base, whose `.sbt` files sbt loads; `None` when
  *                      the build gives none
+ * @param classDirectory where the build writes the target's classes, Scala or Java; `None` when it gives none
  */
 final case class ImportedModule(
   spec: ModuleSpec,
@@ -43,6 +44,7 @@ final case class ImportedModule(
   generatedSources: Set[Path] = Set.empty,
   sourceDirectories: Seq[Path] = Seq.empty,
   baseDirectory: Option[Path] = None,
+  classDirectory: Option[Path] = None,
 )
 
 /**
