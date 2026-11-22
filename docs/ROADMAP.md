@@ -310,6 +310,34 @@ milestones, not one release; each wave ends with the full suite and its own comm
     through completion, file templates for new files, problem descriptions on hover.
   - Bazel projects, later.
 
+## Debugging (branch `debugger`, from `java-support`, planned 2026-11-22)
+
+Debugging over DAP, for Scala and Java, in sbt, Maven and Gradle projects alike.
+
+- Decisions:
+  - The host launches the program itself, with the classpath, JDK, JVM options, environment and working directory of
+    BSP's `buildTarget/jvmRunEnvironment` or `jvmTestEnvironment` (as Run does today) plus a JDWP agent, and runs
+    Scala Center's scala-debug-adapter inside the server as the DAP server the editor connects to. This is what
+    Metals does when its build server cannot debug. BSP's `debugSession/start` is not the main path: sbt does not
+    implement it without the user adding the sbt-debug-adapter plugin to their build, and Mill does not implement it.
+  - New dependency: `ch.epfl.scala:scala-debug-adapter` (Apache-2.0). The Scala expression compiler and the Scala 3
+    TASTy decoder are downloaded per Scala version on the first session that needs them, and cached, as scalafmt is.
+  - The IntelliJ Scala plugin's debugger is bound to the IDE (DebugProcess, JDI proxies, XDebugger); only its PSI
+    knowledge can be reused: the lines a breakpoint can be put at (`ScalaLineBreakpointType.canPutAt`), the lambdas of
+    a line (`ScalaPositionManager.positionsOnLine`, `lambdasOnLine`) and the JVM names of classes (`DebuggerUtil`).
+- Waves, each with its tests, the full suite and a commit:
+  1. Spike: in an integration test, the adapter embedded in the host debugs a fixture's `main`: a breakpoint is hit,
+     the stack and variables are read, an expression is evaluated. Confirms that the dependency loads beside the
+     plugin and the platform.
+  2. Debug main classes and tests: a Debug code lens beside each Run lens (Scala and Java), a server command that
+     starts a session and answers with the DAP address, and in VS Code a debugger type with a descriptor factory and
+     launch configurations (`mainClass`, `testClass`, `buildTarget`, `args`, `jvmOptions`, `env`). A test session
+     debugs the same runner command a test run uses.
+  3. Attach to a running JVM; library frames shown from the sources the host already materializes.
+  4. The host's Scala knowledge: breakpoints verified and moved to valid lines by the plugin's rule, lambda
+     breakpoints (DAP `breakpointLocations`), hot code replace after a compile.
+- Later, if useful: Bloop's `debugSession/start` as an alternative where the server announces it.
+
 ## Later
 
 - A persistent index, for fast startup: library jars are cached since the library cache (Unreleased); a start still
