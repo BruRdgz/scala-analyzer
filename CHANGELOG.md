@@ -14,6 +14,10 @@
 - A frame in a library shows the library's source when a source archive is known: the server unpacks the archive into
   `debug-sources/` under its state directory, once, and the debug adapter reports a file of it. (The adapter's own
   answer is a `jar:` URI that editors cannot open.)
+- Hot code replace in debug sessions: when the server compiles a target, the live sessions are told which classes were
+  rewritten, and the DAP request `redefineClasses` (java-debug's custom request, which the client sends; the VS Code
+  extension does after a successful compile command) redefines them in the running program. A breakpoint on a line without code stays unverified; a line with a lambda still stops in the
+  enclosing code and in the lambda, as the adapter has no breakpoint columns.
 - JUnit 4 and 5 test classes and methods in Java files have run lenses, found as the IDE's run markers find them and
   run through the IDE's JUnit runner. JUnit 5 runs need `junit-platform-launcher` on the test classpath (see "Running
   tests" in the README). The JUnit plugin's frameworks also make Go to Test know JUnit classes.

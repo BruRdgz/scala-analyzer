@@ -42,12 +42,11 @@ final class DapClient(uri: URI) extends munit.Assertions with AutoCloseable {
 
   private val socket = new Socket(InetAddress.getByName(uri.getHost), uri.getPort)
 
+  private val launcher = DSPLauncher.createClientLauncher(client, socket.getInputStream, socket.getOutputStream)
+  launcher.startListening()
+
   /** The adapter, as the requests of the protocol. */
-  val server: IDebugProtocolServer = {
-    val launcher = DSPLauncher.createClientLauncher(client, socket.getInputStream, socket.getOutputStream)
-    launcher.startListening()
-    launcher.getRemoteProxy
-  }
+  val server: IDebugProtocolServer = launcher.getRemoteProxy
 
   /** Everything the program printed so far, which a failure message shows. */
   def output: String = printed.asScala.mkString
@@ -88,7 +87,10 @@ final class DapClient(uri: URI) extends munit.Assertions with AutoCloseable {
   }
 
   /** Puts a breakpoint at a line of a source and checks that the adapter verified it. */
-  def breakAt(source: Path, line: Int): Unit = {
+  def breakAt(source: Path, line: Int): Unit = assertEquals(setBreakpoint(source, line).isVerified, true)
+
+  /** Puts a breakpoint at a line of a source, as the only one of the file, and answers the adapter's verdict. */
+  def setBreakpoint(source: Path, line: Int): Breakpoint = {
     val file = new Source
     file.setPath(source.toString)
     val arguments = new SetBreakpointsArguments
@@ -98,7 +100,25 @@ final class DapClient(uri: URI) extends munit.Assertions with AutoCloseable {
     breakpoint.setLine(line)
     arguments.setBreakpoints(Array(breakpoint))
     val set = await("setBreakpoints", server.setBreakpoints(arguments))
-    assertEquals(set.getBreakpoints.map(_.isVerified).toSeq, Seq(true))
+    assertEquals(set.getBreakpoints.length, 1)
+    set.getBreakpoints.head
+  }
+
+  /**
+   * Sends the adapter's custom `redefineClasses` request, which redefines the classes the host reported as recompiled
+   * (hot code replace). The protocol's server interface does not know it, so it goes through the raw endpoint.
+   *
+   * @return the JVM names of the classes the adapter redefined
+   */
+  def redefineClasses(): Seq[String] = {
+    val response = await("redefineClasses", launcher.getRemoteEndpoint.request("redefineClasses", java.util.Map.of()))
+    response match {
+      // Gson reads the body as a tree of maps and lists.
+      case body: com.google.gson.JsonObject =>
+        Option(body.getAsJsonArray("changedClasses")).map(_.asScala.map(_.getAsString).toSeq)
+          .getOrElse(fail(s"hot code replace failed: $body"))
+      case other => fail(s"unexpected redefineClasses response: $other")
+    }
   }
 
   /** Ends the configuration, which starts the program, and waits until the adapter has attached to it. */

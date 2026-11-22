@@ -81,6 +81,79 @@ class DebugAdapterTest extends munit.FunSuite {
     }
   }
 
+  test("a line without code is not verified: package clause, blank line, import") {
+    val session = ProjectSession.open(TestHost.host, fixture)
+    try {
+      val uri = session.startMainDebugSession(fixture.toFile.toURI.toString + "#app/Compile", "app.Main", _ => ())
+      Using.resource(new DapClient(uri)) { client =>
+        val launched = client.start()
+        // The adapter knows the lines that class files have code for (line 1 is `package`, 2 is blank, 3 is `import`),
+        // which is what the IDE's `canPutAt` refuses; it neither moves such a breakpoint nor reports it as set.
+        val verdicts = Seq(1, 2, 3).map(line => line -> client.setBreakpoint(main, line).isVerified)
+        assertEquals(verdicts, Seq(1 -> false, 2 -> false, 3 -> false))
+        client.breakAt(main, printLine)
+        client.run(launched)
+
+        client.resume(client.nextStop())
+        client.awaitEnd()
+      }
+    } finally {
+      session.close()
+      releaseModules()
+    }
+  }
+
+  test("hot code replace: a class recompiled during a session is redefined, and the stopped program sees it") {
+    val greeting = fixture.resolve("core/src/main/scala/core/Greeting.scala")
+    val original = Files.readString(greeting)
+    val target = fixture.toFile.toURI.toString + "#app/Compile"
+    val session = ProjectSession.open(TestHost.host, fixture)
+    try {
+      val uri = session.startMainDebugSession(target, "app.Main", _ => ())
+      Using.resource(new DapClient(uri)) { client =>
+        import client.{await, server}
+
+        val launched = client.start()
+        client.breakAt(main, printLine)
+        client.run(launched)
+        val stop = client.nextStop()
+
+        def greetingText(): String = {
+          val traceArguments = new StackTraceArguments
+          traceArguments.setThreadId(stop.getThreadId)
+          val top = await("stackTrace", server.stackTrace(traceArguments)).getStackFrames.head
+          val arguments = new EvaluateArguments
+          arguments.setExpression("core.Greeting(\"you\").text")
+          arguments.setFrameId(top.getId)
+          arguments.setContext("repl")
+          await("evaluate", server.evaluate(arguments)).getResult
+        }
+        // Needs the expression compiler, as the first test's lambda does.
+        assert(greetingText().contains("Hello, you"), greetingText())
+
+        try {
+          assert(original.contains("s\"Hello, $name\""), original)
+          Files.writeString(greeting, original.replace("s\"Hello, $name\"", "s\"Hello again, $name\""))
+          assert(session.compileBuild(Some(target)).succeeded)
+
+          // The host reported the recompiled classes; the client asks for them to be redefined.
+          // The case class and its companion object, both compiled from the changed file.
+          assertEquals(client.redefineClasses().toSet, Set("core.Greeting", "core.Greeting$"))
+          assert(greetingText().contains("Hello again, you"), greetingText())
+        } finally {
+          Files.writeString(greeting, original)
+          session.compileBuild(Some(target))
+        }
+
+        client.resume(stop)
+        client.awaitEnd()
+      }
+    } finally {
+      session.close()
+      releaseModules()
+    }
+  }
+
   test("debugs a test: the runner of a test run stops at a breakpoint in the test body, then finishes") {
     val session = ProjectSession.open(TestHost.host, fixture)
     try {

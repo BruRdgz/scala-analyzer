@@ -5,7 +5,7 @@ import com.intellij.psi.PsiFile
 
 import scalaanalyzer.{HostModule, LineColumn, LineRange, ScalaPsiHost}
 import scalaanalyzer.build.{
-  BspImport, BuildConnection, CompileSpec, CompilerDiagnostic, DebugAdapter, DocumentCompiler, ImportedModule,
+  BspImport, BuildConnection, CompileResult, CompileSpec, CompilerDiagnostic, DebugAdapter, DocumentCompiler, ImportedModule,
   ScalafmtFormatting, TestRun,
 }
 import scalaanalyzer.language.{
@@ -18,11 +18,13 @@ import scalaanalyzer.platform.{HostLock, HostLog}
 
 import java.net.{InetSocketAddress, URI}
 import java.nio.file.{Files, Path}
+import java.nio.file.attribute.FileTime
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.locks.ReentrantReadWriteLock
 
 import scala.concurrent.ExecutionContext
+import scala.jdk.CollectionConverters.*
 import scala.util.Using
 
 /**
@@ -977,9 +979,11 @@ final class ProjectSession private (
   def compileBuild(target: Option[String] = None): ProjectSession.BuildCompilation = buildLock.synchronized {
     ensureUsable()
 
-    val compiled = target match {
-      case Some(id) => build.compile(id)
-      case None => build.compile()
+    val compiled = compileNotifyingDebugSessions {
+      target match {
+        case Some(id) => build.compile(id)
+        case None => build.compile()
+      }
     }
     val severities = compiled.compiledProblems.map(_.severity)
     val changed = storeBuildProblems(compiled.diagnostics)
@@ -991,6 +995,38 @@ final class ProjectSession private (
       changed = changed,
     )
   }
+
+  /** The size and modification time of a class file, which tell whether a compile rewrote it. */
+  private final case class ClassStamp(size: Long, modified: FileTime)
+
+  /**
+   * Runs a compile and tells the live debug sessions which classes it rewrote, for hot code replace: the class files
+   * of every module's class directory are compared before and after. Without a session nothing is read. Classes a
+   * compile deleted are not reported: there is nothing to redefine them with.
+   */
+  private def compileNotifyingDebugSessions(compile: => CompileResult): CompileResult = {
+    if (debugAdapters.isEmpty) compile
+    else {
+      val before = classStamps()
+      val compiled = compile
+      val after = classStamps()
+      val updated = after.collect { case (name, stamp) if !before.get(name).contains(stamp) => name }.toSeq.sorted
+
+      if (updated.nonEmpty) debugAdapters.forEach(_.classesUpdated(updated))
+      compiled
+    }
+  }
+
+  /** The class files of the imported modules' class directories, by the JVM name of their class. */
+  private def classStamps(): Map[String, ClassStamp] =
+    imported.flatMap(_.classDirectory).filter(Files.isDirectory(_)).flatMap { directory =>
+      Using.resource(Files.walk(directory)) { paths =>
+        paths.iterator().asScala.filter(_.getFileName.toString.endsWith(".class")).map { file =>
+          val name = directory.relativize(file).toString.stripSuffix(".class").replace(file.getFileSystem.getSeparator, ".")
+          name -> ClassStamp(Files.size(file), Files.getLastModifiedTime(file))
+        }.toSeq
+      }
+    }.toMap
 
   /** Replaces the stored build diagnostics; returns the registered sources whose diagnostics differ from the old ones. */
   private def storeBuildProblems(compiled: Map[Path, Seq[CompilerDiagnostic]]): Set[Path] = {
@@ -1107,7 +1143,7 @@ final class ProjectSession private (
       environment: String => TestRun.Environment): TestRun.Environment = buildLock.synchronized {
     ensureUsable()
 
-    val compilation = build.compile(target)
+    val compilation = compileNotifyingDebugSessions(build.compile(target))
 
     changed(storeBuildProblems(compilation.diagnostics))
     if (!compilation.succeeded) throw new IllegalStateException(s"compilation failed for $target; see compiler diagnostics")

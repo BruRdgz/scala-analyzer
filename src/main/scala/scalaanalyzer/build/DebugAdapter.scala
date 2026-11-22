@@ -11,7 +11,7 @@ import java.io.{BufferedReader, Closeable}
 import java.net.{InetSocketAddress, URI, URLClassLoader}
 import java.nio.charset.StandardCharsets.UTF_8
 import java.nio.file.{Files, Path, StandardCopyOption}
-import java.util.concurrent.{ExecutorService, Executors, ThreadFactory}
+import java.util.concurrent.{CopyOnWriteArrayList, ExecutorService, Executors, ThreadFactory}
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.zip.ZipFile
 
@@ -35,11 +35,20 @@ import scala.util.matching.Regex
  * @param finished completes when the server has stopped accepting clients: after its session has ended, or after it
  *                 was closed
  * @param executor the threads of the server and its sessions, shut down with it
+ * @param classUpdates the observers the adapter registered for the classes that changed after a compile
  */
-final class DebugAdapter private (server: DebugServer, val finished: Future[Unit], executor: ExecutorService)
-    extends AutoCloseable {
+final class DebugAdapter private (server: DebugServer, val finished: Future[Unit], executor: ExecutorService,
+                                  classUpdates: CopyOnWriteArrayList[Seq[String] => Unit]) extends AutoCloseable {
   /** The address of the server, `tcp://host:port`, which a DAP client connects to. */
   val uri: URI = server.uri
+
+  /**
+   * Tells the adapter that classes of the program were recompiled. The adapter keeps them until its client sends the
+   * `redefineClasses` request (java-debug's custom DAP request), which redefines the ones the program has loaded.
+   *
+   * @param classes the JVM names of the classes whose class files changed
+   */
+  def classesUpdated(classes: Seq[String]): Unit = classUpdates.forEach(_(classes))
 
   /**
    * Closes the server and ends the session in progress, terminating the program. Closing is idempotent.
@@ -118,10 +127,11 @@ object DebugAdapter {
     given ExecutionContext = ExecutionContext.fromExecutor(executor)
 
     try {
-      val debuggee = describe(subject, program, target, modules, environment, librarySources, sourcesCache)
+      val classUpdates = new CopyOnWriteArrayList[Seq[String] => Unit]
+      val debuggee = describe(subject, program, target, modules, environment, librarySources, sourcesCache, classUpdates)
       val server = DebugServer(debuggee, new ToolsResolver(toolsCache), HostLogger)
 
-      new DebugAdapter(server, server.run(), executor)
+      new DebugAdapter(server, server.run(), executor, classUpdates)
     } catch {
       case error: Throwable =>
         executor.shutdown()
@@ -176,7 +186,8 @@ object DebugAdapter {
    * a breakpoint or a frame names, and how to start it.
    */
   private def describe(subject: String, program: Program, target: ImportedModule, modules: Seq[ImportedModule],
-                       environment: TestRun.Environment, librarySources: Set[Path] => Map[Path, Path], sourcesCache: Path): Debuggee = {
+                       environment: TestRun.Environment, librarySources: Set[Path] => Map[Path, Path], sourcesCache: Path,
+                       classUpdates: CopyOnWriteArrayList[Seq[String] => Unit]): Debuggee = {
     val classpath = environment.item.getClasspath.asScala.toSeq.map(TestRun.path(_).toAbsolutePath.normalize())
     val (directories, jars) = classpath.partition(Files.isDirectory(_))
     val sourcesByJar = librarySources(jars.toSet)
@@ -198,8 +209,12 @@ object DebugAdapter {
         (otherDirectories ++ jars.filter(jar => library(jar, None).isEmpty)).map(UnmanagedEntry(_))
       override val javaRuntime: Option[JavaRuntime] = JavaRuntime(environment.java.getParent.getParent)
 
-      // Hot code replace is a later wave; as in Metals, no class update is ever observed.
-      override def observeClassUpdates(onClassUpdate: Seq[String] => Unit): Closeable = () => ()
+      // Hot code replace: the host reports the classes of each compile (`DebugAdapter.classesUpdated`), where Metals
+      // reports none; the adapter redefines them when its client asks.
+      override def observeClassUpdates(onClassUpdate: Seq[String] => Unit): Closeable = {
+        classUpdates.add(onClassUpdate)
+        () => classUpdates.remove(onClassUpdate)
+      }
 
       override def run(listener: DebuggeeListener): CancelableFuture[Unit] = program match {
         case Launch(command) => launch(command, environment, listener)

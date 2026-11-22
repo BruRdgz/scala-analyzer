@@ -187,6 +187,11 @@ async function compile() {
 // The commands of the run lenses: the server ends the run when its request is cancelled.
 const runCommands = new Set(['scalaAnalyzer.runTest', 'scalaAnalyzer.runMain']);
 
+// The running debug sessions of this extension's type: a successful compile asks each to redefine the classes the
+// compile rewrote, which the server tells their adapters (hot code replace).
+/** @type {Set<vscode.DebugSession>} */
+const debugSessions = new Set();
+
 // The debugger type of the extension. The Debug lenses run the client command `scalaAnalyzer.debug` (see `debug`), which
 // the server does not list or execute.
 const debugType = 'scala-analyzer';
@@ -319,7 +324,11 @@ function registerCommands(context) {
   register('debug', needsServer(debug));
   context.subscriptions.push(
     vscode.debug.registerDebugAdapterDescriptorFactory(debugType, debugAdapterFactory),
-    vscode.debug.registerDebugConfigurationProvider(debugType, debugConfigurationProvider));
+    vscode.debug.registerDebugConfigurationProvider(debugType, debugConfigurationProvider),
+    vscode.debug.onDidStartDebugSession(session => {
+      if (session.type === debugType) debugSessions.add(session);
+    }),
+    vscode.debug.onDidTerminateDebugSession(session => debugSessions.delete(session)));
   register('showStatus', needsServer(async () => {
     const report = await client.sendRequest('scalaAnalyzer/status');
     client.outputChannel.appendLine(`status: ${JSON.stringify(report, null, 2)}`);
@@ -351,10 +360,24 @@ async function compileAndReport(target, onOutcome = () => {}) {
     const { succeeded, errors, warnings } = await request;
     outcome(`${succeeded ? 'Compiled' : 'Compilation failed'}: ${plural(errors, 'error')}, ${plural(warnings, 'warning')}`, succeeded ? 0 : 1);
     if (!succeeded) await vscode.commands.executeCommand('workbench.actions.view.problems');
+    else await redefineClasses();
   } catch (error) {
     outcome(error.message, 1);
     vscode.window.showErrorMessage(`scala-analyzer: compile failed: ${error.message}`);
   }
+}
+
+// Asks each running debug session to replace the classes that the last compile rewrote, with the adapter's custom
+// request; a session that cannot (its program does not support redefinition, or it is not stopped where it can) says
+// why in the output channel.
+async function redefineClasses() {
+  await Promise.all([...debugSessions].map(async session => {
+    try {
+      await session.customRequest('redefineClasses');
+    } catch (error) {
+      client.outputChannel.appendLine(`hot code replace in ${session.name}: ${error.message}`);
+    }
+  }));
 }
 
 // The terminal only relays the server's compile result and stays hidden (see compileTask).

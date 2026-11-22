@@ -349,8 +349,18 @@ Debugging over DAP, for Scala and Java, in sbt, Maven and Gradle projects alike.
      `debug-sources/` and gives the adapter that directory, so frames are files. Costs disk (the unpacked sources of
      every library with sources, on the first session) and a pause on that first session. VS Code: `attach`
      attributes, a configuration provider that defaults `hostName`, snippets.
-  4. The host's Scala knowledge: breakpoints verified and moved to valid lines by the plugin's rule, lambda
-     breakpoints (DAP `breakpointLocations`), hot code replace after a compile.
+  4. Done in part: hot code replace after a compile. `ProjectSession` compares the class files of the modules' class
+     directories (size, modification time) around every compile it makes (compile command, Run, Debug) when a debug
+     session is live, and tells the sessions (`DebugAdapter.classesUpdated`, the debuggee's `observeClassUpdates`); the
+     adapter redefines them on the client's custom `redefineClasses` request, which the VS Code extension sends to
+     each running `scala-analyzer` session after a successful compile command.
+     Not done, with reasons: lambda breakpoints and `breakpointLocations`: scala-debug-adapter 4.2.13's java-debug has
+     no such request and its `SourceBreakpoint` has no `column`, so a host layer could answer the locations but could
+     not make a column select the lambda; it needs a change in the adapter (or a DAP proxy that sets the breakpoint
+     itself through JDI, which the adapter's session does not expose). Breakpoint validity needs nothing: the adapter
+     answers lines that class files have no code for (comments, imports, `package`, blank) as not verified, which is
+     what `canPutAt` refuses; the plugin's rule is not reused. Verified by tests that compile but were not run in
+     this wave (`DebugAdapterTest`: unverified lines, hot code replace).
 - Later, if useful: Bloop's `debugSession/start` as an alternative where the server announces it.
 
 ## Later

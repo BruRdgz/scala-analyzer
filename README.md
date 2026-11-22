@@ -256,10 +256,24 @@ client implements it, as the VS Code extension does, by starting a debug session
 The adapter downloads its expression compiler (and, for Scala 3, its TASTy decoder) for the project's Scala version the
 first time a session evaluates a Scala expression that needs it, and keeps them under the state directory, so that
 evaluation needs network access once per Scala version. Simple expressions (a variable, a field, a method call
-without lambdas) are evaluated without it. Limitations: there is no attach to a running JVM, so a debug session always
-starts the program; Java frames evaluate simple expressions only; the source of a library is shown only when the
-build gives its source archive; and VS Code has no launch configuration provider yet, so a `launch.json` entry is
-written by hand.
+without lambdas) are evaluated without it.
+
+Breakpoints are verified by the class files: a line the program has no code for (a comment, a blank line, `package`,
+`import`) is answered as not verified, and the adapter does not move it to another line. A line with a lambda stops in
+the enclosing code and in the lambda, each time it runs: the adapter does not support the DAP `breakpointLocations`
+request or a breakpoint's `column`, so the editor cannot offer "line" and "lambda" breakpoints separately as the IDE does.
+
+Hot code replace: after the server compiles a target (the compile command, or the compile of a Run or Debug), every
+live debug session is told which classes' files were rewritten. The adapter redefines them in the running program when
+its client sends the custom DAP request `redefineClasses` (the server cannot send it for the client; the VS Code
+extension sends it to each running session after a successful compile command); it answers the
+redefined class names, sends a `hotcodereplace` event, and steps the thread out of a frame it had to pop. Redefining
+changes method bodies only: a changed signature, field or class shape fails with an error message, and the frame of a
+method that is still running (`main`) keeps the old code. Class files are compared by size and modification time, so a
+recompile that wrote identical bytes is reported too.
+
+Limitations: Java frames evaluate simple expressions only; the source of a library is shown only when the build gives
+its source archive; and VS Code has no launch configuration provider yet, so a `launch.json` entry is written by hand.
 
 ### Troubleshooting
 
