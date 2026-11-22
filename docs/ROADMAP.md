@@ -293,8 +293,7 @@ milestones, not one release; each wave ends with the full suite and its own comm
      done (the JUnit plugin's frameworks and `JUnitUtil` detect, the IDE's `JUnitStarter` runs; JUnit 5 needs
      `junit-platform-launcher` on the test classpath, as the IDE would download it).
   5. Data flow: done (see the open questions for what remains: library bytecode inference).
-  6. Release preparation of 0.5.0: README (Java, Maven, Gradle), CHANGELOG, the VS Code extension's README and
-     activation, the java-playground's scenarios as the manual checklist, VSIX; merge and push wait for the user.
+  6. Done: released as 0.5.0 (2026-11-22), with the debugger and the Testing view.
 - After 0.5.0, candidates (each its own decision): 0.4.1's Move; debugging over BSP's `debugSession/start` (Bloop
   and sbt both start a debug adapter); test discovery for Scala and Java over BSP; Change Signature with a webview;
   MCP writes; the `intellij.projects`/`jdkForSymbolResolution`-like settings; file and live templates; Bazel; the

@@ -6,8 +6,18 @@ Install the VSIX and the server archive from the same GitHub release. Extract th
 and set `scalaAnalyzer.serverPath` to its `bin/scala-analyzer` launcher. Set `scalaAnalyzer.javaHome` if JDK 25
 is not the Java used by VS Code's environment.
 
-Open a Scala workspace with a BSP connection (`sbt bspConfig` for sbt). The extension starts the server
-for Scala files and also handles Java files in that workspace.
+Open a Scala workspace with a BSP connection (`sbt bspConfig` for sbt), or a Maven or Gradle project (imported through
+Bloop, which must be installed). The extension starts the server for Scala and Java files.
+
+**Debugging:** each Run lens has a Debug lens beside it, and the `scala-analyzer` debugger ("Scala (scala-analyzer)")
+runs `launch.json` configurations (`mainClass` or `testClass`, `buildTarget`, `args`, `jvmOptions`, `env`) and
+`attach` configurations; F5 without a `launch.json` debugs the active file's main class or test. Breakpoints
+(conditions, hit counts, log messages), exception breakpoints, the values of variables at the end of their lines,
+Smart Step Into (**Step Into Target**), Set Value, Restart Frame, and hot code replace after **Compile Build** work as
+in IntelliJ. See the repository README, "Debugging".
+
+**Testing view:** the project's suites and tests are listed in VS Code's Testing view, grouped by build target; run them
+to see each test's result, or debug them.
 
 Click the **Scala** status bar item for a menu, or run the commands from the palette (category `scala-analyzer`):
 **Compile Build**, **Reimport Build**, **Inspect Code**, **Clear Inspection Results**, **Restart Server**,

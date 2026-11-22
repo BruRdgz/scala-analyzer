@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.5.0 — 2026-11-22
+
+Java at the IDE's level, Maven and Gradle builds, a debugger and VS Code's Testing view.
 
 - Main classes and tests can be debugged. Every Run lens has a Debug lens beside it; it compiles the target, starts the
   program or the test runner of the same selection with a JDWP agent, and connects the editor to Scala Center's debug
