@@ -199,6 +199,22 @@ final class DapClient(uri: URI) extends munit.Assertions with AutoCloseable {
     nextStop()
   }
 
+  /** The calls of the frame's line that Smart Step Into lists, in the order they run. */
+  def stepInTargets(frame: StackFrame): Seq[StepInTarget] = {
+    val arguments = new StepInTargetsArguments
+    arguments.setFrameId(frame.getId)
+    await("stepInTargets", server.stepInTargets(arguments)).getTargets.toSeq
+  }
+
+  /** Steps into one of the targets of `stepInTargets` and waits for the program to stop again. */
+  def stepInTo(stop: StoppedEventArguments, target: StepInTarget): StoppedEventArguments = {
+    val arguments = new StepInArguments
+    arguments.setThreadId(stop.getThreadId)
+    arguments.setTargetId(target.getId)
+    await("stepIn", server.stepIn(arguments))
+    nextStop()
+  }
+
   /**
    * Waits for the next stop or for the end of the program, whichever comes first, within the time `nextStop` allows.
    *

@@ -158,7 +158,7 @@ class BloopImportTest extends munit.FunSuite {
 
         val adapter = DebugAdapter.start("demo.app.Main",
           DebugAdapter.Launch(TestRun.mainCommand(TestRun.MainSelection(app.spec.stableId, "demo.app.Main"), environment)),
-          app, modules, environment, connection.librarySources, caches.resolve("tools"), caches.resolve("sources"))
+          app, modules, environment, connection.librarySources, caches.resolve("tools"), caches.resolve("sources"), (_, _) => Seq.empty)
         try Using.resource(new scalaanalyzer.DapClient(adapter.uri)) { client =>
           val launched = client.start()
           // The line of `return "Hello, " + name;` in `Greeter.greet`.

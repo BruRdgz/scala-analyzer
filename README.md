@@ -296,9 +296,18 @@ be in a module the target depends on.
 
 Limitations: Java frames evaluate simple expressions only, and show local variables only when their classes were
 compiled with `-g` (Maven and Gradle compile with it by default; sbt does not); the source of a library is shown only
-when the build gives its source archive; a collection is shown by its `toString` with its fields as children (`head`
-and `next` for a `List`), where the IDE lists its elements; a `var` that a lambda captures shows as its
-`scala.runtime.IntRef` (or `ObjectRef`) holder with the value; and there is no Smart Step Into.
+when the build gives its source archive; and a collection of the Scala library lists up to 100 elements (a lazy
+one, such as a `LazyList` or a `View`, keeps the adapter's fields view, as forcing it could not end).
+
+Between the editor and the adapter, the server runs a proxy that adds what the IDE's debugger shows and the adapter
+does not. Strings are not expandable. A `var` that a lambda captures shows its value, not its `scala.runtime.IntRef`
+(or `ObjectRef`) holder. A collection of the Scala library (`List`, `Map`, `ArrayBuffer`...) lists its elements, named by
+their indexes, each evaluated in the stopped frame (an evaluation per element, so a very large collection is slow to
+open; elements past the hundredth are summed up in a last `...` child). And **Smart Step Into** works: the DAP
+`stepInTargets` request lists the calls of the stopped line in the order they run (Scala and Java; VS Code offers it as
+"Step Into Target"), and stepping into one steps in and out of the calls before it, stopping where the program enters
+the chosen method. It recognizes the method by its name, so with two calls of the same method on a line it enters the
+first.
 
 ### Troubleshooting
 

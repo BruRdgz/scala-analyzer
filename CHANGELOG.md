@@ -12,6 +12,9 @@
 - A debug session can attach to a JVM that already runs with a JDWP agent: `scalaAnalyzer.startDebugSession` takes
   `{"kind": "attach", "target", "hostName", "port"}`, and the VS Code debugger has an `attach` configuration with a
   snippet. The target is compiled and described as for a launch, so the breakpoints and frames find their sources.
+- Debugging, closer to the IDE's, through a DAP proxy the server runs in front of the adapter: strings are not
+  expandable, a captured `var` shows its value instead of its `IntRef` holder, a Scala collection lists its elements
+  (up to 100), and Smart Step Into (`stepInTargets`) steps into the call chosen among those of the line.
 - A frame in a library shows the library's source when a source archive is known: the server unpacks the archive into
   `debug-sources/` under its state directory, once, and the debug adapter reports a file of it; an archive no session
   has used for a month is deleted. (The adapter's own answer is a `jar:` URI that editors cannot open.)

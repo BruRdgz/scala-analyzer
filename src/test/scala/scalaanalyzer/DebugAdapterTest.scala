@@ -388,17 +388,33 @@ class DebugAdapterTest extends munit.FunSuite {
       val printFrame = client.topFrame(atPrint)
       assertEquals(printFrame.getLine.intValue, printTotalLine)
       val values = client.variables(client.locals(printFrame).getVariablesReference)
-      // A `var` that a lambda captures is a `scala.runtime.IntRef`, which the adapter shows as the holder with its value
-      // (the IDE shows the value alone).
-      assert(values.get("total").exists(_.getValue.contains("\"79\"")), values.get("total").toString)
-      // A collection shows its `toString`, and its children are its fields (`head` and `next` for a `List`): the
-      // adapter has no collection renderer, where the IDE lists the elements.
+      // A `var` that a lambda captures is a `scala.runtime.IntRef`, which the proxy shows as the value it holds.
+      val total = values.getOrElse("total", fail(s"no total in ${values.keySet}"))
+      assert(total.getValue.contains("79") && !total.getValue.contains("IntRef"), total.getValue)
+      // A collection lists its elements, named by their indexes, as the IDE does; the adapter alone shows its fields.
       val numbers = values.getOrElse("numbers", fail(s"no numbers in ${values.keySet}"))
-      assert(numbers.getValue.contains("\"List(1, 2, 3)\""), numbers.getValue)
-      assertEquals(client.variables(numbers.getVariablesReference).keySet.intersect(Set("head", "next")), Set("head", "next"))
+      val elements = client.variables(numbers.getVariablesReference)
+      assertEquals(elements.keySet, Set("0", "1", "2"))
+      for ((index, expected) <- Seq("0" -> "1", "1" -> "2", "2" -> "3"))
+        assert(elements(index).getValue.contains(expected), elements(index).getValue)
+      val names = values.getOrElse("names", fail(s"no names in ${values.keySet}"))
+      assertEquals(client.variables(names.getVariablesReference).keySet, Set("0", "1"))
       client.resume(atPrint)
       client.awaitEnd()
       assert(client.output.contains("total 79, 6, 2"), client.output)
+    }
+  }
+
+  test("smart step into: the line's calls are listed, and the chosen one is stepped into") {
+    debuggingDebugged()(_.breakAt(debugged, loopLine)) { client =>
+      val stop = client.nextStop()
+      val loop = client.topFrame(stop)
+      val target = client.stepInTargets(loop).find(_.getLabel.startsWith("triple"))
+        .getOrElse(fail(s"no triple among ${client.stepInTargets(loop).map(_.getLabel)}"))
+
+      val inside = client.topFrame(client.stepInTo(stop, target))
+      assertEquals(inside.getLine.intValue, tripleLine)
+      assert(inside.getName.contains("triple"), inside.getName)
     }
   }
 

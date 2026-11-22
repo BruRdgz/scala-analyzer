@@ -43,7 +43,7 @@ import org.jetbrains.plugins.scala.lang.scaladoc.parser.ScalaDocElementTypes
 import org.jetbrains.plugins.scala.structureView.element.Element
 
 import scalaanalyzer.{Diagnostic, LineColumn, LineRange, ScalaPsiHost}
-import scalaanalyzer.build.{CompileSpec, CompilerDiagnostic, DocumentCompiler, ScalafmtFormatting}
+import scalaanalyzer.build.{CompileSpec, CompilerDiagnostic, DebugAdapter, DocumentCompiler, ScalafmtFormatting}
 import scalaanalyzer.platform.{HostLog, LibraryFile, RequestEditor, SourceFile}
 
 import java.nio.file.{Files, Path}
@@ -623,6 +623,18 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
           found.name
       }
     }
+    case _ => Seq.empty
+  }
+
+  /**
+   * The calls of a line that a debugger can step into, in the order they run, for Smart Step Into.
+   *
+   * @param path absolute path of a source file
+   * @param line the line, counted from 1 as a debugger does
+   * @return the targets; empty for a file that is neither Scala nor Java source of the project, such as a library's
+   */
+  def stepTargets(path: Path, line: Int): Seq[DebugAdapter.StepTarget] = file(path) match {
+    case sourceFile: (ScalaFile | PsiJavaFile) => host.read(StepTargets.at(sourceFile, document(sourceFile), line - 1))
     case _ => Seq.empty
   }
 

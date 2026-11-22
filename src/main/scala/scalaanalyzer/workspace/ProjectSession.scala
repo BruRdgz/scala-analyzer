@@ -1148,7 +1148,9 @@ final class ProjectSession private (
     val module = imported.find(_.spec.stableId == target)
       .getOrElse(throw new IllegalStateException(s"$target is not an imported target"))
     val adapter = DebugAdapter.start(subject, program, module, imported, environment, build.librarySources,
-      host.stateDir.resolve("debug-tools"), host.stateDir.resolve("debug-sources"))
+      host.stateDir.resolve("debug-tools"), host.stateDir.resolve("debug-sources"),
+      // A frame of a library has no registered source.
+      (path, line) => if (files.containsKey(path)) language.stepTargets(path, line) else Seq.empty)
 
     debugAdapters.add(adapter)
     adapter.finished.onComplete(_ => debugAdapters.remove(adapter))(using ExecutionContext.parasitic)

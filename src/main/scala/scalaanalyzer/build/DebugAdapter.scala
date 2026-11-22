@@ -1,6 +1,7 @@
 package scalaanalyzer.build
 
 import ch.epfl.scala.bsp4j.JvmEnvironmentItem
+import com.microsoft.java.debug.core.DebugSettings
 import ch.epfl.scala.debugadapter.{
   CancelableFuture, DebugServer, DebugToolsResolver, Debuggee, DebuggeeListener, JavaRuntime, Library, Logger, Module,
   ScalaVersion, SourceDirectory, SourceEntry, StandaloneSourceFile, UnmanagedEntry,
@@ -34,16 +35,21 @@ import scala.util.matching.Regex
  * (`MetalsDebuggee`). A session can instead attach to a program that already runs with a JDWP agent, which it neither
  * starts nor ends. The session ends when the client disconnects or the program exits, or when it is closed.
  *
- * @param server the adapter's server, which accepts the client's connection and runs the debuggee
+ * The client does not talk to the adapter's server directly but to a [[DebugProxy]] in front of it, which adds what the
+ * adapter lacks: collections listed by their elements, captured `var`s shown by their values, and Smart Step Into.
+ *
+ * @param server the adapter's server, which accepts the proxy's connection and runs the debuggee
+ * @param proxy the proxy the client connects to, which relays to `server`
  * @param finished completes when the server has stopped accepting clients: after its session has ended, or after it
  *                 was closed
  * @param executor the threads of the server and its sessions, shut down with it
  * @param classUpdates the observers the adapter registered for the classes that changed after a compile
  */
-final class DebugAdapter private (server: DebugServer, val finished: Future[Unit], executor: ExecutorService,
+final class DebugAdapter private (server: DebugServer, proxy: DebugProxy, val finished: Future[Unit],
+                                  executor: ExecutorService,
                                   classUpdates: CopyOnWriteArrayList[Seq[String] => Unit]) extends AutoCloseable {
-  /** The address of the server, `tcp://host:port`, which a DAP client connects to. */
-  val uri: URI = server.uri
+  /** The address of the session, `tcp://host:port`, which a DAP client connects to: that of the proxy. */
+  val uri: URI = proxy.uri
 
   /**
    * Tells the adapter that classes of the program were recompiled. The adapter keeps them until its client sends the
@@ -57,6 +63,7 @@ final class DebugAdapter private (server: DebugServer, val finished: Future[Unit
    * Closes the server and ends the session in progress, terminating the program. Closing is idempotent.
    */
   override def close(): Unit = {
+    proxy.close()
     server.close()
     executor.shutdown()
   }
@@ -101,6 +108,16 @@ object DebugAdapter {
   final case class Attach(address: InetSocketAddress) extends Program
 
   /**
+   * A call on a source line that the debugger can step into, as Smart Step Into offers it.
+   *
+   * @param id the target's identifier in the DAP `stepInTargets` answer, from 1 in the order the calls run
+   * @param label what the editor lists, such as `greet(String, int)` or `new Foo`
+   * @param methodName the JVM name of the method called, `<init>` for a constructor: how the frame of the call is
+   *                   recognized once the program steps into it
+   */
+  final case class StepTarget(id: Int, label: String, methodName: String)
+
+  /**
    * What a launch configuration adds to the environment of a launched program, as the IDE's run configurations do:
    * the build's JVM options and variables come first, the configuration's after them.
    *
@@ -140,11 +157,13 @@ object DebugAdapter {
    * @param toolsCache directory that keeps the expression compilers and decoders downloaded for Scala versions
    * @param sourcesCache directory that keeps the library source archives unpacked, so that the frame of a library has a
    *                     file an editor can open; the archives no session used for a month are deleted from it
-   * @return the running server; its `uri` is where a DAP client connects
+   * @param stepTargets the calls a source file's line (1-based) makes, as the editor's Smart Step Into lists them;
+   *                    empty for a file that is not a source of the project
+   * @return the running session; its `uri` is where a DAP client connects
    */
   def start(subject: String, program: Program, target: ImportedModule, modules: Seq[ImportedModule],
             environment: TestRun.Environment, librarySources: Set[Path] => Map[Path, Path], toolsCache: Path,
-            sourcesCache: Path): DebugAdapter = {
+            sourcesCache: Path, stepTargets: (Path, Int) => Seq[StepTarget]): DebugAdapter = {
     val executor = Executors.newCachedThreadPool(new ThreadFactory {
       override def newThread(task: Runnable): Thread = {
         val thread = new Thread(task, "scala-analyzer-debug")
@@ -156,11 +175,23 @@ object DebugAdapter {
 
     try {
       pruneSources(sourcesCache)
+      // The proxy recognizes captured `var`s and collections by their variables' types, which java-debug names without
+      // their package unless told otherwise; the proxy shortens the names in the values shown again (DebugProxy).
+      DebugSettings.getCurrent.showQualifiedNames = true
       val classUpdates = new CopyOnWriteArrayList[Seq[String] => Unit]
       val debuggee = describe(subject, program, target, modules, environment, librarySources, sourcesCache, classUpdates)
       val server = DebugServer(debuggee, new ToolsResolver(toolsCache), HostLogger)
 
-      new DebugAdapter(server, server.run(), executor, classUpdates)
+      val finished = server.run()
+      val proxy =
+        try DebugProxy.start(server.uri, stepTargets)
+        catch {
+          case error: Throwable =>
+            server.close()
+            throw error
+        }
+
+      new DebugAdapter(server, proxy, finished, executor, classUpdates)
     } catch {
       case error: Throwable =>
         executor.shutdown()

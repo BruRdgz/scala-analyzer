@@ -371,12 +371,23 @@ Debugging over DAP, for Scala and Java, in sbt, Maven and Gradle projects alike.
      (`$x`), not VS Code's `{x}`. The adapter's `exited` event always says 0, so the launcher prints the exit code.
      A Debug or Run of a target that does not compile names the first error. Maven and Gradle Java debugging tested
      (`BloopImportTest`).
-     Found and left: a collection shows its `toString` and its fields (no collection renderer), a captured `var`
-     shows its `IntRef` holder, and the adapter has no extension point for either (a DAP proxy or an upstream change);
-     sbt compiles Java without `-g`, so Java frames of an sbt build have no locals.
-  6. Not started: Smart Step Into. java-debug has no `stepInTargets`; the plugin's `ScalaSmartStepIntoHandler` needs
-     the IDE's debugger (`SourcePosition`, `DebugProcess`). It would need a DAP proxy between the editor and the adapter
-     that answers `stepInTargets` from the PSI of the line and steps in and out until the chosen method is entered.
+     Found and left: sbt compiles Java without `-g`, so Java frames of an sbt build have no locals. (The adapter's
+     collection and captured-`var` renderings were closed by 6.)
+  6. Done: a DAP proxy (`build/DebugProxy.scala`) between the editor and the adapter, inside the host: it listens on
+     loopback, takes one client, connects to the adapter's server and forwards everything under its own sequence
+     numbers (it sends requests of its own), rewriting or answering only what follows. `DebugAdapter.uri` is the
+     proxy's. Values: strings unexpandable; `scala.runtime.*Ref` holders replaced by their `elem`; a type of
+     `scala.collection.` whose `iterableFactory` evaluates (what excludes iterators) and is not `LazyList`, `Stream` or
+     `View` is given a proxy reference whose children are `toIndexedSeq.apply(i)` evaluated per element in the frame
+     (the adapter's runtime evaluator handles these without downloading a compiler). Limits: lazy collections keep the
+     adapter's fields view; each element is an evaluation that rebuilds an indexed view, so cost grows with the
+     collection; only 100 elements are listed (`MaxElements`, then a `...` child); Java collections are not listed.
+     Smart Step Into: `stepInTargets` is answered from the PSI of the frame's line (`language/StepTargets.scala`:
+     calls in evaluation order, Scala and Java), and `stepIn` with a target steps in and out internally (swallowing
+     the adapter's stops) until the frame one level deeper is the target's method, at most 30 steps (`MaxSmartSteps`).
+     It matches by method name, so the first of two calls of the same method wins; a breakpoint hit on the way ends
+     it there. The step-in result is a `stopped` event, as for any step. Tested in `DebugAdapterTest` (values, smart
+     step into); the plugin's `ScalaSmartStepIntoHandler` was not reused, as it needs the IDE's debugger.
 - Later, if useful: Bloop's `debugSession/start` as an alternative where the server announces it.
 
 ## Later
