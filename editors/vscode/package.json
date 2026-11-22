@@ -160,12 +160,12 @@
         },
         {
           "command": "scalaAnalyzer.goToSuper",
-          "when": "editorLangId == scala",
+          "when": "editorLangId == scala || editorLangId == java",
           "group": "navigation"
         },
         {
           "command": "scalaAnalyzer.goToTest",
-          "when": "editorLangId == scala",
+          "when": "editorLangId == scala || editorLangId == java",
           "group": "navigation"
         },
         {
@@ -233,11 +233,11 @@
         },
         {
           "command": "scalaAnalyzer.goToSuper",
-          "when": "editorLangId == scala"
+          "when": "editorLangId == scala || editorLangId == java"
         },
         {
           "command": "scalaAnalyzer.goToTest",
-          "when": "editorLangId == scala"
+          "when": "editorLangId == scala || editorLangId == java"
         },
         {
           "command": "scalaAnalyzer.chooseMembersToOverride",

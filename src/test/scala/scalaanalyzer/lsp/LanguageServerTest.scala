@@ -336,9 +336,9 @@ class LanguageServerTest extends munit.FunSuite {
     selector(capabilities.getInlayHintProvider.getRight, "scala", "java")
     assert(capabilities.getInlayHintProvider.getRight.getResolveProvider)
     selector(capabilities.getSelectionRangeProvider.getRight, "scala", "java")
-    scalaSelector(capabilities.getImplementationProvider.getRight)
-    scalaSelector(capabilities.getCallHierarchyProvider.getRight)
-    scalaSelector(capabilities.getTypeHierarchyProvider.getRight)
+    selector(capabilities.getImplementationProvider.getRight, "scala", "java")
+    selector(capabilities.getCallHierarchyProvider.getRight, "scala", "java")
+    selector(capabilities.getTypeHierarchyProvider.getRight, "scala", "java")
     selector(capabilities.getRenameProvider.getRight, "scala", "java")
     selector(capabilities.getSemanticTokensProvider, "scala", "java")
     assertEquals(capabilities.getCompletionProvider.getTriggerCharacters.asScala.toSeq, Seq("."))
@@ -947,6 +947,49 @@ class LanguageServerTest extends munit.FunSuite {
       assertEquals(constructor.getFromRanges.asScala.toSeq, Seq(at(text.indexOf("new Shout"), "new Shout()".length)))
     } finally {
       change(Files.readString(javaFile), 171)
+      service.documentSymbol(new DocumentSymbolParams(document(javaFile))).get(1, TimeUnit.MINUTES)
+    }
+  }
+
+  test("a Java buffer finds implementations, subtypes and supers of its interface, method and lambda") {
+    val service = server.getTextDocumentService
+    val javaFile = fixture.resolve("core/src/main/java/core/Shout.java")
+    val text = "package core; interface Speaker { String say(); } " +
+      "class Shout implements Speaker { public String say() { Speaker inner = () -> \"!\"; return inner.say(); } }"
+    def change(value: String, version: Int): Unit = service.didChange(new DidChangeTextDocumentParams(
+      new VersionedTextDocumentIdentifier(javaFile.toUri.toString, version), JavaList.of(new TextDocumentContentChangeEvent(value))))
+    def at(index: Int) = new Position(0, index)
+    def name(declared: String, after: String) = at(text.indexOf(declared, text.indexOf(after)))
+    def nameRange(declared: String, after: String) = {
+      val start = name(declared, after)
+      new Range(start, new Position(0, start.getCharacter + declared.length))
+    }
+    def supers(position: Position) = server.superElements(new TextDocumentPositionParams(document(javaFile), position))
+      .get(1, TimeUnit.MINUTES).asScala.toSeq.map(l => (l.getUri, l.getRange.getStart))
+    val uri = javaFile.toUri.toString
+    try {
+      change(text, 180)
+      val implementations = service.implementation(new ImplementationParams(document(javaFile), name("say", "Speaker")))
+        .get(1, TimeUnit.MINUTES).getLeft.asScala.toSeq.map(l => (l.getUri, l.getRange))
+      // The lambda implements `say` too, as the IDE's Go to Implementations lists it.
+      assert(implementations.contains((uri, nameRange("say", "class Shout"))), implementations)
+
+      val speaker = service.prepareTypeHierarchy(new TypeHierarchyPrepareParams(document(javaFile), name("Speaker", "interface")))
+        .get(1, TimeUnit.MINUTES).asScala.toSeq
+      assertEquals(speaker.map(_.getName), Seq("Speaker"))
+      val subtypes = service.typeHierarchySubtypes(new TypeHierarchySubtypesParams(speaker.head))
+        .get(1, TimeUnit.MINUTES).asScala.toSeq
+      assertEquals(subtypes.map(_.getName), Seq("Shout"))
+
+      val speakerName = (uri, name("Speaker", "interface"))
+      val sayDeclaration = (uri, name("say", "Speaker"))
+      assertEquals(supers(name("say", "class Shout")), Seq(sayDeclaration))
+      assertEquals(supers(name("Shout", "class")), Seq(speakerName))
+      // A lambda's super is the functional interface's method.
+      assertEquals(supers(at(text.indexOf("->"))), Seq(sayDeclaration))
+      assertEquals(supers(name("Speaker", "interface")), Seq.empty)
+    } finally {
+      change(Files.readString(javaFile), 181)
       service.documentSymbol(new DocumentSymbolParams(document(javaFile))).get(1, TimeUnit.MINUTES)
     }
   }

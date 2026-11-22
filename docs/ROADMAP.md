@@ -261,8 +261,24 @@ milestones, not one release; each wave ends with the full suite and its own comm
     answers none. The real manager plus the Java plugin's annotation-package supports would change how Scala sees
     Java's `@Nullable` too, so it needs the type-inference oracle first.
   - Java error fixes that change the IDE's project model (add a library or module to a classpath) are not offered.
-- Next: override/implement for Java (needs a Velocity subset in HostFileTemplates); then wave D, main and JUnit 4/5
-  lenses and runs.
+- Plan to finish the branch (2026-11-22), in order, each step with its tests, the full suite and a commit:
+  1. Navigation on Java documents: implementations, call and type hierarchies (the host's operations are already
+     on `PsiClass`/`PsiMethod`; the LSP registrations select Scala only), and Go to Super from Java.
+  2. Override/Implement on Java classes: the Java plugin's `OverrideImplementUtil` through the host's preview editor,
+     with a Velocity subset in `HostFileTemplates` (the Java method-body templates use `#if`).
+  3. Java refactorings: Extract variable, Extract method and Inline on Java sources, through the Java plugin's
+     processors with the IDE's defaults, as the Scala ones are.
+  4. Wave D: `main` lenses (including Java 21+ instance mains) and JUnit 4/5 test lenses on Java sources, run over
+     BSP like the Scala ones.
+  5. Spike, no architecture change without a decision: what the nine data-flow inspections need of a message bus
+     (one project-level `MessageBusImpl` with no subscribers but the tracker, or a replaced tracker), and why
+     ConstantValue reports nothing.
+  6. Release preparation of 0.5.0: README (Java, Maven, Gradle), CHANGELOG, the VS Code extension's README and
+     activation, the java-playground's scenarios as the manual checklist, VSIX; merge and push wait for the user.
+- After 0.5.0, candidates (each its own decision): 0.4.1's Move; debugging over BSP's `debugSession/start` (Bloop
+  and sbt both start a debug adapter); test discovery for Scala and Java over BSP; Change Signature with a webview;
+  MCP writes; the `intellij.projects`/`jdkForSymbolResolution`-like settings; file and live templates; Bazel; the
+  0.3.1 audit's lifecycle items; diagnostics of every source in less than the 144 s of this repository.
 - Candidates taken from JetBrains' own LSP extension, "Java and Kotlin by IntelliJ IDEA"
   ([docs](https://www.jetbrains.com/help/intellij-vscode/About-instance.html)), which runs the IDE itself and is
   closed source, so only its documented behavior is a reference:

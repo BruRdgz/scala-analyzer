@@ -658,17 +658,18 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
 
   /**
    * Locates what the plugin's Go to Super navigates to from a position: the superclasses of the type around it, or
-   * the members that the member around it overrides or implements. Only Scala files have it.
+   * the members that the member around it overrides or implements. Scala and Java files have it.
    *
    * Library declarations are located as `definition` locates them.
    *
    * @param path registered project-source path
    * @param at caret position
    * @return the declaration locations, distinct and ordered by file and position; empty when there is no super, and
-   *         for a file that is not Scala
+   *         for a file that is neither Scala nor Java
    */
   def superElements(path: Path, at: LineColumn): Seq[(Path, LineColumn)] = file(path) match {
-    case sourceFile: ScalaFile => host.read(locationsOf(SuperElements.at(sourceFile, offset(document(sourceFile), at))))
+    case sourceFile: (ScalaFile | PsiJavaFile) =>
+      host.read(locationsOf(SuperElements.at(sourceFile, offset(document(sourceFile), at))))
     case _ => Seq.empty
   }
 
