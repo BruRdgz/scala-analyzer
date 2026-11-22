@@ -6,14 +6,15 @@
   program or the test runner of the same selection with a JDWP agent, and connects the editor to Scala Center's debug
   adapter, which the server runs: breakpoints, stepping, variables and expression evaluation in Scala and Java. The
   server command `scalaAnalyzer.startDebugSession` starts a session and answers with the adapter's address, for any
-  DAP client; the VS Code extension adds the `scala-analyzer` debugger and its launch configurations (see "Debugging"
+  DAP client; the VS Code extension adds the `scala-analyzer` debugger and its launch configurations, with `args`,
+  `jvmOptions` and `env`, and F5 without a `launch.json` debugs the active file's main class or test (see "Debugging"
   in the README).
 - A debug session can attach to a JVM that already runs with a JDWP agent: `scalaAnalyzer.startDebugSession` takes
   `{"kind": "attach", "target", "hostName", "port"}`, and the VS Code debugger has an `attach` configuration with a
   snippet. The target is compiled and described as for a launch, so the breakpoints and frames find their sources.
 - A frame in a library shows the library's source when a source archive is known: the server unpacks the archive into
-  `debug-sources/` under its state directory, once, and the debug adapter reports a file of it. (The adapter's own
-  answer is a `jar:` URI that editors cannot open.)
+  `debug-sources/` under its state directory, once, and the debug adapter reports a file of it; an archive no session
+  has used for a month is deleted. (The adapter's own answer is a `jar:` URI that editors cannot open.)
 - Hot code replace in debug sessions: when the server compiles a target, the live sessions are told which classes were
   rewritten, and the DAP request `redefineClasses` (java-debug's custom request, which the client sends; the VS Code
   extension does after a successful compile command) redefines them in the running program. A breakpoint on a line without code stays unverified; a line with a lambda still stops in the

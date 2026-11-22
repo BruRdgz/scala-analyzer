@@ -1,16 +1,19 @@
 package scalaanalyzer.build
 
+import ch.epfl.scala.bsp4j.JvmEnvironmentItem
 import ch.epfl.scala.debugadapter.{
   CancelableFuture, DebugServer, DebugToolsResolver, Debuggee, DebuggeeListener, JavaRuntime, Library, Logger, Module,
   ScalaVersion, SourceDirectory, SourceEntry, StandaloneSourceFile, UnmanagedEntry,
 }
 
-import scalaanalyzer.platform.HostLog
+import scalaanalyzer.platform.{HostLog, LibraryCache}
 
 import java.io.{BufferedReader, Closeable}
 import java.net.{InetSocketAddress, URI, URLClassLoader}
 import java.nio.charset.StandardCharsets.UTF_8
 import java.nio.file.{Files, Path, StandardCopyOption}
+import java.nio.file.attribute.FileTime
+import java.time.Instant
 import java.util.concurrent.{CopyOnWriteArrayList, ExecutorService, Executors, ThreadFactory}
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.zip.ZipFile
@@ -98,6 +101,31 @@ object DebugAdapter {
   final case class Attach(address: InetSocketAddress) extends Program
 
   /**
+   * What a launch configuration adds to the environment of a launched program, as the IDE's run configurations do:
+   * the build's JVM options and variables come first, the configuration's after them.
+   *
+   * @param jvmOptions JVM options added after the build's, so that one the build sets can be given again with another value
+   * @param environmentVariables variables added to the build's; one of the same name replaces the build's
+   */
+  final case class LaunchOptions(jvmOptions: Seq[String], environmentVariables: Map[String, String]) {
+    /** The environment with these options; the classpath and working directory are the build's. */
+    def applyTo(environment: TestRun.Environment): TestRun.Environment = {
+      val item = environment.item
+      val variables = new java.util.HashMap[String, String](item.getEnvironmentVariables)
+      variables.putAll(environmentVariables.asJava)
+      val extended = new JvmEnvironmentItem(item.getTarget, item.getClasspath,
+        (item.getJvmOptions.asScala ++ jvmOptions).asJava, item.getWorkingDirectory, variables)
+      extended.setMainClasses(item.getMainClasses)
+      environment.copy(item = extended)
+    }
+  }
+
+  object LaunchOptions {
+    /** No options: the build's environment as it is. */
+    val Empty: LaunchOptions = LaunchOptions(Seq.empty, Map.empty)
+  }
+
+  /**
    * Starts a debug server for a program, ready for a client to connect; a launched program starts when it does.
    *
    * The caller owns the result and closes it.
@@ -111,7 +139,7 @@ object DebugAdapter {
    * @param librarySources asks the build for the source archives of jars, which it pairs with them
    * @param toolsCache directory that keeps the expression compilers and decoders downloaded for Scala versions
    * @param sourcesCache directory that keeps the library source archives unpacked, so that the frame of a library has a
-   *                     file an editor can open
+   *                     file an editor can open; the archives no session used for a month are deleted from it
    * @return the running server; its `uri` is where a DAP client connects
    */
   def start(subject: String, program: Program, target: ImportedModule, modules: Seq[ImportedModule],
@@ -127,6 +155,7 @@ object DebugAdapter {
     given ExecutionContext = ExecutionContext.fromExecutor(executor)
 
     try {
+      pruneSources(sourcesCache)
       val classUpdates = new CopyOnWriteArrayList[Seq[String] => Unit]
       val debuggee = describe(subject, program, target, modules, environment, librarySources, sourcesCache, classUpdates)
       val server = DebugServer(debuggee, new ToolsResolver(toolsCache), HostLogger)
@@ -252,36 +281,68 @@ object DebugAdapter {
    * `source` request cannot answer (the adapter sends no `sourceReference`) and an editor cannot open; a file can be
    * opened. A failure is logged and the library goes without sources, as when none are known.
    *
+   * The directory's modification time records its last use, which `pruneSources` reads. Unpacking and pruning hold
+   * the cache's lock: sessions start concurrently, and one must not prune or unpack what another is about to use.
+   *
    * @param archive the `-sources.jar` of a library
    * @param cache directory of the unpacked archives, named after the archive's path, size and modification time
    */
-  private def unpack(archive: Path, cache: Path): Option[Path] = try {
-    val name = archive.getFileName.toString.stripSuffix(".jar")
-    val key = s"$name-${Integer.toHexString(archive.toString.hashCode)}-${Files.size(archive)}-${Files.getLastModifiedTime(archive).toMillis}"
-    val directory = cache.resolve(key)
+  private def unpack(archive: Path, cache: Path): Option[Path] = SourcesCacheLock.synchronized {
+    try {
+      val name = archive.getFileName.toString.stripSuffix(".jar")
+      val key = s"$name-${Integer.toHexString(archive.toString.hashCode)}-${Files.size(archive)}-${Files.getLastModifiedTime(archive).toMillis}"
+      val directory = cache.resolve(key)
 
-    if (!Files.isDirectory(directory)) {
-      // Unpacked aside and moved in whole, so that an interrupted unpacking is not taken for a complete one.
-      val partial = Files.createTempDirectory(Files.createDirectories(cache), "unpacking-")
-      Using.resource(new ZipFile(archive.toFile)) { zip =>
-        zip.stream().iterator().asScala.filterNot(_.isDirectory).foreach { entry =>
-          val file = partial.resolve(entry.getName).normalize()
-          if (file.startsWith(partial)) {
-            Files.createDirectories(file.getParent)
-            Using.resource(zip.getInputStream(entry))(Files.copy(_, file, StandardCopyOption.REPLACE_EXISTING))
-            // Read-only, as the host's other library files: an edit in the editor would otherwise stay in the cache.
-            file.toFile.setReadOnly()
+      if (Files.isDirectory(directory)) Files.setLastModifiedTime(directory, FileTime.from(Instant.now()))
+      else {
+        // Unpacked aside and moved in whole, so that an interrupted unpacking is not taken for a complete one.
+        val partial = Files.createTempDirectory(Files.createDirectories(cache), "unpacking-")
+        Using.resource(new ZipFile(archive.toFile)) { zip =>
+          zip.stream().iterator().asScala.filterNot(_.isDirectory).foreach { entry =>
+            val file = partial.resolve(entry.getName).normalize()
+            if (file.startsWith(partial)) {
+              Files.createDirectories(file.getParent)
+              Using.resource(zip.getInputStream(entry))(Files.copy(_, file, StandardCopyOption.REPLACE_EXISTING))
+              // Read-only, as the host's other library files: an edit in the editor would otherwise stay in the cache.
+              file.toFile.setReadOnly()
+            }
           }
         }
+        Files.move(partial, directory, StandardCopyOption.ATOMIC_MOVE)
       }
-      Files.move(partial, directory, StandardCopyOption.ATOMIC_MOVE)
-    }
 
-    Some(directory)
-  } catch {
-    case NonFatal(error) =>
-      HostLog.warn(s"debug adapter: could not unpack the sources $archive: $error")
-      None
+      Some(directory)
+    } catch {
+      case NonFatal(error) =>
+        HostLog.warn(s"debug adapter: could not unpack the sources $archive: $error")
+        None
+    }
+  }
+
+  /** Guards the unpacked sources' cache, which every session of the process shares. */
+  private object SourcesCacheLock
+
+  /**
+   * Deletes the unpacked archives no session has used for as long as the library cache keeps its files: those of library
+   * versions no project uses any more, and those of archives that changed since. Failures are logged.
+   *
+   * @param cache directory of the unpacked archives, as `unpack` fills it
+   */
+  private def pruneSources(cache: Path): Unit = SourcesCacheLock.synchronized {
+    val oldest = Instant.now().minus(LibraryCache.UnusedFor)
+
+    try {
+      if (Files.isDirectory(cache)) Using.resource(Files.list(cache)) { entries =>
+        entries.iterator().asScala
+          .filter(entry => Files.getLastModifiedTime(entry).toInstant.isBefore(oldest))
+          .foreach(deleteTree)
+      }
+    } catch { case NonFatal(error) => HostLog.warn(s"debug adapter: unpacked sources not pruned: $cache", error) }
+  }
+
+  /** Deletes a directory and what it holds, the read-only files too: deleting needs only the directory to be writable. */
+  private def deleteTree(root: Path): Unit = Using.resource(Files.walk(root)) { paths =>
+    paths.iterator().asScala.toSeq.reverse.foreach(Files.delete)
   }
 
   /**

@@ -2,7 +2,7 @@ package scalaanalyzer
 
 import org.eclipse.lsp4j.debug.*
 
-import scalaanalyzer.build.TestRun
+import scalaanalyzer.build.{DebugAdapter, TestRun}
 import scalaanalyzer.workspace.ProjectSession
 
 import com.intellij.psi.PsiManager
@@ -28,10 +28,12 @@ class DebugAdapterTest extends munit.FunSuite {
   /** The line of `assertEquals(1 + 1, 2)` in the body of the test `adds numbers` of `core.ExampleMUnit`. */
   private val testBodyLine = 4
 
-  test("debugs a main class: breakpoint, stack, variables, evaluation and exit") {
+  test("debugs a main class: breakpoint, stack, variables, evaluation, launch options and exit") {
     val session = ProjectSession.open(TestHost.host, fixture)
     try {
-      val uri = session.startMainDebugSession(fixture.toFile.toURI.toString + "#app/Compile", "app.Main", _ => ())
+      val options = DebugAdapter.LaunchOptions(Seq("-Dscala.analyzer.check=property"), Map("SCALA_ANALYZER_CHECK" -> "variable"))
+      val uri = session.startMainDebugSession(fixture.toFile.toURI.toString + "#app/Compile", "app.Main",
+        Seq("first", "second"), options, _ => ())
       assertEquals(uri.getScheme, "tcp")
       Using.resource(new DapClient(uri)) { client =>
         import client.{await, server}
@@ -69,6 +71,10 @@ class DebugAdapterTest extends munit.FunSuite {
         // A lambda needs the Scala 2.13 expression compiler, which the adapter downloads on its first use: this
         // assertion needs network access (or a populated `target/host-state/debug-tools`).
         assert(evaluate("text.map(_.toLower)").contains("hello, world!"))
+        // The launch configuration's arguments, JVM options and variables reach the program.
+        assert(evaluate("args.mkString(\"+\")").contains("first+second"))
+        assert(evaluate("System.getProperty(\"scala.analyzer.check\")").contains("property"))
+        assert(evaluate("System.getenv(\"SCALA_ANALYZER_CHECK\")").contains("variable"))
 
         client.resume(stop)
         val end = client.awaitEnd()
@@ -84,7 +90,8 @@ class DebugAdapterTest extends munit.FunSuite {
   test("a line without code is not verified: package clause, blank line, import") {
     val session = ProjectSession.open(TestHost.host, fixture)
     try {
-      val uri = session.startMainDebugSession(fixture.toFile.toURI.toString + "#app/Compile", "app.Main", _ => ())
+      val uri = session.startMainDebugSession(fixture.toFile.toURI.toString + "#app/Compile", "app.Main", Seq.empty,
+        DebugAdapter.LaunchOptions.Empty, _ => ())
       Using.resource(new DapClient(uri)) { client =>
         val launched = client.start()
         // The adapter knows the lines that class files have code for (line 1 is `package`, 2 is blank, 3 is `import`),
@@ -109,7 +116,7 @@ class DebugAdapterTest extends munit.FunSuite {
     val target = fixture.toFile.toURI.toString + "#app/Compile"
     val session = ProjectSession.open(TestHost.host, fixture)
     try {
-      val uri = session.startMainDebugSession(target, "app.Main", _ => ())
+      val uri = session.startMainDebugSession(target, "app.Main", Seq.empty, DebugAdapter.LaunchOptions.Empty, _ => ())
       Using.resource(new DapClient(uri)) { client =>
         import client.{await, server}
 
@@ -159,7 +166,7 @@ class DebugAdapterTest extends munit.FunSuite {
     try {
       val selection = TestRun.Selection(fixture.toFile.toURI.toString + "#core/Test", "munit", "core.ExampleMUnit",
         Some("adds numbers"))
-      val uri = session.startTestDebugSession(selection, _ => ())
+      val uri = session.startTestDebugSession(selection, DebugAdapter.LaunchOptions.Empty, _ => ())
       Using.resource(new DapClient(uri)) { client =>
         val launched = client.start()
         client.breakAt(munitSuite, testBodyLine)
@@ -193,7 +200,8 @@ class DebugAdapterTest extends munit.FunSuite {
   test("debugs a library frame: a step into println shows a file with the Scala library's source") {
     val session = ProjectSession.open(TestHost.host, fixture)
     try {
-      val uri = session.startMainDebugSession(fixture.toFile.toURI.toString + "#app/Compile", "app.Main", _ => ())
+      val uri = session.startMainDebugSession(fixture.toFile.toURI.toString + "#app/Compile", "app.Main", Seq.empty,
+        DebugAdapter.LaunchOptions.Empty, _ => ())
       Using.resource(new DapClient(uri)) { client =>
         import client.{await, server}
 

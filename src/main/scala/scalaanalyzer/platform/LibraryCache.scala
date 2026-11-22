@@ -443,8 +443,11 @@ object LibraryCache {
   /** Bytes of the identity digest in a cache file's name: 16 hex digits make a collision negligible. */
   private val DigestBytes = 8
 
-  /** How long a cache file may go unread before it is deleted: a jar no project has opened for a month. */
-  private val UnusedFor = Duration.ofDays(30)
+  /**
+   * How long a cache file may go unread before it is deleted: a jar no project has opened for a month. The debugger's
+   * unpacked library sources (`DebugAdapter`) are kept as long.
+   */
+  private[scalaanalyzer] val UnusedFor = Duration.ofDays(30)
 
   /**
    * The identity of the code that produces cached attributes and stubs: every entry of the JVM's classpath, a jar by

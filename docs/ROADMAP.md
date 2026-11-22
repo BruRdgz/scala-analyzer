@@ -337,8 +337,9 @@ Debugging over DAP, for Scala and Java, in sbt, Maven and Gradle projects alike.
      debugs the same runner command a test run uses. Built as the LSP command `scalaAnalyzer.startDebugSession`
      (`kind` `main` or `test`, plus the selection of Run main or Run test; answers `{"uri": "tcp://..."}`), the client
      command `scalaAnalyzer.debug` of the lenses, and a debugger type `scala-analyzer` in the VS Code extension whose
-     descriptor factory calls the server command. Left for later: a `DebugConfigurationProvider` that discovers main
-     classes and tests (`launch.json` is written by hand today), and the `args`, `jvmOptions` and `env` attributes.
+     descriptor factory calls the server command. Later: the `args`, `jvmOptions` and `env` attributes
+     (`DebugAdapter.LaunchOptions`, after the build's), and F5 without a `launch.json`, which resolves the empty
+     configuration to the active file's Debug lens (a pick when there are several).
   3. Done: attach to a running JVM, and library frames. `scalaAnalyzer.startDebugSession` takes
      `{"kind": "attach", "target", "hostName", "port"}` (`ProjectSession.startAttachDebugSession`): the target is
      compiled and described as for a launch, and the adapter's debuggee reports the address instead of starting
@@ -347,7 +348,8 @@ Debugging over DAP, for Scala and Java, in sbt, Maven and Gradle projects alike.
      `sourceReference` (java-debug only converts `file:` URIs), which VS Code cannot open and the `source` request
      cannot answer. Rather than a DAP proxy as Metals has, the host unpacks each library's source archive once into
      `debug-sources/` and gives the adapter that directory, so frames are files. Costs disk (the unpacked sources of
-     every library with sources, on the first session) and a pause on that first session. VS Code: `attach`
+     every library with sources, on the first session; an unpacked archive no session used for a month is deleted, as
+     the library cache's files are) and a pause on that first session. VS Code: `attach`
      attributes, a configuration provider that defaults `hostName`, snippets.
   4. Done in part: hot code replace after a compile. `ProjectSession` compares the class files of the modules' class
      directories (size, modification time) around every compile it makes (compile command, Run, Debug) when a debug
@@ -359,8 +361,8 @@ Debugging over DAP, for Scala and Java, in sbt, Maven and Gradle projects alike.
      not make a column select the lambda; it needs a change in the adapter (or a DAP proxy that sets the breakpoint
      itself through JDI, which the adapter's session does not expose). Breakpoint validity needs nothing: the adapter
      answers lines that class files have no code for (comments, imports, `package`, blank) as not verified, which is
-     what `canPutAt` refuses; the plugin's rule is not reused. Verified by tests that compile but were not run in
-     this wave (`DebugAdapterTest`: unverified lines, hot code replace).
+     what `canPutAt` refuses; the plugin's rule is not reused. Tested in `DebugAdapterTest` (unverified lines, hot code
+     replace).
 - Later, if useful: Bloop's `debugSession/start` as an alternative where the server announces it.
 
 ## Later

@@ -196,6 +196,9 @@ const debugSessions = new Set();
 // the server does not list or execute.
 const debugType = 'scala-analyzer';
 
+// The client command of the Debug lenses.
+const debugLensCommand = 'scalaAnalyzer.debug';
+
 // The command that asks the server for a debug session, which answers with the address of its DAP server.
 const startDebugSession = 'scalaAnalyzer.startDebugSession';
 
@@ -238,38 +241,83 @@ async function executeCommand(command, args, next) {
 }
 
 /**
- * Starts a debug session for the selection of a Debug lens, as a launch configuration of the extension's debugger.
- * @param {{kind: 'main' | 'test', target: string, mainClass?: string, framework?: string, suite?: string, testName?: string}} selection
- *   the lens's argument: the members of the server's `scalaAnalyzer.startDebugSession`
+ * The selection of a Debug lens: the members of the server's `scalaAnalyzer.startDebugSession`.
+ * @typedef {{kind: 'main' | 'test', target: string, mainClass?: string, framework?: string, suite?: string, testName?: string}} DebugSelection
  */
-async function debug({ kind, target, mainClass, framework, suite, testName }) {
-  const editor = vscode.window.activeTextEditor;
-  const folder = editor && vscode.workspace.getWorkspaceFolder(editor.document.uri);
+
+/**
+ * The launch configuration of the extension's debugger for the selection of a Debug lens.
+ * @param {DebugSelection} selection the lens's argument
+ * @returns {vscode.DebugConfiguration}
+ */
+function launchConfiguration({ kind, target, mainClass, framework, suite, testName }) {
   const configuration = kind === 'main'
     ? { name: `Debug ${mainClass}`, mainClass }
     : { name: `Debug ${suite}${testName ? `: ${testName.split('\n')[0]}` : ''}`, testClass: suite, framework, testName };
-  await vscode.debug.startDebugging(folder, { type: debugType, request: 'launch', buildTarget: target, ...configuration });
+  return { type: debugType, request: 'launch', buildTarget: target, ...configuration };
+}
+
+/**
+ * Starts a debug session for the selection of a Debug lens.
+ * @param {DebugSelection} selection the lens's argument
+ */
+async function debug(selection) {
+  const editor = vscode.window.activeTextEditor;
+  const folder = editor && vscode.workspace.getWorkspaceFolder(editor.document.uri);
+  await vscode.debug.startDebugging(folder, launchConfiguration(selection));
+}
+
+/**
+ * The launch configuration of F5 when no launch.json names one: that of the active editor's Debug lens, or of the lens
+ * the user picks when the file has several, as the IDE's Debug action offers the run configurations of the file.
+ * @returns {Promise<vscode.DebugConfiguration | undefined>} undefined when there is nothing to debug or the pick was
+ *   dismissed, which ends the start quietly
+ */
+async function lensConfiguration() {
+  const editor = vscode.window.activeTextEditor;
+  /** @type {vscode.CodeLens[]} */
+  const lenses = editor ? await vscode.commands.executeCommand('vscode.executeCodeLensProvider', editor.document.uri) : [];
+  /** @type {vscode.DebugConfiguration[]} */
+  const configurations = lenses
+    .filter(lens => lens.command?.command === debugLensCommand)
+    .map(lens => launchConfiguration(lens.command.arguments[0]));
+  if (configurations.length === 0) {
+    vscode.window.showInformationMessage('scala-analyzer: the active file has no main class or test to debug');
+    return undefined;
+  }
+  if (configurations.length === 1) return configurations[0];
+  const picked = await vscode.window.showQuickPick(
+    configurations.map(configuration => ({ label: configuration.name, configuration })),
+    { placeHolder: 'What to debug' });
+  return picked?.configuration;
 }
 
 /**
  * The server's debug request for a configuration: a running JVM to attach to for an `attach` configuration; otherwise a
- * main class, or a test selection when it has a `testClass`.
+ * main class, or a test selection when it has a `testClass`, with the configuration's arguments, JVM options and
+ * variables.
  * @param {vscode.DebugConfiguration} configuration the session's configuration
  */
-function debugRequest({ request, buildTarget, hostName, port, mainClass, testClass, framework, testName }) {
+function debugRequest({ request, buildTarget, hostName, port, mainClass, testClass, framework, testName, args, jvmOptions, env }) {
   if (request === 'attach') return { kind: 'attach', target: buildTarget, hostName, port: Number(port) };
-  if (mainClass) return { kind: 'main', target: buildTarget, mainClass };
-  if (testClass) return { kind: 'test', target: buildTarget, framework, suite: testClass, testName };
+  if (mainClass) return { kind: 'main', target: buildTarget, mainClass, args, jvmOptions, env };
+  if (testClass) {
+    // The runner's arguments are the selection: a test has no arguments of its own.
+    if (args) throw new Error('args applies to a mainClass; a testClass is debugged with the runner\'s arguments');
+    return { kind: 'test', target: buildTarget, framework, suite: testClass, testName, jvmOptions, env };
+  }
   throw new Error('a scala-analyzer launch configuration needs a mainClass or a testClass');
 }
 
 /**
- * Fills in what an attach configuration leaves out: VS Code sends the configuration as written, without the defaults of
- * the schema in package.json, and the debug adapter needs the host to attach to.
+ * Fills in what a configuration leaves out. F5 without a launch.json resolves an empty configuration, which becomes the
+ * active file's Debug lens; VS Code sends the other configurations as written, without the defaults of the schema in
+ * package.json, and the debug adapter needs the host to attach to.
  * @type {vscode.DebugConfigurationProvider}
  */
 const debugConfigurationProvider = {
   resolveDebugConfiguration(_folder, configuration) {
+    if (!configuration.type && !configuration.request) return lensConfiguration();
     return configuration.request === 'attach' ? { hostName: 'localhost', ...configuration } : configuration;
   },
 };

@@ -9,7 +9,7 @@ import org.eclipse.lsp4j.jsonrpc.messages.{Either as LspEither, Either3 as LspEi
 import org.eclipse.lsp4j.services.*
 
 import scalaanalyzer.{LineColumn, LineRange, ScalaPsiHost}
-import scalaanalyzer.build.{BspImport, ScalafmtFormatting, TestRun}
+import scalaanalyzer.build.{BspImport, DebugAdapter, ScalafmtFormatting, TestRun}
 import scalaanalyzer.language.{
   Completion, CompletionChoice, CompletionFollowUp, Extract, FileProblem, Fold, HierarchyItem, HierarchyTarget, InlayHints,
   InlineHint, MemberOverrides, OutlineSymbol, ProblemSeverity, Rename, SignatureChoices, SourceSpan, TextChange,
@@ -2002,8 +2002,9 @@ final class ScalaLanguageServer(
         val uri =
           try withProgress("scala-analyzer: starting the debug session") { _ =>
             selection match {
-              case DebugRequest.Main(main) => s.startMainDebugSession(main.target, main.mainClass, changed)
-              case DebugRequest.Test(test) => s.startTestDebugSession(test, changed)
+              case DebugRequest.Main(main, arguments, options) =>
+                s.startMainDebugSession(main.target, main.mainClass, arguments, options, changed)
+              case DebugRequest.Test(test, options) => s.startTestDebugSession(test, options, changed)
               case DebugRequest.Attach(target, hostName, port) => s.startAttachDebugSession(target, hostName, port, changed)
             }
           } catch {
@@ -2022,8 +2023,17 @@ final class ScalaLanguageServer(
       json <- objectArgument(params)
       kind <- stringMember(json, "kind")
       selection <- kind match {
-        case "main" => mainSelection(json).map(DebugRequest.Main(_))
-        case "test" => testSelection(json).map(DebugRequest.Test(_))
+        case "main" =>
+          for {
+            main <- mainSelection(json)
+            arguments <- stringsMember(json, "args")
+            options <- launchOptions(json)
+          } yield DebugRequest.Main(main, arguments, options)
+        case "test" =>
+          for {
+            test <- testSelection(json)
+            options <- launchOptions(json)
+          } yield DebugRequest.Test(test, options)
         case "attach" =>
           for {
             target <- stringMember(json, "target")
@@ -2033,6 +2043,28 @@ final class ScalaLanguageServer(
         case _ => None
       }
     } yield selection
+
+  /** Reads the optional `jvmOptions` and `env` of a debug request; absent when either has another shape. */
+  private def launchOptions(json: JsonObject): Option[DebugAdapter.LaunchOptions] =
+    for {
+      jvmOptions <- stringsMember(json, "jvmOptions")
+      variables <- Option(json.get("env")).fold(Some(Map.empty[String, String])) {
+        case env: JsonObject =>
+          val entries = env.entrySet().asScala.toSeq.map(entry => entry.getKey -> entry.getValue)
+          Option.when(entries.forall((_, value) => value.isJsonPrimitive && value.getAsJsonPrimitive.isString))(
+            entries.map((name, value) => name -> value.getAsString).toMap)
+        case _ => None
+      }
+    } yield DebugAdapter.LaunchOptions(jvmOptions, variables)
+
+  /** Reads an optional array of strings: empty when the member is missing, absent when it is not an array of strings. */
+  private def stringsMember(json: JsonObject, name: String): Option[Seq[String]] = Option(json.get(name)).fold(Some(Seq.empty)) {
+    case array: JsonArray =>
+      val elements = array.asList().asScala.toSeq
+      Option.when(elements.forall(element => element.isJsonPrimitive && element.getAsJsonPrimitive.isString))(
+        elements.map(_.getAsString))
+    case _ => None
+  }
 
   /** Evaluates the start of a run, answering a start while another run is in progress as `RequestFailed`. */
   private def startRun(start: => CompletableFuture[AnyRef]): CompletableFuture[AnyRef] =
@@ -2226,6 +2258,8 @@ private val RunMain = "scalaAnalyzer.runMain"
  * The command that starts a debug session. Its argument is the object of [[RunMain]] or [[RunTest]] with a `kind`
  * member, `main` or `test`, or `{"kind": "attach", "target", "hostName", "port"}` for a JVM that already runs with a
  * JDWP agent listening there; it answers `{"uri": "tcp://127.0.0.1:port"}`, the address a DAP client connects to.
+ * A `main` or `test` request may add `jvmOptions` (an array of strings) and `env` (an object of strings) to the build's
+ * environment, and a `main` request the program's `args` (an array of strings).
  */
 private val StartDebugSession = "scalaAnalyzer.startDebugSession"
 
@@ -2234,8 +2268,8 @@ private val MaxPort = 65535
 
 /** What a [[StartDebugSession]] request asks to debug. */
 private enum DebugRequest {
-  case Main(selection: TestRun.MainSelection)
-  case Test(selection: TestRun.Selection)
+  case Main(selection: TestRun.MainSelection, arguments: Seq[String], options: DebugAdapter.LaunchOptions)
+  case Test(selection: TestRun.Selection, options: DebugAdapter.LaunchOptions)
   case Attach(target: String, hostName: String, port: Int)
 }
 

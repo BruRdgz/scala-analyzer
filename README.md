@@ -218,7 +218,8 @@ the program or the test runner exactly as the run does, with a JDWP agent added,
 debug adapter the server runs for it (Scala Center's scala-debug-adapter, as Metals uses it when its build server
 cannot debug). Breakpoints, stepping, the stack, variables and expression evaluation work in Scala and Java sources,
 and the library frames show their sources when a source archive is known: the server unpacks it once into
-`debug-sources/` under its state directory, so that the frame is a file the editor opens. A debug session does not take the single
+`debug-sources/` under its state directory, so that the frame is a file the editor opens (an unpacked archive no
+session has used for a month is deleted). A debug session does not take the single
 active run: it ends when the editor disconnects or the program exits, and the server ends the ones that are left when
 it stops. The program's output goes to the editor's debug console.
 
@@ -230,6 +231,12 @@ configuration can start as well. Its attributes:
 | `buildTarget` | Required. The target to compile and debug, as the server names it: the workspace's file URI and the target id, such as `file:///project#app/Compile` for a main class and `file:///project#core/Test` for tests. |
 | `mainClass` | The class with the main method, by its JVM name. |
 | `testClass`, `framework`, `testName` | A test suite (for JUnit, the class's binary name), its framework (`junit4`, `junit5`, `munit`, `scalatest`, `specs2`, `utest`) and optionally the test, as the Run test lens names it. Use these or `mainClass`. |
+| `args` | The arguments of `mainClass`. A test takes none: the runner's arguments are the selection. |
+| `jvmOptions` | JVM options added after the build's, such as `-Xmx2g` or `-Dkey=value`. |
+| `env` | Environment variables added to the build's; one of the same name replaces the build's. |
+
+Without a `launch.json`, F5 in a Scala or Java file debugs what the file's Debug lens would: its main class or test,
+or the one picked from a list when the file has several.
 
 To debug a JVM that already runs, start the program with a JDWP agent, for example
 `-agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=*:5005` (`JAVA_TOOL_OPTIONS` or `sbt`'s `javaOptions`
@@ -245,7 +252,8 @@ classpath is what the debugger knows of it.
 
 Other editors start a session with the server command `scalaAnalyzer.startDebugSession`. Its one argument is the
 object of `scalaAnalyzer.runMain` (`target`, `mainClass`) or `scalaAnalyzer.runTest` (`target`, `framework`, `suite`,
-and optionally `testName`) with a `kind` member, `"main"` or `"test"`; or `{"kind": "attach", "target", "hostName",
+and optionally `testName`) with a `kind` member, `"main"` or `"test"`, and optionally `jvmOptions` and `env` (and, for a
+main class, `args`) as in `launch.json`; or `{"kind": "attach", "target", "hostName",
 "port"}` for a JVM that already runs with a JDWP agent listening there (the client then sends the DAP `attach` request
 with the same host and port). The request compiles the target and answers
 `{"uri": "tcp://127.0.0.1:<port>"}`, the address of a Debug Adapter Protocol server that takes one client; a target
@@ -272,8 +280,8 @@ changes method bodies only: a changed signature, field or class shape fails with
 method that is still running (`main`) keeps the old code. Class files are compared by size and modification time, so a
 recompile that wrote identical bytes is reported too.
 
-Limitations: Java frames evaluate simple expressions only; the source of a library is shown only when the build gives
-its source archive; and VS Code has no launch configuration provider yet, so a `launch.json` entry is written by hand.
+Limitations: Java frames evaluate simple expressions only, and the source of a library is shown only when the build
+gives its source archive.
 
 ### Troubleshooting
 

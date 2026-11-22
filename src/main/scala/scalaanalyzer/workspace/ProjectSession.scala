@@ -1073,15 +1073,18 @@ final class ProjectSession private (
    *
    * @param target BSP target to compile and to debug a main class of
    * @param mainClass JVM name of the class that has the `main` method
+   * @param arguments the program's arguments
+   * @param options JVM options and environment variables added to the build's
    * @param changed receives the sources that may need their diagnostics republished, as in `prepareMainRun`
    * @return the `tcp://host:port` address of the DAP server
    * @throws IllegalStateException when the target does not compile, or the session is closed or unavailable
    */
-  def startMainDebugSession(target: String, mainClass: String, changed: Set[Path] => Unit): URI = buildLock.synchronized {
+  def startMainDebugSession(target: String, mainClass: String, arguments: Seq[String], options: DebugAdapter.LaunchOptions,
+                            changed: Set[Path] => Unit): URI = buildLock.synchronized {
     val main = TestRun.MainSelection(target, mainClass)
-    val environment = prepareMainRun(target, changed)
+    val environment = options.applyTo(prepareMainRun(target, changed))
 
-    debugSession(target, mainClass, DebugAdapter.Launch(TestRun.mainCommand(main, environment)), environment)
+    debugSession(target, mainClass, DebugAdapter.Launch(TestRun.mainCommand(main, environment) ++ arguments), environment)
   }
 
   /**
@@ -1093,13 +1096,15 @@ final class ProjectSession private (
    * `TestRun`'s single active run.
    *
    * @param selection the suite, and optionally the tests, to debug
+   * @param options JVM options and environment variables added to the build's
    * @param changed receives the sources that may need their diagnostics republished, as in `prepareTestRun`
    * @return the `tcp://host:port` address of the DAP server
    * @throws IllegalStateException when the target does not compile, the selection's runner cannot run on the test
    *                               classpath, or the session is closed or unavailable
    */
-  def startTestDebugSession(selection: TestRun.Selection, changed: Set[Path] => Unit): URI = buildLock.synchronized {
-    val environment = prepareTestRun(selection.target, changed)
+  def startTestDebugSession(selection: TestRun.Selection, options: DebugAdapter.LaunchOptions,
+                            changed: Set[Path] => Unit): URI = buildLock.synchronized {
+    val environment = options.applyTo(prepareTestRun(selection.target, changed))
 
     debugSession(selection.target, selection.suite, DebugAdapter.Launch(TestRun.testCommand(selection, environment)), environment)
   }

@@ -149,6 +149,27 @@
                   "utest"
                 ],
                 "description": "The test framework of testClass, which picks the runner."
+              },
+              "args": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "The arguments of mainClass. A testClass takes none: its runner's arguments are the selection."
+              },
+              "jvmOptions": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "JVM options added after the build's, such as -Xmx2g or -Dkey=value."
+              },
+              "env": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "description": "Environment variables added to the build's; one of the same name replaces the build's."
               }
             }
           },
