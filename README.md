@@ -35,12 +35,12 @@ It exposes editor features through the **Language Server Protocol (LSP)** and im
 | Diagnostics | Scala plugin and compiler diagnostics; current-buffer compilation for Scala 3; selected native inspections and, in Java files, the Java plugin's default inspections, also over the whole project (Inspect Code, listed by group, inspection and file in VS Code's Inspection Results view). |
 | Completion | Automatic imports, insertion handlers, postfix templates (`expr.if`, `.match`, `.for`, `.var`, `.not`...) and signature help (also in Java files). |
 | Inlay hints | Inferred types, parameter names, implicit arguments and conversions, method chains. Type names are links to their declarations, an inferred definition type can be written into the source, and `scalaAnalyzer.inlayHints.*` selects the kinds shown. Java files get the IDE's parameter-name hints, with its default options. |
-| Navigation | Definitions (through the plugin's Go to Declaration), type definitions, references, implementations, go to super, go to test (from a class to its tests and back), call/type hierarchies and workspace symbols; library sources and decompiled classes. |
+| Navigation | Definitions (through the plugin's Go to Declaration), type definitions, references, implementations, go to super, go to test (from a class to its tests and back), call/type hierarchies and workspace symbols, in Scala and Java files; library sources and decompiled classes. |
 | Documentation | Markdown hover with declaration context, parameters, return values and linked references. |
-| Editing | Rename and references (also across Java files), organize imports (also in Java files), previewable quick fixes and intentions (Java files get the Java plugin's error and inspection fixes and intentions), surround and unwrap actions; implement and override members; split/join lists and flip comma; Inline for `val`s, `def`s and type aliases; Extract to val and Extract method. |
+| Editing | Rename and references (also across Java files), organize imports (also in Java files), previewable quick fixes and intentions (Java files get the Java plugin's error and inspection fixes and intentions), surround and unwrap actions; implement and override members (also in Java files); split/join lists and flip comma; Inline for `val`s, `def`s and type aliases; Extract to val and Extract method; in Java files, Extract variable and Inline variable. |
 | Formatting | Whole-file scalafmt or IntelliJ formatting; range formatting through IntelliJ. Java files always use the IntelliJ formatter. |
 | Tests | Run ScalaTest, specs2 and MUnit suites/tests, and uTest suites, from code lenses; readable output and a result summary. |
-| Run | Run objects with a `main` method, `App` objects and Scala 3 `@main` methods from code lenses; output and an exit summary. |
+| Run | Run objects with a `main` method, `App` objects, Scala 3 `@main` methods and Java main classes from code lenses; output and an exit summary. |
 | Code structure | Semantic tokens and selection ranges (also in Java files), document highlights (including a method's exit points, companions and implicit usages), outlines and folding. |
 
 See [known limitations](#known-limitations) for the supported boundaries of these features.
@@ -194,8 +194,9 @@ plugin's needs IntelliJ's JUnit runtime.
 
 ### Running main classes
 
-Main lenses sit on top-level objects that have a `main` method of their own or an inherited one (`App`), and on Scala 3
-`@main` methods. They compile the target and launch the class in a separate JVM like test runs do, with the classpath,
+Main lenses sit on top-level objects that have a `main` method of their own or an inherited one (`App`), on Scala 3
+`@main` methods, and on the name of each Java class the JVM can launch that has a main method, static or (Java 21+)
+an instance one, as the IDE's run markers do (a static nested class runs by its binary name, `Outer$Nested`). They compile the target and launch the class in a separate JVM like test runs do, with the classpath,
 JVM options, environment variables and working directory of BSP's `buildTarget/jvmRunEnvironment`, which the build
 server must support. The output goes to the editor's output channel and a notification tells how the program exited.
 The program gets no arguments and no standard input, and shares the single active run with the tests, so a program
@@ -240,7 +241,9 @@ partial, indexes are kept in memory, and each process serves one workspace.
   Inspect Code (`scalaAnalyzer/inspect`) runs only these inspections, on the Scala and Java sources that the build
   does not mark as generated; it does not report syntax, type or compiler errors. The VS Code extension shows its result in a separate
   list and omits files whose live diagnostics are already shown; other clients receive every file's problems and
-  must avoid showing them twice. Dialog-dependent actions, file/package moves and optional automatic renames are
+  must avoid showing them twice. The data-flow inspections of Java sources (DataFlowIssue, ConstantValue,
+  PointlessBooleanExpression and others) run, but do not yet report reliably: they can miss what the IDE reports.
+  Dialog-dependent actions, file/package moves and optional automatic renames are
   unavailable; code actions are limited to current-file previews.
 - Unwrap actions are offered with every code-action request at the caret, in the order of the IDE's Unwrap popup,
   without its highlighting of the affected code. Change access modifier is not offered: it needs the IDE's rename UI.
@@ -251,6 +254,11 @@ partial, indexes are kept in memory, and each process serves one workspace.
   public or `protected` member, a `private[pkg]` one and a Scala 3 top-level private one are left out even when no
   other file uses them: Inline of a member used in several files is unavailable. The IDE's choice to keep the declaration after
   inlining every usage is not offered.
+- In Java files, Extract variable offers each choice of occurrences that the IDE's chooser lists (this occurrence,
+  all of them), named as the IDE suggests, through the same `scalaAnalyzer.extract` command; Inline variable inlines
+  every usage of a local and removes it, or the usage under the caret. Java's Extract method, Inline method and
+  Inline constant are not offered: the first needs a class of the IDE's settings dialog that the server does not
+  have.
 - Extract to val and Extract method (`refactor.extract`) are offered for a selection. They are the plugin's Introduce
   Variable and Extract Method with the IDE's defaults, without their dialogs. Extract to val takes the first name the
   plugin suggests and the explicit type its setting asks for (as the IDE's dialog does and its in-place editor does

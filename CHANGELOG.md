@@ -51,10 +51,20 @@
   casts, `throws` clauses, try/catch, changed types, and an import choice per class an unresolved name can be. They are
   computed for the errors a code-action request touches, not in every diagnostics pass.
 - Java files get the IDE's default Java inspections: the 432 local inspections the Java plugin enables by default
-  (read from its descriptors), minus 19 that need what the host does not have, each listed with its reason. Their
+  (read from its descriptors), minus 5 that need what the host does not have, each listed with its reason. Their
   problems are in the diagnostics and in Inspect Code (also over MCP), with the inspections' fixes and the
-  `//noinspection` and `@SuppressWarnings` suppressions in the lightbulb. Nine data-flow inspections (DataFlowIssue,
-  ConstantExpression and others) are among the excluded ones.
+  `//noinspection` and `@SuppressWarnings` suppressions in the lightbulb. The data-flow inspections (DataFlowIssue,
+  ConstantValue and others) run without library bytecode inference, and do not yet report reliably.
+- Java documents have implementations, call and type hierarchies, and Go to Super (from a lambda, the functional
+  interface's method); the VS Code commands Go to Super and Go to Test are offered in Java files.
+- Override and Implement Members work on Java classes, with the IDE's dialog's order and defaults (`@Override`, a call
+  to `super`, the default value of the return type); the Java error fix "Implement methods" inserts the same methods.
+  The server now carries Apache Velocity (`velocity-engine-core`, which the IntelliJ platform declares), which the
+  platform needs to indent the generated bodies.
+- Java files have Extract variable, one action per choice of occurrences the IDE offers, followed in VS Code by a
+  rename of the new variable, and Inline variable (every usage, or the one under the caret).
+- Java main classes have Run main code lenses, as the IDE's run markers: static and (Java 21+) instance `main`
+  methods, nested classes by their binary name.
 - Scala parameter-name hints follow the IDE's default exclusion list, which the Scala filter shares with Java: calls
   such as setters (`*.set*(*)`), `Math` methods or `println` no longer show parameter names.
 
