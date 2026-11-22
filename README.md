@@ -211,6 +211,16 @@ server must support. The output goes to the editor's output channel and a notifi
 The program gets no arguments and no standard input, and shares the single active run with the tests, so a program
 that keeps running blocks the next run until it is cancelled. Worksheets and scripts have no lenses.
 
+**Testing view (VS Code).** The extension fills VS Code's Testing view with the project's test suites and tests,
+grouped by build target, from the same detection as the Run test lenses (Scala and JUnit). Run (the default profile)
+runs the selected suites or tests and shows each test's result as it arrives, with the failure message on the test;
+Debug starts the debugger on the selected suite or test, without per-test results. The tree is loaded when the build
+is imported, reloaded for a file when it is saved, and by the view's refresh button. Other clients get the same from
+the request `scalaAnalyzer/testItems {uri?}`, which answers `{uri, range, target, framework, suite, testName?, label}`
+items, and the notification `scalaAnalyzer/testResult {suite, testName, outcome, message?, durationMs?}` the server
+sends during a `scalaAnalyzer.runTest` (`outcome`: `started`, `passed`, `failed` or `ignored`). Listing the whole
+project runs the lens detection on every source, as the build does not tell test sources apart.
+
 ### Debugging
 
 Each Run lens has a **Debug** lens beside it (Debug main, Debug suite, Debug test). It compiles the target, launches
@@ -285,7 +295,8 @@ its text. The adapter reads a log message as a Scala string interpolation: `valu
 `{x}` is printed as written). Exception breakpoints stop where an exception is thrown (VS Code's "Caught
 Exceptions" and "Uncaught Exceptions"), Set Value changes a variable, and Restart Frame drops the frame and calls the
 method again, as the IDE's Drop Frame. When the program exits by itself, the debug console's last line is `Process
-finished with exit code N`: the adapter's own `exited` event always reports 0.
+finished with exit code N`: the adapter's own `exited` event always reports 0. Run Without Debugging (Ctrl+F5)
+starts the same session but sets no breakpoint, so the program runs to its end.
 
 While the program is stopped, the editor shows the values of the method's local variables and parameters at the end of
 the lines that declare or read them, up to the current line, as the IDE's "Show values inline" (the LSP request

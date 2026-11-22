@@ -389,6 +389,15 @@ Debugging over DAP, for Scala and Java, in sbt, Maven and Gradle projects alike.
      it there. The step-in result is a `stopped` event, as for any step. Tested in `DebugAdapterTest` (values, smart
      step into); the plugin's `ScalaSmartStepIntoHandler` was not reused, as it needs the IDE's debugger.
 - Later, if useful: Bloop's `debugSession/start` as an alternative where the server announces it.
+- Testing view (VS Code), done: `scalaAnalyzer/testItems` lists the lens selections, `scalaAnalyzer/testResult`
+  reports each test of a `scalaAnalyzer.runTest`, and `editors/vscode/tests.js` drives a TestController with Run and
+  Debug profiles. Open:
+  - `testItems` without a document scans every source, because the build does not tell test sources from main ones;
+    BSP's `canTest` targets could narrow it.
+  - The runner's test names can differ from the lens `testName` (ScalaTest scopes, parameterized JUnit); the extension
+    adds the reported test under its suite. Normalize on the server if it proves noisy.
+  - Run output is not forwarded to the TestRun, and a debug session reports no per-test results.
+  - JUnit items of `testItems` are not tested (the BSP fixture has no JUnit tests; the Bloop fixtures do).
 
 ## Later
 

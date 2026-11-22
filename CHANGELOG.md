@@ -12,6 +12,10 @@
 - A debug session can attach to a JVM that already runs with a JDWP agent: `scalaAnalyzer.startDebugSession` takes
   `{"kind": "attach", "target", "hostName", "port"}`, and the VS Code debugger has an `attach` configuration with a
   snippet. The target is compiled and described as for a launch, so the breakpoints and frames find their sources.
+- Testing view in VS Code: the project's suites and tests, listed from the server (`scalaAnalyzer/testItems`), run
+  with a result per test as it arrives (`scalaAnalyzer/testResult` notification during `scalaAnalyzer.runTest`), or
+  debugged.
+- Run Without Debugging (Ctrl+F5) of a `scala-analyzer` configuration no longer stops at breakpoints.
 - Debugging, closer to the IDE's, through a DAP proxy the server runs in front of the adapter: strings are not
   expandable, a captured `var` shows its value instead of its `IntRef` holder, a Scala collection lists its elements
   (up to 100), and Smart Step Into (`stepInTargets`) steps into the call chosen among those of the line.

@@ -53,6 +53,8 @@ class LanguageServerTest extends munit.FunSuite {
     val shown = new LinkedBlockingQueue[MessageParams]()
     override def publishDiagnostics(params: PublishDiagnosticsParams): Unit = published.add(params)
     override def state(state: HostProtocol.ServerState): Unit = states.add(state)
+    val testResults = new LinkedBlockingQueue[HostProtocol.TestResult]()
+    override def testResult(result: HostProtocol.TestResult): Unit = testResults.add(result)
     override def telemetryEvent(o: AnyRef): Unit = ()
     override def showMessage(params: MessageParams): Unit = shown.add(params)
     override def showMessageRequest(params: ShowMessageRequestParams): CompletableFuture[MessageActionItem] =
@@ -451,6 +453,30 @@ class LanguageServerTest extends munit.FunSuite {
     assert(ordinary.isEmpty)
   }
 
+  test("lists test items as the run lenses carry them, for one document or the whole project") {
+    val target = fixture.toFile.toURI.toString + "#core/Test"
+    val munit = fixture.resolve("core/src/test/scala/core/ExampleMUnit.scala")
+    def items(uri: Option[String]): Seq[HostProtocol.TestItem] =
+      server.testItems(new HostProtocol.TestItemsParams(uri.orNull)).get(5, TimeUnit.MINUTES).asScala.toSeq
+    def summary(item: HostProtocol.TestItem): (String, String, String, Option[String], String, String) =
+      (item.target, item.framework, item.suite, Option(item.testName), item.label, item.uri)
+    val uri = munit.toUri.toString
+
+    assertEquals(items(Some(document(munit).getUri)).map(summary), Seq(
+      (target, "munit", "core.ExampleMUnit", None, "ExampleMUnit", uri),
+      (target, "munit", "core.ExampleMUnit", Some("adds numbers"), "adds numbers", uri)))
+
+    val project = items(None)
+    assertEquals(project.filter(_.uri == uri).map(summary), items(Some(uri)).map(summary))
+    val suites = project.filter(_.testName == null).map(_.suite).toSet
+    assert(Set("core.ExampleFunSuite", "core.ExampleMUnit", "core.FailingSuite").subsetOf(suites), suites.toString)
+    assert(project.forall(_.target == target), "only the core module has tests")
+    // A WordSpec scope's name has several lines; its item shows the first.
+    val scope = project.find(item => item.suite == "core.ExampleWordSpec" && Option(item.testName).exists(_.contains("\n"))).get
+    assertEquals(scope.label, "a calculator should add numbers")
+    assertEquals(items(Some(document(counter).getUri)), Seq.empty)
+  }
+
   test("discovers run-main code lenses with the class the JVM launches and BSP target identities") {
     case class Expected(line: Int, mainClass: String, target: String)
     val root = fixture.toFile.toURI.toString
@@ -549,6 +575,23 @@ class LanguageServerTest extends munit.FunSuite {
       assert(!logs.exists(_.contains("##teamcity[")), logs.mkString("\n"))
       if (suite.startsWith("Failing")) assert(logs.exists(_.contains("deliberate failure")), logs.mkString("\n"))
     }
+  }
+
+  test("sends each test's progress while a selection runs") {
+    Client.testResults.clear()
+    val argument = new JsonObject
+    argument.addProperty("target", fixture.toFile.toURI.toString + "#core/Test")
+    argument.addProperty("framework", "munit")
+    argument.addProperty("suite", "core.FailingMUnit")
+    server.getWorkspaceService.executeCommand(new ExecuteCommandParams("scalaAnalyzer.runTest", JavaList.of(argument)))
+      .get(3, TimeUnit.MINUTES)
+
+    val results = Client.testResults.asScala.toSeq
+    assert(results.forall(_.suite == "core.FailingMUnit"), results.map(_.suite).toString)
+    assertEquals(results.filter(_.testName == "passes").map(_.outcome), Seq("started", "passed"))
+    assertEquals(results.filter(_.testName == "fails").map(_.outcome), Seq("started", "failed"))
+    assert(results.find(_.outcome == "failed").exists(_.message.contains("deliberate failure")), results.toString)
+    assert(results.exists(_.outcome == "ignored"), results.map(_.outcome).toString)
   }
 
   test("runs main classes through BSP and reports how they exited") {

@@ -750,6 +750,49 @@ final class ScalaLanguageServer(
     catch { case _: ProcessCanceledException if !HostLock.isRequestCancelled => s.inspect(path) }
 
   /**
+   * Lists the test suites and tests of a document, or of every source of the project, as the run code lenses carry them.
+   *
+   * With a document, runs on a read thread over its current buffer, as `codeLens` does. Without one, runs on a read
+   * thread too, but scans the project's Scala and Java sources one after the other, each in its own host read, so
+   * edits go on between sources: the build does not tell test sources from main ones, so every source pays the
+   * detection, and the cost grows with the project. A source that an edit cancels is scanned once more.
+   *
+   * @param params the document to list; `null`, or parameters without a URI, list the whole project
+   * @return per source in path order, each suite followed by its tests in source order; empty when the document is not
+   *         a project source or has no tests; the whole-project listing fails when the project is not open
+   */
+  override def testItems(params: HostProtocol.TestItemsParams): CompletableFuture[JavaList[HostProtocol.TestItem]] =
+    Option(params).flatMap(p => Option(p.uri)) match {
+      case Some(uri) =>
+        onRead("testItems", new TextDocumentIdentifier(uri), JavaList.of[HostProtocol.TestItem]()) { (s, path) =>
+          testItemsOf(s, path).asJava
+        }
+      case None =>
+        answered("testItems", reads.execute) { s =>
+          s.inspectableSources.flatMap(path => scannedOnce(testItemsOf(s, path))).asJava
+        }
+    }
+
+  /** Evaluates `scan` once more if an edit cancelled the first attempt; a cancelled request is not retried. */
+  private def scannedOnce[A](scan: => A): A =
+    try scan
+    catch { case _: ProcessCanceledException if !HostLock.isRequestCancelled => scan }
+
+  /** The items of one source: its test lenses, each as the suite or test it runs. */
+  private def testItemsOf(s: ProjectSession, path: Path): Seq[HostProtocol.TestItem] = {
+    val uri = path.toUri.toString
+
+    s.testLenses(path).map { lens =>
+      val label = lens.testName.fold(simpleName(lens.suite))(_.linesIterator.nextOption().getOrElse(""))
+
+      new HostProtocol.TestItem(uri, range(lens.range), lens.target, lens.framework, lens.suite, lens.testName.orNull, label)
+    }
+  }
+
+  /** The class name after the last package dot or nesting separator (`$` of a Java binary name). */
+  private def simpleName(qualified: String): String = qualified.substring(qualified.lastIndexWhere(c => c == '.' || c == '$') + 1)
+
+  /**
    * Imports the build again after reloading the build server's workspace, then schedules diagnostics for every
    * tracked document.
    *
@@ -1995,7 +2038,7 @@ final class ScalaLanguageServer(
       s"$RunTest: expected one object with target, framework (${TestRun.Frameworks.mkString(", ")}), suite and an optional testName"))
     case Some(selection) =>
       startRun(testRuns.start(selection, () => session.join().prepareTestRun(selection.target, _.foreach(scheduleDiagnostics)),
-        logRunLine, showRunResult))
+        logRunLine, showRunResult, sendTestResult(selection.suite, _)))
   }
 
   /** Starts the run of a lens's main class; the request completes when the program exits. */
@@ -2136,6 +2179,18 @@ final class ScalaLanguageServer(
 
   /** Sends one line of a run's output to the client's log. */
   private def logRunLine(line: String): Unit = client.logMessage(new MessageParams(MessageType.Info, line))
+
+  /**
+   * Sends one test's progress to a client that knows the extension messages, as the selection's suite reports it. Like
+   * `scalaAnalyzer/state`, it is not gated by a client capability: a client that does not handle the notification
+   * ignores it.
+   */
+  private def sendTestResult(suite: String, event: TestRun.TestEvent): Unit = client match {
+    case c: HostProtocol.Client =>
+      c.testResult(new HostProtocol.TestResult(suite, event.name, event.kind.toString.toLowerCase, event.message.orNull,
+        event.durationMs.map(Long.box).orNull))
+    case _ => ()
+  }
 
   /** Shows a finished run's summary to the client: as an error if it failed, a warning if ignored, else information. */
   private def showRunResult(result: TestRun.Result): Unit = {

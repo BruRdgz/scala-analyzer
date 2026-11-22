@@ -491,7 +491,7 @@
     "@vscode/vsce": "4.1.0"
   },
   "scripts": {
-    "check": "node --check extension.js && node --check buildTargets.js && node --check inspect.js && node --check inspectionTree.js",
+    "check": "node --check extension.js && node --check buildTargets.js && node --check inspect.js && node --check inspectionTree.js && node --check tests.js",
     "package": "vsce package",
     "test:installed": "node test/run.js"
   },

@@ -51,11 +51,14 @@ final class TestRun extends AutoCloseable {
    * @param prepare supplies the runner's environment; called on the run thread, before the process starts
    * @param log receives the runner's output lines and test outcomes, from the run thread
    * @param finished receives the final summary once the runner exits, or a failed result if the run could not complete
+   * @param events receives each test's outcome as the runner reports it, from the run thread, besides the logging; the
+   *               default ignores them
    * @return a future that completes with `null` after the runner process has exited and the run is no longer active;
    *         cancelling it completes it at once, while the run ends on the run thread
    */
-  def start(selection: Selection, prepare: () => Environment, log: String => Unit,
-            finished: Result => Unit): CompletableFuture[AnyRef] = submit(testJob(selection), prepare, log, finished)
+  def start(selection: Selection, prepare: () => Environment, log: String => Unit, finished: Result => Unit,
+            events: TestEvent => Unit = _ => ()): CompletableFuture[AnyRef] =
+    submit(testJob(selection, events), prepare, log, finished)
 
   /**
    * Starts a main class on the run thread, with the lifecycle of [[start]]: the same single active run, preparation,
@@ -189,6 +192,27 @@ object TestRun {
   final case class MainSelection(target: String, mainClass: String)
 
   /**
+   * One test's progress as the runner reported it.
+   *
+   * @param name the test's name as the runner reports it (TeamCity `name`); it equals the `testName` of the lens that
+   *             selects the test for most runners, but a ScalaTest scope may report each of its tests apart where the
+   *             lens joins them with line breaks, and a parameterized JUnit method reports the invocation's name
+   * @param kind what happened to the test
+   * @param message the failure or the reason the test was ignored, when the runner gives one
+   * @param durationMs how long the test took, when the runner reports it
+   */
+  final case class TestEvent(name: String, kind: TestEvent.Kind, message: Option[String] = None,
+                             durationMs: Option[Long] = None)
+
+  /** The kinds of test event. */
+  object TestEvent {
+    /** What happened to a test: it started, or ended passed, failed or ignored. */
+    enum Kind {
+      case Started, Passed, Failed, Ignored
+    }
+  }
+
+  /**
    * BSP test or run environment plus the target JDK, or deliberately the host JVM when BSP omits it.
    *
    * @param java path of the `java` executable that launches the runner
@@ -234,11 +258,11 @@ object TestRun {
   private final case class Interpreter(line: String => Unit, result: Int => Result)
 
   /** The job of a test selection: the runner's command, and its TeamCity output read as test outcomes. */
-  private def testJob(selection: Selection): Job = Job(
+  private def testJob(selection: Selection, events: TestEvent => Unit): Job = Job(
     s"${selection.suite}: test run",
     testCommand(selection, _),
     log => {
-      val report = new Report(log)
+      val report = new Report(log, events)
 
       Interpreter(report.line, exit => report.result(selection.suite, reportedExit(selection.framework, exit)))
     })
@@ -384,8 +408,9 @@ object TestRun {
    * Not thread-safe: one run thread feeds it lines in order.
    *
    * @param log receives output lines, test outcomes and the first stack lines of failures
+   * @param events receives one event per test start and per terminal outcome, as the runner reports them
    */
-  private[build] final class Report(log: String => Unit) {
+  private[build] final class Report(log: String => Unit, events: TestEvent => Unit = _ => ()) {
     /** Progress of one test: `Running` until a terminal outcome is seen. */
     private enum Outcome {
       case Running, Passed, Failed, Ignored
@@ -412,12 +437,15 @@ object TestRun {
         val name = fields.getOrElse("name", "test")
         val id = fields.getOrElse("nodeId", fields.getOrElse("flowId", "") + ":" + name)
         kind match {
-          case "testStarted" => outcomes(id) = Running
+          case "testStarted" =>
+            outcomes(id) = Running
+            events(TestEvent(name, TestEvent.Kind.Started))
           case "testFailed" => finish(id, name, Failed, fields)
           case "testIgnored" => finish(id, name, Ignored, fields)
           case "testFinished" if !outcomes.get(id).exists(Set(Failed, Ignored)) =>
             outcomes(id) = Passed
             log(s"$name: passed")
+            events(TestEvent(name, TestEvent.Kind.Passed, durationMs = duration(fields)))
           case "testStdOut" | "testStdErr" => fields.get("out").foreach(log)
           case "message" =>
             if (fields.get("status").contains("ERROR")) runnerError = true
@@ -433,7 +461,12 @@ object TestRun {
       outcomes(id) = outcome
       log(s"$name: ${outcome.toString.toLowerCase}${fields.get("message").fold("")(": " + _)}")
       fields.get("details").foreach(_.linesIterator.take(StackLines).foreach(log))
+      val kind = if (outcome == Failed) TestEvent.Kind.Failed else TestEvent.Kind.Ignored
+      events(TestEvent(name, kind, fields.get("message"), duration(fields)))
     }
+
+    /** The test's duration in milliseconds, when the message carries a numeric `duration`. */
+    private def duration(fields: Map[String, String]): Option[Long] = fields.get("duration").flatMap(_.toLongOption)
 
     /**
      * Summarizes the outcomes recorded so far once the runner has exited.

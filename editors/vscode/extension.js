@@ -6,11 +6,13 @@
 // as `scalaAnalyzer/state` notifications, shown in the status bar; `scalaAnalyzer/status` answers what it is doing.
 // The status bar menu and the commands call the server's requests (compile, reimport, inspect, type info, go to super) and show the result;
 // compiling is also the workspace build task (Ctrl+Shift+B). The Scala Build view lists the build's targets (buildTargets.js);
-// Inspect Code lists the inspections' problems of the whole project (inspect.js).
+// Inspect Code lists the inspections' problems of the whole project (inspect.js). The Testing view lists the project's
+// tests and runs them (tests.js).
 const vscode = require('vscode');
 const { ExecuteCommandRequest, LanguageClient, State } = require('vscode-languageclient/node');
 const { registerBuildTargets } = require('./buildTargets');
 const { registerInspection } = require('./inspect');
+const { registerTests } = require('./tests');
 
 /** @type {LanguageClient} */
 let client;
@@ -484,7 +486,12 @@ async function activate(context) {
   );
 
   await vscode.commands.executeCommand('setContext', 'scalaAnalyzer.active', true);
-  createStatusBar(context, registerBuildTargets(context, client));
+  const refreshTargets = registerBuildTargets(context, client);
+  const tests = registerTests(context, client, launchConfiguration);
+  createStatusBar(context, () => {
+    refreshTargets();
+    tests.refresh();
+  });
   registerCommands(context);
   registerTypeHint(context);
   registerBuildTask(context);

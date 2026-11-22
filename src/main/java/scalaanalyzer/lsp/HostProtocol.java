@@ -262,6 +262,122 @@ public final class HostProtocol {
     }
   }
 
+  /**
+   * The document whose tests a {@code scalaAnalyzer/testItems} request lists.
+   *
+   * The field is mutable so that Gson can fill it in.
+   */
+  public static final class TestItemsParams {
+    /** The URI of the document to list; absent for every source of the project. */
+    public String uri;
+
+    /** Creates empty parameters for the JSON deserializer to fill in. */
+    public TestItemsParams() {}
+
+    /**
+     * Creates the parameters of a test listing.
+     *
+     * @param uri the URI of the document to list, or {@code null} for the whole project
+     */
+    public TestItemsParams(String uri) {
+      this.uri = uri;
+    }
+  }
+
+  /**
+   * A test suite or one of its tests, with what the {@code scalaAnalyzer.runTest} command needs to run it.
+   *
+   * Instances are immutable and travel as the elements of the result of the {@code scalaAnalyzer/testItems} request.
+   * {@link #target}, {@link #framework}, {@link #suite} and {@link #testName} are the members of the argument that the
+   * run code lens of the same range gives the command.
+   */
+  public static final class TestItem {
+    /** The URI of the document that holds the suite or test. */
+    public final String uri;
+
+    /** The range of the suite's or test's name when it has one, else of the whole element. */
+    public final Range range;
+
+    /** The BSP target of the module that holds the suite. */
+    public final String target;
+
+    /** The test framework or runner: {@code scalatest}, {@code specs2}, {@code utest}, {@code munit}, {@code junit4} or {@code junit5}. */
+    public final String framework;
+
+    /** The qualified name of the suite; for a Java class, its binary name. */
+    public final String suite;
+
+    /** The test's name in the runner's encoding, or {@code null} for a suite. */
+    public final String testName;
+
+    /** A short name to display: the suite's simple class name, or the first line of the test's name. */
+    public final String label;
+
+    /**
+     * Creates a test item.
+     *
+     * @param uri the URI of the document that holds the suite or test
+     * @param range the range of the suite's or test's name
+     * @param target the BSP target of the module that holds the suite
+     * @param framework the test framework or runner
+     * @param suite the qualified name of the suite
+     * @param testName the test's name in the runner's encoding, or {@code null} for a suite
+     * @param label the short name to display
+     */
+    public TestItem(
+        String uri, Range range, String target, String framework, String suite, String testName, String label) {
+      this.uri = uri;
+      this.range = range;
+      this.target = target;
+      this.framework = framework;
+      this.suite = suite;
+      this.testName = testName;
+      this.label = label;
+    }
+  }
+
+  /**
+   * The progress of one test of a {@code scalaAnalyzer.runTest} run.
+   *
+   * Instances are immutable and travel as the payload of the {@code scalaAnalyzer/testResult} notification.
+   */
+  public static final class TestResult {
+    /** The suite of the run's selection, as the command's argument gives it. */
+    public final String suite;
+
+    /**
+     * The test's name as the runner reports it. It is the {@link TestItem#testName} of the test for most runners; a
+     * ScalaTest scope that groups several tests, and a parameterized JUnit method, report names that differ.
+     */
+    public final String testName;
+
+    /** What happened: {@code started}, {@code passed}, {@code failed} or {@code ignored}. */
+    public final String outcome;
+
+    /** The failure, or the reason the test was ignored, when the runner gives one; otherwise {@code null}. */
+    public final String message;
+
+    /** How long the test took in milliseconds, when the runner reports it; otherwise {@code null}. */
+    public final Long durationMs;
+
+    /**
+     * Creates a test progress report.
+     *
+     * @param suite the suite of the run's selection
+     * @param testName the test's name as the runner reports it
+     * @param outcome {@code started}, {@code passed}, {@code failed} or {@code ignored}
+     * @param message the failure or the reason for ignoring, or {@code null}
+     * @param durationMs the test's duration in milliseconds, or {@code null}
+     */
+    public TestResult(String suite, String testName, String outcome, String message, Long durationMs) {
+      this.suite = suite;
+      this.testName = testName;
+      this.outcome = outcome;
+      this.message = message;
+      this.durationMs = durationMs;
+    }
+  }
+
   /** What the server sends a client that knows its messages. */
   public interface Client extends LanguageClient {
     /**
@@ -273,6 +389,18 @@ public final class HostProtocol {
      */
     @JsonNotification("scalaAnalyzer/state")
     void state(ServerState state);
+
+    /**
+     * Reports the progress of one test while a {@code scalaAnalyzer.runTest} command runs.
+     *
+     * Sent as the {@code scalaAnalyzer/testResult} notification, so the client sends no reply, for each test that
+     * starts and for each that passes, fails or is ignored, in the order the runner reports them. A client that does
+     * not handle it loses nothing: the run's output and summary reach it through the standard messages.
+     *
+     * @param result the test and what happened to it
+     */
+    @JsonNotification("scalaAnalyzer/testResult")
+    void testResult(TestResult result);
   }
 
   /** What the server answers beyond LSP. */
@@ -384,6 +512,21 @@ public final class HostProtocol {
      */
     @JsonRequest("scalaAnalyzer/overridableMembers")
     CompletableFuture<List<OverridableMember>> overridableMembers(TextDocumentPositionParams params);
+
+    /**
+     * Lists the test suites and tests that the run code lenses offer, for a client's test explorer.
+     *
+     * The items are exactly the ones the {@code Run suite} and {@code Run test} lenses carry, from the same detection,
+     * over the document's current buffer. Without a document, every Scala and Java source of the project is scanned,
+     * one after the other: the cost grows with the project, since the build does not tell test sources from main
+     * ones, and the request is meant to be sent once and then per saved document.
+     *
+     * @param params the document to list, or no document for the whole project
+     * @return a future containing, per source in path order, each suite followed by its tests in source order; empty
+     *         when the document is not a project source or has no tests
+     */
+    @JsonRequest("scalaAnalyzer/testItems")
+    CompletableFuture<List<TestItem>> testItems(TestItemsParams params);
   }
 
   /** The server as a client calls it. */
