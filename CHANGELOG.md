@@ -1,7 +1,22 @@
 # Changelog
 
-## Unreleased
+## 0.5.1 — 2026-11-22
 
+Fixes from three reviews of the 0.3 to 0.5 work, among them a security fix of the debugger.
+
+- Security: the embedded debug adapter listened on every network interface, so a machine on the network could take a
+  debug session before the editor connected and evaluate code in the program. Sessions now run over a loopback socket
+  the server opens itself.
+- A debug session that no editor connects to within two minutes is closed, and an ended session releases its threads.
+- Debugging a target whose build already loads a JDWP agent (JVM options, `JAVA_TOOL_OPTIONS`, `JDK_JAVA_OPTIONS`)
+  works: the build's agent is left out, as a JVM loads only one.
+- With several threads stopped, the values and Smart Step Into of one thread survive another thread's stop.
+- A collection's elements are read by iteration instead of copying the collection per element, and a listing stops
+  evaluating at its first timeout.
+- A compile no longer fails when another process changes class files while hot code replace compares them.
+- `scalaAnalyzer.startDebugSession` is announced among the server's commands.
+- Testing view: two overlapping runs keep their results apart, a test whose runner name differs from the lens's gets
+  its outcome, and a debug run that does not start leaves no listeners behind.
 - Inspection Results lists two files of the same name (two `package.scala`) as two nodes.
 - A Scala or Java file created directly in a module's base directory (sbt's `sourcesInBase`) imports the build again.
 - Implement and Override members previews are rejected when the platform logged an error meanwhile, as other previews are.
