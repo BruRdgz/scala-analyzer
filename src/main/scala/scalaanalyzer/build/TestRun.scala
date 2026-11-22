@@ -1,6 +1,8 @@
 package scalaanalyzer.build
 
 import ch.epfl.scala.bsp4j.JvmEnvironmentItem
+import com.intellij.rt.execution.junit.RepeatCount
+import com.intellij.rt.junit.JUnitStarter
 import org.jetbrains.plugins.scala.testingSupport.scalaTest.ScalaTestRunner
 import org.jetbrains.plugins.scala.testingSupport.specs2.Specs2Runner
 import org.jetbrains.plugins.scala.testingSupport.uTest.UTestRunner
@@ -10,9 +12,10 @@ import scalaanalyzer.munitrunner.MUnitTestRunner
 import java.io.File
 import java.net.URI
 import java.nio.charset.StandardCharsets.UTF_8
-import java.nio.file.Path
+import java.nio.file.{Files, Path}
 import java.util.concurrent.{CompletableFuture, Executors, ThreadFactory}
 import java.util.regex.Matcher
+import java.util.zip.ZipFile
 
 import scala.collection.mutable
 import scala.jdk.CollectionConverters.*
@@ -171,9 +174,9 @@ object TestRun {
    * A lens's selection. Names retain the plugin's escaped encoding until its runner parses them.
    *
    * @param target BSP target URI of the module that holds the suite
-   * @param framework test framework, one of [[Frameworks]]
-   * @param suite suite name passed to the runner; backticks are removed first
-   * @param testName names of the tests to run, one per line, or `None` for the whole suite
+   * @param framework test framework, one of [[Frameworks]]; for JUnit, the runner the IDE chooses for the class
+   * @param suite suite name passed to the runner; backticks are removed first. For JUnit, the class's binary name
+   * @param testName names of the tests to run, one per line, or `None` for the whole suite; for JUnit, the one method
    */
   final case class Selection(target: String, framework: String, suite: String, testName: Option[String])
 
@@ -214,8 +217,14 @@ object TestRun {
     "munit" -> classOf[MUnitTestRunner],
   )
 
+  /** JUnit's runners, which the IDE's `JUnitStarter` starts, by the framework id of a lens and the argument that picks them. */
+  private val JUnitRunners: Map[String, String] = Map(
+    "junit4" -> JUnitStarter.JUNIT4_PARAMETER,
+    "junit5" -> JUnitStarter.JUNIT5_PARAMETER,
+  )
+
   /** The frameworks whose selections can run, sorted by name. */
-  val Frameworks: Seq[String] = Runners.keys.toSeq.sorted
+  val Frameworks: Seq[String] = (Runners.keys ++ JUnitRunners.keys).toSeq.sorted
 
   /** What a run launches and how it reads the output: `subject` names the run in a failure message. */
   private final case class Job(subject: String, command: Environment => Seq[String],
@@ -231,8 +240,19 @@ object TestRun {
     log => {
       val report = new Report(log)
 
-      Interpreter(report.line, report.result(selection.suite, _))
+      Interpreter(report.line, exit => report.result(selection.suite, reportedExit(selection.framework, exit)))
     })
+
+  /**
+   * The exit code of a runner that ran its tests, as the report reads it: `JUnitStarter` exits with -1 when a test
+   * failed, which the operating system shows as 255, and the summary counts those failures itself.
+   *
+   * @param framework framework of the selection that ran
+   * @param exit the runner process's exit code
+   * @return 0 for a JUnit run that finished with failed tests, else `exit`
+   */
+  private[build] def reportedExit(framework: String, exit: Int): Int =
+    if (JUnitRunners.contains(framework) && (exit & 0xFF) == 0xFF) 0 else exit
 
   /** The job of a main class: its output goes to the log unread, and the summary says how it exited. */
   private def mainJob(main: MainSelection): Job = {
@@ -247,7 +267,35 @@ object TestRun {
   }
 
   /** Builds the runner's command line: the JVM, its options and classpath, then the runner's arguments. */
-  private def command(selection: Selection, environment: Environment): Seq[String] = {
+  private def command(selection: Selection, environment: Environment): Seq[String] =
+    JUnitRunners.get(selection.framework).fold(scalaCommand(selection, environment))(junitCommand(selection, environment, _))
+
+  /**
+   * The command line of a JUnit run as the IDE's `TestObject`, `TestClass` and `TestMethod` build it: `JUnitStarter`
+   * with the IDE's version, the runner and the class, or `class,method`. Fails when the JUnit Platform runner is chosen
+   * and the test classpath has no launcher, which the IDE would download.
+   */
+  private def junitCommand(selection: Selection, environment: Environment, runnerArgument: String): Seq[String] = {
+    val classpath = environment.item.getClasspath.asScala.map(path(_)).toSeq
+    if (runnerArgument == JUnitStarter.JUNIT5_PARAMETER && !providesClass(classpath, LauncherClass))
+      throw new IllegalStateException(
+        "the test classpath has no org.junit.platform:junit-platform-launcher, which the JUnit 5 runner needs; " +
+          "add it as a test dependency of the module (the Maven and Gradle JUnit 5 setups list it separately)")
+
+    // The runner classes (junit-rt, junit-v5-rt) and what they report with (java-rt); loading a class does not link
+    // the JUnit libraries it calls. The JUnit 5 runner is named, as its signatures mention the launcher's classes,
+    // which the host does not have.
+    val platformRunner = Class.forName("com.intellij.junit5.JUnit5IdeaTestRunner", false, getClass.getClassLoader)
+    val runnerJars = Seq(classOf[JUnitStarter], platformRunner, classOf[RepeatCount])
+      .map(runner => Path.of(runner.getProtectionDomain.getCodeSource.getLocation.toURI).toString).distinct
+    val test = selection.testName.fold(selection.suite)(method => s"${selection.suite},$method")
+    val arguments = Seq(JUnitStarter.IDE_VERSION + JUnitStarter.VERSION, runnerArgument, test)
+
+    jvmCommand(environment, runnerJars, classOf[JUnitStarter].getName, arguments)
+  }
+
+  /** Builds the command line of a Scala framework's run: its runner, with the suite and the tests by name. */
+  private def scalaCommand(selection: Selection, environment: Environment): Seq[String] = {
     val runner = Runners(selection.framework)
     // The runner's jar joins the project's test classpath; loading its class does not link the framework it calls.
     val runnerJar = Path.of(runner.getProtectionDomain.getCodeSource.getLocation.toURI).toString
@@ -256,6 +304,15 @@ object TestRun {
     val arguments = Seq("-s", selection.suite.replace("`", "")) ++ names ++ Seq("-showProgressMessages", "true")
 
     jvmCommand(environment, Seq(runnerJar), runner.getName, arguments)
+  }
+
+  /** The launcher's class that the JUnit Platform runner needs on the test classpath. */
+  private val LauncherClass = "org/junit/platform/launcher/Launcher.class"
+
+  /** Whether a directory or jar of the classpath holds the class file `entry`, as the IDE asks its module scope. */
+  private def providesClass(classpath: Seq[Path], entry: String): Boolean = classpath.exists { element =>
+    if (Files.isDirectory(element)) Files.exists(element.resolve(entry))
+    else Files.isRegularFile(element) && Using.resource(new ZipFile(element.toFile))(_.getEntry(entry) != null)
   }
 
   /** Builds a JVM command line: `java`, the environment's options, its classpath plus `extraClasspath`, the class. */

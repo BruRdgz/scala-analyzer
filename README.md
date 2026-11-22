@@ -39,7 +39,7 @@ It exposes editor features through the **Language Server Protocol (LSP)** and im
 | Documentation | Markdown hover with declaration context, parameters, return values and linked references. |
 | Editing | Rename and references (also across Java files), organize imports (also in Java files), previewable quick fixes and intentions (Java files get the Java plugin's error and inspection fixes and intentions), surround and unwrap actions (also in Java files); implement and override members (also in Java files); split/join lists and flip comma (also in Java files); Inline for `val`s, `def`s and type aliases; Extract to val and Extract method; in Java files, Extract variable and Inline variable. |
 | Formatting | Whole-file scalafmt or IntelliJ formatting; range formatting through IntelliJ. Java files always use the IntelliJ formatter. |
-| Tests | Run ScalaTest, specs2 and MUnit suites/tests, and uTest suites, from code lenses; readable output and a result summary. |
+| Tests | Run ScalaTest, specs2 and MUnit suites/tests, uTest suites, and JUnit 4 and 5 classes and methods in Java files, from code lenses; readable output and a result summary. |
 | Run | Run objects with a `main` method, `App` objects, Scala 3 `@main` methods and Java main classes from code lenses; output and an exit summary. |
 | Code structure | Semantic tokens and selection ranges (also in Java files), document highlights (including a method's exit points, companions and implicit usages), outlines and folding. |
 
@@ -191,6 +191,14 @@ One run, of tests or of a main class, is allowed at a time; cancelling the execu
 (in VS Code, the cancel button of the running notification). Compilation reads saved files, not unsaved editor
 buffers. MUnit runs through the JUnit 4 it depends on, with scala-analyzer's own small runner: the
 plugin's needs IntelliJ's JUnit runtime.
+
+JUnit 4 and 5 classes and test methods in Java files have lenses as the IDE's run markers (a `@Nested` class and its
+methods have their own; an abstract class has none). They run through the IDE's own `JUnitStarter`, with the runner the
+IDE chooses for the class (JUnit 5 for a Jupiter class, JUnit 4 for the rest; JUnit 6 classes run on the JUnit 5
+runner), and the same summary as the Scala runs. JUnit 5 needs `org.junit.platform:junit-platform-launcher` on the
+test classpath, which the IDE downloads when it is missing and the server does not: add it as a test dependency
+(Maven: `junit-platform-launcher`, test scope; Gradle: `testRuntimeOnly("org.junit.platform:junit-platform-launcher")`),
+or the run fails with a message that names it.
 
 ### Running main classes
 

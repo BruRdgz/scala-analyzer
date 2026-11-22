@@ -4,7 +4,7 @@ import com.intellij.lang.annotation.HighlightSeverity
 
 import java.io.File
 import java.nio.file.{Files, Path}
-import java.util.concurrent.TimeUnit
+import java.util.concurrent.{LinkedBlockingQueue, TimeUnit}
 
 import scala.concurrent.duration.*
 import scala.jdk.CollectionConverters.*
@@ -125,6 +125,25 @@ class BloopImportTest extends munit.FunSuite {
 
         assert(!result.succeeded)
         assertEquals(errors.map(_.start.line), Seq(3), result.diagnostics.toString)
+      }
+    }
+
+    // The selections of the JUnit 5 lenses (a class, then one method) run by the IDE's JUnitStarter on the build's own
+    // test classpath, which lists junit-platform-launcher (JUnit 5 needs it, and the IDE would download it).
+    test(s"${build.label} runs a JUnit 5 test class and method through the IDE's runner") {
+      withConnection(build) { (_, connection) =>
+        val target = named(connection.modules(), "core-test").spec.stableId
+        assert(connection.compile().succeeded)
+
+        val runner = new TestRun
+        try Seq(None, Some("greets")).foreach { method =>
+          val summaries = new LinkedBlockingQueue[TestRun.Result]
+          val log = new LinkedBlockingQueue[String]
+          runner.start(TestRun.Selection(target, "junit5", "demo.core.GreeterTest", method),
+            () => connection.testEnvironment(target), log.add(_), summaries.add(_)).get(5, TimeUnit.MINUTES)
+
+          assertEquals(summaries.poll(), TestRun.Result("GreeterTest: 1 passed, 0 failed, 0 ignored"), log.asScala.mkString("\n"))
+        } finally runner.close()
       }
     }
 

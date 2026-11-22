@@ -16,6 +16,7 @@ import com.intellij.codeInsight.intention.impl.config.QuickFixFactoryImpl
 import com.intellij.codeInsight.intention.preview.IntentionPreviewUtils
 import com.intellij.codeInsight.quickfix.ChangeVariableTypeQuickFixProvider
 import com.intellij.core.{CoreApplicationEnvironment, CoreFileTypeRegistry}
+import com.intellij.execution.junit.JUnit4Framework
 import com.intellij.ide.highlighter.HtmlFileHighlighter
 import com.intellij.lang.documentation.{ClientDocumentationSettings, DocumentationSettings}
 import com.intellij.lang.html.HTMLLanguage
@@ -53,6 +54,7 @@ import com.intellij.psi.search.GlobalSearchScope
 import com.intellij.psi.search.scope.packageSet.NamedScopeManager
 import com.intellij.psi.util.PsiModificationTracker
 import com.intellij.psi.impl.source.resolve.FileContextUtil
+import com.intellij.uast.UastModificationTracker
 import com.intellij.util.Processor
 import com.intellij.util.indexing.FileBasedIndex
 import com.intellij.util.messages.impl.MessageBusFactoryImpl
@@ -1022,11 +1024,18 @@ private[scalaanalyzer] object HostBootstrap {
         override def isToBeAdvertisedInLookup(featureId: String, project: Project): Boolean = false
       })
       // Lookup presentation checks test-class icons and Go to Test asks what a test class is: the Scala frameworks
-      // that the host can detect (see TestLenses), and no others.
+      // that the host can detect (see TestLenses), then the JUnit plugin's, and no others.
       CoreApplicationEnvironment.registerExtensionPoint(area, TestFramework.EXTENSION_NAME,
         classOf[TestFramework])
-      TestLenses.platformFrameworks.foreach(
-        area.getExtensionPoint[TestFramework](TestFramework.EXTENSION_NAME.getName).registerExtension(_, root))
+      val testFrameworks = area.getExtensionPoint[TestFramework](TestFramework.EXTENSION_NAME.getName)
+      TestLenses.platformFrameworks.foreach(testFrameworks.registerExtension(_, root))
+      // The JUnit plugin's descriptor lists its frameworks in the order that decides which one detects a class first.
+      val junitPluginJar = Path.of(classOf[JUnit4Framework].getProtectionDomain.getCodeSource.getLocation.toURI)
+      for (name <- Descriptors.scalaExtensions(Seq(junitPluginJar), TestFramework.EXTENSION_NAME.getName))
+        testFrameworks.registerExtension(newPrivate(Class.forName(name).asSubclass(classOf[TestFramework])), root)
+      // The JUnit frameworks ask whether a method will be annotated after compilation; only other plugins' recognizers
+      // answer, and the host loads none.
+      declare("com.intellij.junitRecognizer")
       CoreApplicationEnvironment.registerExtensionPoint(area, "com.intellij.javaMainMethodProvider",
         classOf[JavaMainMethodProvider])
       CoreApplicationEnvironment.registerExtensionPoint(area, "com.intellij.packageDirectoryProvider",
@@ -1792,6 +1801,13 @@ private[scalaanalyzer] object HostBootstrap {
       // The Java plugin's caches of facts about library classes (the contracts that data flow reads) depend on this
       // tracker: the project's roots, which the host advances when its modules change (see `ScalaPsiHost.addModule`),
       // plus reparses and reloaded library files, which the host does not have.
+      // UAST caches (JUnit's test detection reads through them) depend on this sum of the languages' PSI trackers; its
+      // constructor is internal to the Java plugin.
+      projectServices.register(classOf[UastModificationTracker]) {
+        val tracker = newPrivate(classOf[UastModificationTracker], project)
+        Disposer.register(root, tracker)
+        tracker
+      }
       projectServices.register(classOf[JavaLibraryModificationTracker]) {
         val tracker = new JavaLibraryModificationTracker(project)
         Disposer.register(root, tracker)

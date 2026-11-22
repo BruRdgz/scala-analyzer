@@ -13,6 +13,8 @@ val scalaPluginLib = settingKey[File]("Directory with the Scala plugin's jars (S
 val Fixtures = config("fixtures").hide
 // A second configuration: two versions of one module in a single configuration would evict each other.
 val Fixtures212 = config("fixtures212").hide
+// The JUnit 4 and 5 APIs, for the tests of Java test lenses; one configuration, as their modules do not clash.
+val FixturesJUnit = config("fixturesJUnit").hide
 // Downloaded only as input to the slice task, never a compile or runtime dependency.
 val InlayPlatform = config("inlay-platform").hide
 val inlayPlatformJar = taskKey[File]("The platform classes used by Scala hints, word selection and find-usages handlers")
@@ -80,7 +82,7 @@ lazy val munitRunner = (project in file("munit-runner"))
 
 lazy val root = (project in file("."))
   .dependsOn(munitRunner)
-  .configs(Fixtures, Fixtures212, InlayPlatform)
+  .configs(Fixtures, Fixtures212, FixturesJUnit, InlayPlatform)
   .settings(
     name := "scala-analyzer",
     Compile / packageOptions += Package.ManifestAttributes("Implementation-Version" -> version.value),
@@ -176,6 +178,17 @@ lazy val root = (project in file("."))
       "com.jetbrains.intellij.platform" % "external-system-rt" % platformVersion intransitive(),
       // ProjectTaskManager and ProjectTaskRunner, which the plugin's compiler-indices settings read. Only this jar; no task runner is installed.
       "com.jetbrains.intellij.platform" % "execution" % platformVersion intransitive(),
+      // The JUnit plugin: its JUnit 3/4/5/6 TestFramework implementations (registered from its plugin.xml) decide which
+      // classes and methods are tests, and the java-execution jars hold what they extend and call (JUnitTestFramework,
+      // JUnitUtil, JUnitRecognizer), as in the plugin's own dependencies. Only these jars.
+      "com.jetbrains.intellij.junit" % "junit" % platformVersion intransitive(),
+      "com.jetbrains.intellij.java" % "java-execution" % platformVersion intransitive(),
+      "com.jetbrains.intellij.java" % "java-execution-impl" % platformVersion intransitive(),
+      // The IDE's JUnit runners (JUnitStarter and the JUnit 4 and 5 runners) and the classes they report with
+      // (com.intellij.rt.execution.junit). The host only locates these jars: they join the test JVM's classpath.
+      "com.jetbrains.intellij.junit" % "junit-rt" % platformVersion intransitive(),
+      "com.jetbrains.intellij.junit" % "junit-v5-rt" % platformVersion intransitive(),
+      "com.jetbrains.intellij.java" % "java-rt" % platformVersion intransitive(),
       // XML PSI: ScalaDoc and XML literals parse through it.
       "com.jetbrains.intellij.xml" % "xml-psi" % platformVersion intransitive(),
       "com.jetbrains.intellij.xml" % "xml-psi-impl" % platformVersion intransitive(),
@@ -196,6 +209,12 @@ lazy val root = (project in file("."))
       ("org.scala-lang" % "scala-library" % "2.13.18" % Fixtures intransitive()).withSources(),
       // The plugin's type-inference tests run on Scala 2.12 by default (ScalaSdkOwner.defaultSdkVersion).
       "org.scala-lang" % "scala-library" % "2.12.21" % Fixtures212 intransitive(),
+      // The JUnit API the lens tests resolve Java test classes against, as the IDE resolves them against a module's
+      // libraries. platform-commons holds @Testable, which marks Jupiter's @Test as a test for the JUnit plugin.
+      "org.junit.jupiter" % "junit-jupiter-api" % "5.10.2" % FixturesJUnit intransitive(),
+      "org.junit.jupiter" % "junit-jupiter-params" % "5.10.2" % FixturesJUnit intransitive(),
+      "org.junit.platform" % "junit-platform-commons" % "1.10.2" % FixturesJUnit intransitive(),
+      "junit" % "junit" % "4.13.2" % FixturesJUnit intransitive(),
     ),
     inlayPlatformJar := {
       val sources = update.value.select(configurationFilter(InlayPlatform.name), moduleFilter(), artifactFilter(`type` = "jar"))
@@ -319,6 +338,7 @@ lazy val root = (project in file("."))
         s"-Dscalaanalyzer.fixture.scalaLibrary=${fixture(Fixtures)}",
         s"-Dscalaanalyzer.fixture.scalaLibrarySources=${fixture(Fixtures, "sources")}",
         s"-Dscalaanalyzer.fixture.scalaLibrary212=${fixture(Fixtures212)}",
+        s"-Dscalaanalyzer.fixture.junit=${report.select(configurationFilter(FixturesJUnit.name)).mkString(java.io.File.pathSeparator)}",
       )
     },
   )

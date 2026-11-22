@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- JUnit 4 and 5 test classes and methods in Java files have run lenses, found as the IDE's run markers find them and
+  run through the IDE's JUnit runner. JUnit 5 runs need `junit-platform-launcher` on the test classpath (see "Running
+  tests" in the README). The JUnit plugin's frameworks also make Go to Test know JUnit classes.
 - A build import indexes the library jars of a module in parallel, one thread per processor, so the server is ready
   sooner: on this repository (226 jars) the import's library indexing went from about 19 s to 8 s, and the time to
   ready from 25 s to 13 s.

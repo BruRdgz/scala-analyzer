@@ -36,6 +36,36 @@ class TestRunTest extends munit.FunSuite {
     assertEquals(log.toSeq, Seq("same: failed: assertion failed", "first", "second", "same: passed", "skipped: ignored: pending", "ordinary output"))
   }
 
+  test("reads the output of JUnit's runners, with and without node ids, and their exit code for failed tests") {
+    // JUnit 5 reports node ids; JUnit 4 reports names only, once per test, and a failure is followed by testFinished.
+    val outputs = Seq(
+      "junit5" -> Seq(
+        "##teamcity[enteredTheMatrix]", "##teamcity[testSuiteStarted name='GreeterTest' nodeId='1' parentNodeId='0']",
+        "##teamcity[testStarted name='greets()' nodeId='2' parentNodeId='1']",
+        "##teamcity[testFinished name='greets()' nodeId='2' parentNodeId='1' duration='3']",
+        "##teamcity[testStarted name='fails()' nodeId='3' parentNodeId='1']",
+        "##teamcity[testFailed name='fails()' nodeId='3' parentNodeId='1' message='boom' details='at x']",
+        "##teamcity[testFinished name='fails()' nodeId='3' parentNodeId='1']",
+        "##teamcity[testSuiteFinished name='GreeterTest' nodeId='1' parentNodeId='0']", "##teamcity[treeEnded]"),
+      "junit4" -> Seq(
+        "##teamcity[enteredTheMatrix]", "##teamcity[testSuiteStarted name='GreeterTest']",
+        "##teamcity[testStarted name='greets' locationHint='java:test://demo.GreeterTest/greets']",
+        "##teamcity[testFinished name='greets' duration='3']",
+        "##teamcity[testStarted name='fails']",
+        "##teamcity[testFailed name='fails' message='boom' details='at x']",
+        "##teamcity[testFinished name='fails']", "##teamcity[testSuiteFinished name='GreeterTest']"),
+    )
+    outputs.foreach { (framework, lines) =>
+      val report = new TestRun.Report(_ => ())
+      lines.foreach(report.line)
+      // JUnitStarter exits with -1 when a test failed; the process shows it as 255.
+      assertEquals(report.result("demo.GreeterTest", TestRun.reportedExit(framework, 255)),
+        TestRun.Result("GreeterTest: 1 passed, 1 failed, 0 ignored", failed = true), framework)
+      assertEquals(TestRun.reportedExit(framework, 254), 254, framework)
+    }
+    assertEquals(TestRun.reportedExit("scalatest", 255), 255)
+  }
+
   test("an empty, interrupted or aborted run is never a passing zero-test result") {
     val messages = Seq(
       Seq.empty,

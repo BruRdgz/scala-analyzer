@@ -670,6 +670,8 @@ final class ScalaPsiHost private[scalaanalyzer] (
 
     lazy val module: Module = tableProxy(classOf[Module], "Module") {
       case ("getModuleWithDependenciesAndLibrariesScope", _) => modules.resolveScope(hostModule)
+      // A build target has one classpath, which compiles and runs it alike (JUnit's test detection asks this).
+      case ("getModuleRuntimeScope", _) => modules.resolveScope(hostModule)
       case ("getModuleWithDependenciesScope", _) => modules.dependenciesScope(hostModule)
       case ("getModuleWithDependentsScope", _) => modules.dependentsScope(hostModule)
       case ("getModuleScope", _) => new com.intellij.psi.search.GlobalSearchScope(project) {

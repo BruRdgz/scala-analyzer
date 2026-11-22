@@ -1,10 +1,12 @@
 package scalaanalyzer.language
 
+import com.intellij.codeInsight.{MetaAnnotationUtil, TestFrameworks}
 import com.intellij.execution.PsiLocation
+import com.intellij.execution.junit.{JUnit5Framework, JUnit6Framework, JUnitTestFramework, JUnitUtil}
 import com.intellij.openapi.module.Module
 import com.intellij.openapi.util.TextRange
-import com.intellij.psi.{PsiElement, PsiNameIdentifierOwner}
-import com.intellij.psi.util.PsiTreeUtil
+import com.intellij.psi.{PsiClass, PsiElement, PsiJavaFile, PsiMethod, PsiModifier, PsiNameIdentifierOwner}
+import com.intellij.psi.util.{ClassUtil, PsiTreeUtil}
 import com.intellij.testIntegration.TestFramework
 import org.jetbrains.plugins.scala.lang.psi.ScalaPsiUtil
 import org.jetbrains.plugins.scala.lang.psi.api.ScalaFile
@@ -26,16 +28,19 @@ import scala.jdk.CollectionConverters.*
  * Finds runnable suites and tests where the IDE puts its run markers, with the names the plugin's runners select.
  *
  * The plugin's run configuration producers need the IDE's execution framework, so this calls what they call.
- * uTest has suite lenses only: its test paths are private to its producer.
+ * uTest has suite lenses only: its test paths are private to its producer. Java test classes are found as the JUnit
+ * plugin's producers find them (`AbstractInClassConfigurationProducer`, `TestInClassConfigurationProducer`).
  */
 object TestLenses {
   /**
    * A suite, or one of its tests, anchored to a source range.
    *
    * @param range source range of the suite's or test's name when it has one, else of the whole element
-   * @param framework id of the test framework: `scalatest`, `specs2`, `utest` or `munit`
-   * @param suite qualified name of the suite
-   * @param testName the test's name in the runner's encoding, or `None` for a lens that runs the whole suite
+   * @param framework id of the test framework or runner: `scalatest`, `specs2`, `utest` or `munit` for Scala, `junit4`
+   *                  or `junit5` for Java, after the runner the IDE launches for the class
+   * @param suite qualified name of the suite; for a Java class, its binary name (`Outer$Inner` for a nested class)
+   * @param testName the test's name in the runner's encoding, or `None` for a lens that runs the whole suite; for a
+   *                 Java method, its name, followed by its parameter types in parentheses when it takes any
    */
   final case class Lens(range: TextRange, framework: String, suite: String, testName: Option[String])
 
@@ -72,6 +77,25 @@ object TestLenses {
   def in(file: ScalaFile, module: Module): Seq[Lens] = HostLock.query {
     PsiTreeUtil.findChildrenOfType(file, classOf[ScTypeDefinition]).asScala.toSeq
       .flatMap(suite => frameworkOf(suite).filter(runnable(suite, _)).toSeq.flatMap(lenses(suite, _, module)))
+      .sortBy(_.range.getStartOffset)
+  }
+
+  /**
+   * Finds the runnable JUnit test classes of a Java file and their test methods.
+   *
+   * Runs under a cancellable host read. Every class, nested ones included, is checked against the JUnit plugin's
+   * frameworks, as the IDE's run markers do. An abstract class or interface has no lens, since the runner cannot
+   * instantiate it (the IDE asks which subclass to run instead). A method has a lens when its framework calls it a
+   * test; a nested class of JUnit 5 (`@Nested`) is its own class with its own lenses.
+   *
+   * @param file Java file to scan
+   * @return a suite lens for each runnable class, plus a lens for each of its own test methods, ordered by start offset
+   */
+  def in(file: PsiJavaFile): Seq[Lens] = HostLock.query {
+    PsiTreeUtil.findChildrenOfType(file, classOf[PsiClass]).asScala.toSeq
+      // Type parameters, local and anonymous classes have no qualified name, and no binary name the runner could select.
+      .filter(_.getQualifiedName != null)
+      .flatMap(javaLenses)
       .sortBy(_.range.getStartOffset)
   }
 
@@ -138,5 +162,45 @@ object TestLenses {
   private def anchor(element: PsiElement): TextRange = element match {
     case named: PsiNameIdentifierOwner => named.getNameIdentifier.getTextRange
     case _ => element.getTextRange
+  }
+
+  /** The class's own lens and one per test method, when the JUnit plugin's framework for it calls it a test class. */
+  private def javaLenses(cls: PsiClass): Seq[Lens] = {
+    val frameworks = TestFrameworks.detectApplicableFrameworks(cls).asScala.toSeq
+    // As the producer's `getCurrentFramework`: the first JUnit framework of the class decides whether it is a test.
+    val detected = frameworks.collectFirst { case junit: JUnitTestFramework => junit }.filter(_.isTestClass(cls: PsiElement))
+
+    detected.filter(_ => !cls.hasModifierProperty(PsiModifier.ABSTRACT)).toSeq.flatMap { framework =>
+      val runner = junitRunner(frameworks)
+      val suite = ClassUtil.getJVMClassName(cls)
+      val tests = cls.getMethods.toSeq.filter(framework.isTestMethod(_: PsiElement, false)).map { method =>
+        Lens(anchor(method), runner, suite, Some(methodPresentation(method)))
+      }
+
+      Lens(anchor(cls), runner, suite, None) +: tests
+    }
+  }
+
+  /**
+   * The runner the IDE launches for a class (`TestObject.getRunnerInner`), by the frameworks that detect the class:
+   * JUnit 5 or 6 selects the JUnit Platform runner, JUnit 4 and 3 the JUnit 4 one. The host has no JUnit 6 runner (the
+   * IDE's `-junit6` falls back to the JUnit 5 one when it is missing), and a JUnit 3 method runs on the JUnit 4 runner.
+   */
+  private def junitRunner(frameworks: Seq[TestFramework]): String =
+    if (frameworks.exists(framework => framework.isInstanceOf[JUnit5Framework] || framework.isInstanceOf[JUnit6Framework]))
+      "junit5"
+    else "junit4"
+
+  /**
+   * The method's name as the IDE puts it in a run configuration (`JUnitConfiguration.Data.getMethodPresentation`):
+   * with its parameter types when it takes parameters (a parameterized test), so that the runner finds the method.
+   */
+  private def methodPresentation(method: PsiMethod): String = {
+    val name = method.getName
+    val parameterized = !method.getParameterList.isEmpty || name.contains("(") || name.contains(")")
+
+    if (parameterized && MetaAnnotationUtil.isMetaAnnotated(method, JUnitUtil.CUSTOM_TESTABLE_ANNOTATION_LIST))
+      s"$name(${ClassUtil.getVMParametersMethodSignature(method)})"
+    else name
   }
 }

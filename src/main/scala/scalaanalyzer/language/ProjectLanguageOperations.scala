@@ -227,18 +227,16 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
    * Finds the runnable test selections of a source, each with the BSP target of its owning module.
    *
    * @param path registered project-source path
-   * @return the lenses of a Scala file whose module has a BSP target; empty for any other file, so non-build files
-   *         produce no runnable selection
+   * @return the lenses of a Scala or Java file whose module has a BSP target; empty for any other file, so non-build
+   *         files produce no runnable selection
    */
   def testLenses(path: Path): Seq[TestLens] = lensesOf(path) { (sourceFile, module, target, lines) =>
-    sourceFile match {
-      case scalaFile: ScalaFile =>
-        TestLenses.in(scalaFile, module).map { lens =>
-          TestLens(lines(lens.range), target, lens.framework, lens.suite, lens.testName)
-        }
-      // The Java test frameworks (JUnit) are not detected.
-      case _: PsiJavaFile => Seq.empty
+    val lenses = sourceFile match {
+      case scalaFile: ScalaFile => TestLenses.in(scalaFile, module)
+      case javaFile: PsiJavaFile => TestLenses.in(javaFile)
     }
+
+    lenses.map(lens => TestLens(lines(lens.range), target, lens.framework, lens.suite, lens.testName))
   }
 
   /**
