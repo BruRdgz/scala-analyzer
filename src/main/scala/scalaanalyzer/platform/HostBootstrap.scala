@@ -354,9 +354,19 @@ private[scalaanalyzer] object HostBootstrap {
   private val HostCompletionContributors = Seq(ExtensionBean(Map("language" -> "Scala", "id" -> "hostPostfixTemplates",
     "order" -> "first", "implementationClass" -> classOf[PostfixCompletion.Contributor].getName)))
 
-  /** The platform's Java completion contributor as a descriptor bean, registered under the Java plugin's id. */
-  private val JavaCompletionContributors = Seq(ExtensionBean(Map("language" -> "JAVA",
-    "implementationClass" -> "com.intellij.codeInsight.completion.JavaCompletionContributor", "id" -> "java")))
+  /**
+   * The Java plugin's completion contributors for Java, as java-backend's descriptor registers them, with their ids and
+   * orders. Its contributors for any language, which would also run in Scala files, are left out, and so are two that
+   * need the IDE's UI: the one that completes in the refactoring dialogs (RefactoringCompletionContributor), which
+   * loads their editor components, and the class-name pass for a reference with no other variants
+   * (JavaNoVariantsDelegator), whose prefix matching follows the IDE's running completion (CompletionServiceImpl).
+   */
+  private lazy val JavaCompletionContributors =
+    Descriptors.scalaExtensionBeans(Seq(Descriptors.javaBackendJar), "com.intellij.completion.contributor")
+      .filter(_.attributes.get("language").contains("JAVA"))
+      .filterNot(bean => Set(
+        "com.intellij.codeInsight.completion.RefactoringCompletionContributor",
+        "com.intellij.codeInsight.completion.JavaNoVariantsDelegator").contains(bean.implementation))
 
   /**
    * The platform's split/join and flip-comma intentions: the Scala descriptors do not register them, and they act

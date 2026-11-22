@@ -591,6 +591,19 @@ class EditingTest extends munit.FunSuite {
     } finally host.closeSource(file)
   }
 
+  // The oracle is the Java plugin's JavaMemberNameCompletionContributor: at a declaration's name, names made from the
+  // declared type's words.
+  test("Java completion suggests the names of a new variable from its type") {
+    val text = "class Names { void f() { StringBuilder  } }"
+    val file = host.openFile(Path.of("/editing/Names.java"), text, module)
+    try {
+      val offset = text.indexOf("StringBuilder ") + "StringBuilder ".length
+      val labels = host.completion(file, offset).items.map(_.label)
+
+      assert(Set("stringBuilder", "builder").subsetOf(labels.toSet), labels.toString)
+    } finally host.closeSource(file)
+  }
+
   test("Java completion preserves overloads, prefix ranges and insertion without changing the source") {
     val text = "class JavaComplete { String message(int n) { return \"hi\"; } @Deprecated String message(String s) { return s; } void use() { String emoji = \"😀\"; this.mes; boolean flag = tr; } }"
     val file = host.openFile(Path.of("/editing/JavaComplete.java"), text, module)
