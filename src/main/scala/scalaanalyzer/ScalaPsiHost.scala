@@ -748,7 +748,7 @@ final class ScalaPsiHost private[scalaanalyzer] (
         val problems = javaProblemsAround(javaFile, range) ++ inspectedForActions(javaFile, withInspections)
 
         CodeActions.Offered(actions.collect(javaFile, range, problems),
-          actions.implementMembersOffer(javaFile, range, problems), Seq.empty)
+          actions.implementMembersOffer(javaFile, range, problems), actions.extractionOffers(javaFile, range))
       case _ => CodeActions.Offered(actions.collect(file, range, Seq.empty), None, Seq.empty)
     }
   }
@@ -771,14 +771,15 @@ final class ScalaPsiHost private[scalaanalyzer] (
     actions.implementMembers(file, range, offered)
 
   /**
-   * Performs an extraction on the file and gives its edits (see [[Extract]]). The plugin's handlers change the file
-   * they are given, and need a physical one, so the file changes while they run; its text is restored before this
-   * returns, as the editor applies the edits and reports them back. Queries running meanwhile are cancelled.
+   * Performs an extraction on the file and gives its edits (see [[Extract]]). The Scala plugin's handlers change the
+   * file they are given, and need a physical one, so the file changes while they run; its text is restored before
+   * this returns, as the editor applies the edits and reports them back. Queries running meanwhile are cancelled.
    *
-   * Runs on the dispatch thread, which the handlers insist on, and takes the write lock there, so the caller must hold
-   * no lock; then lets the work for the dispatch thread run before returning.
+   * For a Scala file this runs on the dispatch thread, which the handlers insist on, and takes the write lock there,
+   * so the caller must hold no lock; then lets the work for the dispatch thread run before returning. A Java file is
+   * left unchanged: the extraction runs on a preview copy, under read access of its own.
    *
-   * @param file Scala source to extract from
+   * @param file Scala or Java source to extract from
    * @param selection selected UTF-16 range, not empty
    * @param stamp the modification stamp of the file's document when `selection` was read from it
    * @param refactoring the extraction to perform, as [[codeActions]] offered it
@@ -787,20 +788,27 @@ final class ScalaPsiHost private[scalaanalyzer] (
    * @throws com.intellij.openapi.progress.ProcessCanceledException when the document changed since `stamp`, which
    *                                                                 makes `selection` stale
    */
-  def extract(file: ScalaFile, selection: TextRange, stamp: Long, refactoring: Extract.Refactoring)
-      : Option[Extract.Result] = {
-    val (originals, changed, name) = try HostLock.writeOnDispatchThread {
-      if (file.getViewProvider.getDocument.getModificationStamp != stamp) throw new ProcessCanceledException()
+  def extract(file: ScalaFile | PsiJavaFile, selection: TextRange, stamp: Long, refactoring: Extract.Refactoring)
+      : Option[Extract.Result] = file match {
+    case scala: ScalaFile =>
+      val (originals, changed, name) = try HostLock.writeOnDispatchThread {
+        if (scala.getViewProvider.getDocument.getModificationStamp != stamp) throw new ProcessCanceledException()
 
-      performAndRestore(Seq(file))(Extract.perform(file, selection, refactoring))
-    } finally HostDispatchThread.drain()
-    val (before, after) = (originals.head._2, changed.head)
+        performAndRestore(Seq(scala))(Extract.perform(scala, selection, refactoring))
+      } finally HostDispatchThread.drain()
+      val (before, after) = (originals.head._2, changed.head)
 
-    name.map { offset =>
-      val at = StringUtil.offsetToLineColumn(after, offset)
+      name.map { offset =>
+        val at = StringUtil.offsetToLineColumn(after, offset)
 
-      Extract.Result(ChangeEngine.diff(before, after), LineColumn(at.line, at.column))
-    }
+        Extract.Result(ChangeEngine.diff(before, after), LineColumn(at.line, at.column))
+      }
+    case java: PsiJavaFile =>
+      read {
+        if (java.getViewProvider.getDocument.getModificationStamp != stamp) throw new ProcessCanceledException()
+
+        Extract.performJava(java, selection, refactoring)
+      }
   }
 
   /**

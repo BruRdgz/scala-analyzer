@@ -596,8 +596,8 @@ final class ProjectSession private (
    * @param end selection end in the same coordinates
    * @param refactoring the extraction to perform
    * @return the changes against the current buffer and the position of the name the extraction introduced, in the
-   *         text they produce; none when the plugin's handler refuses the selection, and for a source that is not
-   *         Scala
+   *         text they produce; none when the plugin's handler refuses the selection, and for a source that is neither
+   *         Scala nor Java
    */
   def extract(path: Path, start: LineColumn, end: LineColumn, refactoring: Extract.Refactoring)
       : Option[(Seq[TextChange], LineColumn)] =

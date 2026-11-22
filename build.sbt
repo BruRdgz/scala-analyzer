@@ -223,7 +223,14 @@ lazy val root = (project in file("."))
         "com/intellij/openapi/editor/actions/CaretStop", "com/intellij/openapi/roots/ui/util/CompositeAppearance",
         // FileTemplateManager, FileTemplate and their scheme: the plugin reads the bodies of implemented and
         // overridden members from them.
-        "com/intellij/ide/fileTemplates/FileTemplate")
+        "com/intellij/ide/fileTemplates/FileTemplate",
+        // Java's Inline variable looks up the Find Next shortcut for its hint when it inlines several occurrences; with
+        // no keymap service (the host has no configuration store) the lookup finds none. KeymapUtil's verification
+        // loads the keymap package and these shortcut types (read from its constant pool).
+        "com/intellij/openapi/keymap/", "com/intellij/openapi/actionSystem/MouseShortcut",
+        "com/intellij/openapi/actionSystem/PressureShortcut",
+        "com/intellij/openapi/actionSystem/KeyboardModifierGestureShortcut",
+        "com/intellij/openapi/actionSystem/KeyboardGestureAction", "com/intellij/openapi/client/ClientSystemInfo")
       val directory = target.value / "inlay-platform"
       val out = directory / s"scala-inlay-platform-$platformVersion.jar"
       val slice = FileFunction.cached(streams.value.cacheDirectory / "inlay-platform", FilesInfo.hash, FilesInfo.exists) { _ =>

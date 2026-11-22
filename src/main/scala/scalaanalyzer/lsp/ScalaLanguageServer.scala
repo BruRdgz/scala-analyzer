@@ -1922,7 +1922,7 @@ final class ScalaLanguageServer(
   private def executeExtract(params: ExecuteCommandParams): CompletableFuture[AnyRef] = extractRequest(params) match {
     case None => CompletableFuture.failedFuture(requestError(ResponseErrorCode.InvalidParams,
       s"$ExtractRefactoring: expected the document, the range, the document version and one of " +
-        Extract.Refactoring.values.map(_.id).mkString(", ")))
+        (Extract.Refactoring.values.map(_.id) :+ "introduceVariable.choice.<n>").mkString(", ")))
     case Some(request) =>
       onSource("extract", new TextDocumentIdentifier(request.uri), None) { (s, path) =>
         if (versions.get(path) != request.version) throw new ProcessCanceledException

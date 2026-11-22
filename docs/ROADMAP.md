@@ -250,6 +250,11 @@ milestones, not one release; each wave ends with the full suite and its own comm
     functional interface's method). Override and Implement Members on Java classes, through the Java plugin's
     `OverrideImplementUtil` with the dialog's defaults and order; the method bodies come from the IDE's templates,
     rendered by the host's subset of Velocity (`#if`), and indented by the platform with Velocity on the class path.
+  - Extract variable (each choice of occurrences the IDE's chooser lists, named as it suggests) and Inline variable
+    (all usages, or the one under the caret) on Java sources, through the Java plugin's ModCommand services. Java's
+    Extract method is not offered: the plugin's analysis of the selection reads the default visibility from its
+    settings dialog's class, which needs the platform's dialog classes (`DialogWrapper` and its inner classes) in the
+    host's slice of the IDE; to try with them. Inline method and Inline constant are not offered yet.
 - Decisions:
   - Bloop for both Maven and Gradle (spike E0): Microsoft's build-server-for-gradle publishes no artifact, reports no
     compile diagnostics and has no test or run environment. Bloop answers no `workspace/reload` and has no stdio mode.
@@ -274,8 +279,8 @@ milestones, not one release; each wave ends with the full suite and its own comm
      on `PsiClass`/`PsiMethod`; the LSP registrations select Scala only), and Go to Super from Java.
   2. Override/Implement on Java classes: the Java plugin's `OverrideImplementUtil` through the host's preview editor,
      with a Velocity subset in `HostFileTemplates` (the Java method-body templates use `#if`).
-  3. Java refactorings: Extract variable, Extract method and Inline on Java sources, through the Java plugin's
-     processors with the IDE's defaults, as the Scala ones are.
+  3. Java refactorings: Extract variable and Inline variable done; Extract method, Inline method and Inline constant
+     remain (see Done).
   4. Wave D: `main` lenses (including Java 21+ instance mains) and JUnit 4/5 test lenses on Java sources, run over
      BSP like the Scala ones.
   5. Data flow: the services its inspections ask for are registered (see the open questions); what remains is why

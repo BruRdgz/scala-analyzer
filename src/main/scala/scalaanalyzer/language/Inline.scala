@@ -1,10 +1,15 @@
 package scalaanalyzer.language
 
-import com.intellij.psi.{PsiElement, PsiReference}
+import com.intellij.modcommand.{ActionContext, ModCommand, ModDisplayMessage}
+import com.intellij.psi.{PsiElement, PsiFile, PsiJavaFile, PsiLocalVariable, PsiReference, PsiReferenceExpression}
 import com.intellij.psi.search.LocalSearchScope
 import com.intellij.psi.search.searches.ReferencesSearch
 import com.intellij.psi.util.PsiTreeUtil
+import com.intellij.refactoring.RefactoringBundle
+import com.intellij.refactoring.inline.InlineLocalHandler
+import com.intellij.refactoring.inline.InlineLocalHandler.InlineMode
 import com.intellij.usageView.UsageInfo
+import com.siyeh.ig.psiutils.VariableAccessUtils
 import org.jetbrains.plugins.scala.extensions.PsiElementExt
 import org.jetbrains.plugins.scala.lang.psi.ScalaPsiUtil
 import org.jetbrains.plugins.scala.lang.psi.api.ScalaFile
@@ -37,6 +42,10 @@ import scala.jdk.CollectionConverters.*
  * top-level private one, a `private[pkg]` one) is refused too: the host edits the current file only. Inlining runs the
  * plugin's processors on a preview copy of the file, with the usages found in the original.
  *
+ * In a Java file the host inlines local variables with the Java plugin's `InlineLocalHandler`, which computes a
+ * ModCommand without asking: it offers the same two inlinings, as the IDE's chooser does, and nothing where the
+ * handler's answer is an error. Inlining a method or a constant is not offered.
+ *
  * Callers hold PSI read access.
  */
 object Inline {
@@ -44,9 +53,10 @@ object Inline {
    * One way of inlining at a caret.
    *
    * @param title user-facing action name
-   * @param perform the inlining, applied to a preview copy of the file the action was found in
+   * @param perform the inlining, applied to a preview copy of the file the action was found in; whether it applies:
+   *                it does not when the plugin refuses the inlining where it is performed
    */
-  final case class Action(title: String, perform: ScalaFile => Unit)
+  final case class Action(title: String, perform: PsiFile => Boolean)
 
   /** The handler's private `isSimpleTypeAlias`, compiled to a public, name-mangled method of its companion. */
   private val IsSimpleTypeAlias = ScalaInlineTypeAliasHandler.getClass.getMethod(
@@ -59,27 +69,80 @@ object Inline {
    * Inlining all usages and removing the declaration is offered for each inlinable declaration. Inlining one usage
    * is added when the caret is on a usage and the declaration has others, as the IDE's dialog does.
    *
-   * @param file Scala source being queried
+   * @param file Scala or Java source being queried
    * @param offset caret offset in UTF-16 code units
    * @return the available inlinings; empty when the caret is not on an inlinable `val`, `def` or type alias that
-   *         only `file` can see
+   *         only `file` can see, or on a local variable of a Java file
    */
-  def actions(file: ScalaFile, offset: Int): Seq[Action] =
+  def actions(file: ScalaFile | PsiJavaFile, offset: Int): Seq[Action] = file match {
+    case scala: ScalaFile => scalaActions(scala, offset)
+    case java: PsiJavaFile => javaActions(java, offset)
+  }
+
+  /** The inlinings of a Scala file, as [[actions]] describes them. */
+  private def scalaActions(file: ScalaFile, offset: Int): Seq[Action] =
     ProjectSearch.usageTarget(file, offset) match {
       case Some(declaration: ScNamedElement) if isVisibleOnlyIn(file, declaration) =>
         val usages = ReferencesSearch.search(declaration, declaration.getUseScope).findAll().asScala.toSeq
 
         if (!inlinable(declaration, usages)) Seq.empty
         else {
-          val removeAll = inlineInCopy(_, declaration, usages, removeDeclaration = true)
+          val removeAll = (copy: PsiFile) => {
+            inlineInCopy(copy, declaration, usages, removeDeclaration = true)
+            true
+          }
           val all = Action("Inline all and remove the declaration", removeAll)
           val thisOne = Option(file.findReferenceAt(offset)).filter(_ => usages.size > 1).map { usage =>
-            Action("Inline this occurrence", inlineInCopy(_, declaration, Seq(usage), removeDeclaration = false))
+            Action("Inline this occurrence", copy => {
+              inlineInCopy(copy, declaration, Seq(usage), removeDeclaration = false)
+              true
+            })
           }
 
           all +: thisOne.toSeq
         }
       case _ => Seq.empty
+    }
+
+  /**
+   * The inlinings of a Java file's local variable at a caret, which is on its declaration or on one of its usages.
+   *
+   * The plugin's handler asks, when the caret is on a usage of a variable with others, whether to inline this usage
+   * only or all of them; it inlines all, and removes the variable, otherwise. Both are offered here as the chooser
+   * lists them, with the handler's words. The handler gets the usage under the caret in both cases, as the chooser's
+   * steps pass it. The modes that ask (`ASK` and `CHECK_CONFLICTS`) are avoided: they need the editor's settings.
+   */
+  private def javaActions(file: PsiJavaFile, offset: Int): Seq[Action] =
+    ProjectSearch.usageTarget(file, offset) match {
+      case Some(local: PsiLocalVariable) =>
+        val context = ActionContext.from(null, file).withOffset(offset)
+        val usage = CaretTargets.reference(file, offset).collect { case reference: PsiReferenceExpression => reference }
+        val usageCount = VariableAccessUtils.getVariableReferences(local).size
+
+        /** The inlining the handler computes for a mode, on the copy; it does not apply where the handler errs. */
+        def inlining(mode: InlineMode, title: String): Action = Action(title, copy => {
+          val command = InlineLocalHandler.doInline(context, local, usage.orNull, mode)
+
+          !isError(command) && {
+            ChangeEngine.applyModCommand(command, copy)
+            true
+          }
+        })
+
+        if (usage.isDefined && usageCount > 1)
+          Seq(
+            inlining(InlineMode.INLINE_ALL_AND_DELETE,
+              s"Inline variable: ${RefactoringBundle.message("inline.popup.all", usageCount)}"),
+            inlining(InlineMode.INLINE_ONE, s"Inline variable: ${RefactoringBundle.message("inline.popup.this.only")}"))
+        else Seq(inlining(InlineMode.INLINE_ALL_AND_DELETE, "Inline variable"))
+      case _ => Seq.empty
+    }
+
+  /** Whether the command is, or contains, the message of a refusal. */
+  private def isError(command: ModCommand): Boolean =
+    command.unpack.asScala.exists {
+      case message: ModDisplayMessage => message.kind == ModDisplayMessage.MessageKind.ERROR
+      case _ => false
     }
 
   /** Whether the declaration's use scope lies within `file`, so that the file holds every usage. */
@@ -172,7 +235,7 @@ object Inline {
    * `removeDeclaration` is set.
    */
   private def inlineInCopy(
-      copy: ScalaFile, declaration: ScNamedElement, usages: Seq[PsiReference], removeDeclaration: Boolean): Unit = {
+      copy: PsiFile, declaration: ScNamedElement, usages: Seq[PsiReference], removeDeclaration: Boolean): Unit = {
     val processor = processorIn(copy, declaration, inlineThisOnly = !removeDeclaration)
     val usagesInCopy = usages.map(usage => new UsageInfo(referenceInCopy(copy, usage))).toArray
 
@@ -187,7 +250,7 @@ object Inline {
    * does not call, so their `reference` stays empty. They remove the declaration unless they inline this usage only.
    */
   private def processorIn(
-      copy: ScalaFile, declaration: ScNamedElement, inlineThisOnly: Boolean): ScalaInlineProcessor = {
+      copy: PsiFile, declaration: ScNamedElement, inlineThisOnly: Boolean): ScalaInlineProcessor = {
     val offset = declaration.nameId.getTextRange.getStartOffset
     val project = copy.getProject
 
@@ -210,12 +273,12 @@ object Inline {
   }
 
   /** The `kind` element enclosing `offset` in the copy, which has the original's text and so the same PSI shape. */
-  private def elementInCopy[A <: PsiElement](copy: ScalaFile, offset: Int, kind: Class[A]): A =
+  private def elementInCopy[A <: PsiElement](copy: PsiFile, offset: Int, kind: Class[A]): A =
     Option(PsiTreeUtil.findElementOfClassAtOffset(copy, offset, kind, false))
       .getOrElse(throw new IllegalStateException(s"no ${kind.getSimpleName} at offset $offset in the preview copy"))
 
   /** The reference at the same position in the copy as `reference` in the original. */
-  private def referenceInCopy(copy: ScalaFile, reference: PsiReference): PsiReference = {
+  private def referenceInCopy(copy: PsiFile, reference: PsiReference): PsiReference = {
     val offset = reference.getElement.getTextRange.getStartOffset + reference.getRangeInElement.getStartOffset
 
     Option(copy.findReferenceAt(offset))

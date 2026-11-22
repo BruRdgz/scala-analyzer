@@ -827,7 +827,8 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
    * ancestor kind. A Scala file has the plugin's fixes, intentions, surround, unwrap, inline and extract actions, and
    * Implement members, which is previewed only when `only` accepts its kind and not at all for a caller that
    * `resolvesEdits`. A Java file has the Java plugin's intentions, as `refactor.rewrite` like the Scala ones, the fixes of
-   * its errors and inspection problems as `quickfix`, Organize imports, which the platform's Java import optimizer
+   * its errors and inspection problems as `quickfix`, Inline variable as `refactor.inline`, Extract variable and
+   * Extract method as `refactor.extract`, Organize imports, which the platform's Java import optimizer
    * computes, and Implement members for a class whose errors do not already offer the Java plugin's fix for it.
    *
    * @param path registered project-source path
@@ -888,20 +889,21 @@ private[scalaanalyzer] final class ProjectLanguageOperations(
 
   /**
    * Computes the changes of an extraction that [[codeActions]] offered for a selection (see [[Extract]]). Only Scala
-   * files have them. The buffer is unchanged: the host restores the file's text before this returns, and queries
-   * running meanwhile are cancelled.
+   * and Java files have them. The buffer is unchanged: the host restores a Scala file's text before this returns, and
+   * queries running meanwhile are cancelled; a Java file's extraction runs on a copy.
    *
    * @param path registered project-source path
    * @param start selection start
    * @param end selection end, after `start`
    * @param refactoring the extraction to perform
    * @return the changes against the current buffer and the position of the name the extraction introduced, in the text
-   *         they produce; none when the plugin's handler refuses the selection, and for a file that is not Scala
+   *         they produce; none when the plugin's handler refuses the selection, and for a file that is neither Scala
+   *         nor Java
    * @throws com.intellij.openapi.progress.ProcessCanceledException when the buffer is edited meanwhile
    */
   def extract(path: Path, start: LineColumn, end: LineColumn, refactoring: Extract.Refactoring)
       : Option[(Seq[TextChange], LineColumn)] = file(path) match {
-    case sourceFile: ScalaFile =>
+    case sourceFile: (ScalaFile | PsiJavaFile) =>
       val sourceDocument = document(sourceFile)
       val (range, stamp) = host.read(
         (new TextRange(offset(sourceDocument, start), offset(sourceDocument, end)), sourceDocument.getModificationStamp))

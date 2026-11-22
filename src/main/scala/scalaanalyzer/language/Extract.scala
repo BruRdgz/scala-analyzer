@@ -1,10 +1,16 @@
 package scalaanalyzer.language
 
 import com.intellij.codeInsight.intention.preview.IntentionPreviewUtils
+import com.intellij.modcommand.{ActionContext, ModChooseAction}
 import com.intellij.openapi.actionSystem.DataContext
 import com.intellij.openapi.editor.Editor
 import com.intellij.openapi.util.TextRange
-import com.intellij.psi.{PsiDocumentManager, PsiElement}
+import com.intellij.openapi.util.text.StringUtil
+import com.intellij.psi.{PsiDocumentManager, PsiElement, PsiFile, PsiJavaFile}
+import com.intellij.refactoring.{IntroduceSite, IntroduceVariableUtil}
+import com.intellij.refactoring.introduceField.ElementToWorkOn
+import com.intellij.refactoring.introduceVariable.JavaIntroduceVariableModCommandService
+import com.intellij.refactoring.introduceVariable.JavaIntroduceVariableModCommandService.ToVariableContext
 import com.intellij.refactoring.util.CommonRefactoringUtil.RefactoringErrorHintException
 import org.jetbrains.plugins.scala.extensions.PsiElementExt
 import org.jetbrains.plugins.scala.lang.psi.api.ScalaFile
@@ -21,6 +27,7 @@ import scalaanalyzer.platform.RequestEditor
 
 import java.lang.reflect.{InvocationTargetException, Method}
 
+import scala.jdk.CollectionConverters.*
 import scala.util.Using
 
 /**
@@ -40,29 +47,54 @@ import scala.util.Using
  * duplicates of the selection (which its unit-test path does where the IDE asks) and has a name of its own, since the
  * plugin's dialog leaves the name to the user.
  * Introduce Type Alias, which the handler takes for a selected type, is not offered.
+ *
+ * Java sources go the Java plugin's ModCommand and headless routes, which compute their changes without touching the
+ * file, so they are performed on a preview copy (see [[performJava]]). Extract variable offers each choice of
+ * occurrences the IDE's chooser lists, with the IDE's description, and names the variable as the IDE suggests.
+ * Java's Extract method is not offered: the Java plugin's analysis of the selection reads the default visibility from
+ * its settings dialog's class (`ExtractMethodDialog.getDefaultVisibility`), whose superclass is the platform's dialog,
+ * which the host does not have.
  */
 object Extract {
   /** The refactorings a selection can be offered, which a client names by `id` when it asks for one. */
-  enum Refactoring(val id: String) {
+  sealed abstract class Refactoring(val id: String)
+
+  /** The refactorings, which are all but one without parameters. */
+  object Refactoring {
     /** Introduces a variable for the selected expression and replaces all its occurrences. */
-    case IntroduceAll extends Refactoring("introduceVariable.all")
+    case object IntroduceAll extends Refactoring("introduceVariable.all")
 
     /** Introduces a variable for the selected expression and replaces this occurrence only. */
-    case IntroduceOne extends Refactoring("introduceVariable.one")
+    case object IntroduceOne extends Refactoring("introduceVariable.one")
 
     /** Extracts the selected statements into a method. */
-    case Method extends Refactoring("extractMethod")
-  }
+    case object Method extends Refactoring("extractMethod")
 
-  /** The refactorings by their `id`. */
-  object Refactoring {
+    /**
+     * Introduces a variable for the selected Java expression and replaces the occurrences of the IDE's choice at
+     * `index`, in the order the IDE's chooser lists them (this occurrence only first, all of them last).
+     *
+     * @param index position of the choice among those the Java plugin offers for the expression
+     */
+    final case class IntroduceChoice(index: Int) extends Refactoring(s"$ChoicePrefix$index")
+
+    /** The identifier of an [[IntroduceChoice]] starts with this, and ends with the choice's index. */
+    private val ChoicePrefix = "introduceVariable.choice."
+
+    /** The refactorings that have an identifier of their own. */
+    val values: Seq[Refactoring] = Seq(IntroduceAll, IntroduceOne, Method)
+
     /**
      * Finds a refactoring by the identifier a client sends.
      *
      * @param id a refactoring's `id`
      * @return the refactoring; none when no refactoring has that identifier
      */
-    def withId(id: String): Option[Refactoring] = values.find(_.id == id)
+    def withId(id: String): Option[Refactoring] =
+      values.find(_.id == id).orElse {
+        Option.when(id.startsWith(ChoicePrefix))(id.drop(ChoicePrefix.length).toIntOption).flatten
+          .filter(_ >= 0).map(IntroduceChoice(_))
+      }
   }
 
   /**
@@ -130,12 +162,22 @@ object Extract {
    * handler's lookup inserts parentheses into the document for a moment. Extract Method may still refuse when it
    * performs, where the handler finds no scope to extract to; the plugin's check for that is private.
    *
-   * @param file Scala source being queried
+   * A Java file's offers are those of the Java plugin's services, which look at the file without changing it; the
+   * choices of Extract variable are the IDE's, in its order (see [[Refactoring.IntroduceChoice]]).
+   *
+   * @param file Scala or Java source being queried
    * @param selection selected UTF-16 range, not empty
-   * @return the offered refactorings, in the order Extract to val (all occurrences, this one) and Extract method;
-   *         empty for a selection that no handler accepts
+   * @return the offered refactorings, in the order Extract to val (all occurrences, this one) and Extract method for
+   *         Scala, Extract variable (a choice each) and Extract method for Java; empty for a selection that no
+   *         handler accepts
    */
-  def offers(file: ScalaFile, selection: TextRange): Seq[Offer] = {
+  def offers(file: ScalaFile | PsiJavaFile, selection: TextRange): Seq[Offer] = file match {
+    case scala: ScalaFile => scalaOffers(scala, selection)
+    case java: PsiJavaFile => javaOffers(java, selection)
+  }
+
+  /** The offers of a Scala file, as [[offers]] describes them. */
+  private def scalaOffers(file: ScalaFile, selection: TextRange): Seq[Offer] = {
     val introductions = introducible(file, selection).toSeq.flatMap { occurrences =>
       if (occurrences > 1)
         Seq(
@@ -146,6 +188,18 @@ object Extract {
 
     introductions ++ Option.when(mayExtractMethod(file, selection))(Offer("Extract method", Refactoring.Method))
   }
+
+  /** The offers of a Java file, as [[offers]] describes them. */
+  private def javaOffers(file: PsiJavaFile, selection: TextRange): Seq[Offer] =
+    JavaIntroduceVariableModCommandService.getInstance.getContext(file, selection) match {
+      case available: ToVariableContext.Available =>
+        available.choices.asScala.toSeq match {
+          case Seq(only) => Seq(Offer("Extract variable", Refactoring.IntroduceChoice(only.index)))
+          case choices =>
+            choices.map(choice => Offer(s"Extract variable: ${choice.description}", Refactoring.IntroduceChoice(choice.index)))
+        }
+      case _: ToVariableContext.Error => Seq.empty
+    }
 
   /**
    * Performs a refactoring on the file as the handler does without its dialog. The handler changes the file, and the
@@ -169,6 +223,8 @@ object Extract {
           case Refactoring.Method => extractMethod(file, request.editor)
           case Refactoring.IntroduceAll => introduceVariable(file, selection, request.editor, replaceAll = true)
           case Refactoring.IntroduceOne => introduceVariable(file, selection, request.editor, replaceAll = false)
+          // The choices are the Java plugin's: a Scala file has no choice of that index to perform.
+          case _: Refactoring.IntroduceChoice => None
         } catch {
           // In unit-test mode the handlers' error hint is an exception.
           case _: RefactoringErrorHintException => None
@@ -314,7 +370,7 @@ object Extract {
     catch { case error: InvocationTargetException => throw error.getCause }
 
   /** Applies the formatting that the handler postponed and commits the document, so the PSI and the text agree. */
-  private def settle(file: ScalaFile): Unit = {
+  private def settle(file: PsiFile): Unit = {
     val documents = PsiDocumentManager.getInstance(file.getProject)
     val document = file.getViewProvider.getDocument
 
@@ -325,4 +381,64 @@ object Extract {
   /** The bindings named `name` in the file, in document order. */
   private def declarationsNamed(file: ScalaFile, name: String): Seq[ScBindingPattern] =
     file.depthFirst().collect { case binding: ScBindingPattern if binding.name == name => binding }.toSeq
+
+  /**
+   * Performs a refactoring on a Java file as the IDE's headless routes do, on a preview copy: the file itself is
+   * unchanged, and nothing is written.
+   *
+   * The caller holds PSI read access and the file is unchanged since `selection` was read.
+   *
+   * @param file Java source to change
+   * @param selection selected UTF-16 range, not empty
+   * @param refactoring the refactoring to perform, as [[offers]] offered it
+   * @return the edits against the file's text and the position of the name that the refactoring introduced, in the
+   *         text they produce; none when the plugin refuses the selection, or when `refactoring` is a Scala one
+   */
+  def performJava(file: PsiJavaFile, selection: TextRange, refactoring: Refactoring): Option[Result] =
+    refactoring match {
+      case Refactoring.IntroduceChoice(index) => introduceJavaVariable(file, selection, index)
+      // Java has no Extract method here (see the object's description), and Scala's choices are not Java's.
+      case Refactoring.Method | Refactoring.IntroduceAll | Refactoring.IntroduceOne => None
+    }
+
+  /**
+   * Introduces a variable for the selected expression with the command the Java plugin builds for its choice of
+   * occurrences, and takes the new name's place from the rename that command asks the editor to start.
+   *
+   * The command is built on the preview copy's session, which makes the copies its updates work on listened to (see
+   * [[ChangeEngine.copyForModCommand]]); it is executed there but for the rename, which a copy cannot take.
+   */
+  private def introduceJavaVariable(file: PsiJavaFile, selection: TextRange, index: Int): Option[Result] = {
+    val service = JavaIntroduceVariableModCommandService.getInstance
+    val (changed, name) = ChangeEngine.runIntention(file) { copy =>
+      val expression =
+        IntroduceVariableUtil.findExpressionInRange(file.getProject, file, selection.getStartOffset, selection.getEndOffset)
+
+      service.getContext(expression) match {
+        // The choices are those of the file's current text: an index beyond them is a stale request.
+        case analysis: ToVariableContext.Available if index < analysis.choices.size =>
+          val context = ActionContext.from(null, file).withSelection(selection)
+          // The command finds the expression again in each copy of the file it updates, from the original's.
+          val site: IntroduceSite = updater => ElementToWorkOn.getWritable(expression, updater)
+          val command = service.introduceVariableCommand(context, site, analysis, null) match {
+            // Several choices come as a chooser, which the IDE shows; the choice's action is the command to run.
+            case chooser: ModChooseAction => chooser.actions.get(index).perform(context)
+            case single => single
+          }
+
+          ChangeEngine.applyModCommand(command, copy)
+            .map(rename => Option(rename.symbolRange.nameIdentifierRange).getOrElse(rename.symbolRange.range))
+        case _ => None
+      }
+    }
+
+    name.map(range => Result(changed.edits, lineColumn(changed.text, range.getStartOffset)))
+  }
+
+  /** The line and column of an offset of a text. */
+  private def lineColumn(text: String, offset: Int): LineColumn = {
+    val at = StringUtil.offsetToLineColumn(text, offset)
+
+    LineColumn(at.line, at.column)
+  }
 }

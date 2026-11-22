@@ -115,7 +115,8 @@ object CodeActions {
 
 /**
  * Previews intentions, the fixes of problems (the plugin's annotator and inspection fixes for Scala files, the Java
- * plugin's error and inspection fixes for Java files), and for Scala files surround and unwrap actions and inlinings, as source edits.
+ * plugin's error and inspection fixes for Java files), inlinings, and for Scala files surround and unwrap actions, as
+ * source edits.
  *
  * Callers hold PSI read access. Actions run against copies through the platform's preview contract;
  * unsupported previews are disabled with a reason when the action is known to be available.
@@ -152,8 +153,8 @@ final class CodeActions(scalaIntentionClasses: Seq[String], javaIntentionClasses
   }
 
   /**
-   * Collects previewed intentions for a source range, and the fixes of the problems it touches; for a Scala file also
-   * import candidates, surround actions, unwrappers and inlinings. A Java file's unresolved class reference gets one
+   * Collects previewed intentions for a source range, and the fixes of the problems it touches, and the inlinings at
+   * its start; for a Scala file also import candidates, surround actions and unwrappers. A Java file's unresolved class reference gets one
    * import candidate per class its import fix lists.
    *
    * Unusable previews are returned disabled when availability was established. Cancellation propagates;
@@ -178,7 +179,8 @@ final class CodeActions(scalaIntentionClasses: Seq[String], javaIntentionClasses
           case scalaFile: ScalaFile => collectScala(scalaFile, range, problems, editor)
           case javaFile: PsiJavaFile =>
             val fixes = javaFixCandidates(javaFile, range, editor, problems)
-            merged(intentionChoices(file, range, editor, fixes ++ intentionCandidates(file)))
+            merged(intentionChoices(file, range, editor, fixes ++ intentionCandidates(file))) ++
+              inlinings(javaFile, range)
           case _ => intentionChoices(file, range, editor, intentionCandidates(file)).distinct
         }
     }
@@ -393,11 +395,12 @@ final class CodeActions(scalaIntentionClasses: Seq[String], javaIntentionClasses
   }
 
   /**
-   * Offers the inlinings at the range's start, each previewed on its own copy.
+   * Offers the inlinings at the range's start, each previewed on its own copy; one that the plugin refuses where it
+   * is previewed is left out.
    *
    * A failure while looking for them leaves them out; one while previewing leaves the action disabled.
    */
-  private def inlinings(file: ScalaFile, range: TextRange): Seq[Choice] = {
+  private def inlinings(file: ScalaFile | PsiJavaFile, range: TextRange): Seq[Choice] = {
     val found =
       try Inline.actions(file, range.getStartOffset)
       catch {
@@ -407,15 +410,19 @@ final class CodeActions(scalaIntentionClasses: Seq[String], javaIntentionClasses
           Seq.empty
       }
 
-    found.map { action =>
+    found.flatMap { action =>
       try {
-        val (result, _) = preview(file)(action.perform)
-        Choice(action.title, "refactor.inline", result.edits, None)
+        val (result, applies) = file match {
+          case scala: ScalaFile => preview(scala)(action.perform)
+          case java: PsiJavaFile => previewIntention(java)(action.perform)
+        }
+
+        Option.when(applies)(Choice(action.title, "refactor.inline", result.edits, None))
       } catch {
         case e: ProcessCanceledException => throw e
         case e @ (NonFatal(_) | _: LinkageError) =>
           HostLog.warn(s"code action ${action.title} could not be previewed", e)
-          Choice(action.title, "refactor.inline", Seq.empty, Some("This inlining could not be previewed."))
+          Some(Choice(action.title, "refactor.inline", Seq.empty, Some("This inlining could not be previewed.")))
       }
     }
   }
@@ -426,11 +433,11 @@ final class CodeActions(scalaIntentionClasses: Seq[String], javaIntentionClasses
    *
    * A failure while looking for them leaves them out.
    *
-   * @param file Scala source being queried
+   * @param file Scala or Java source being queried
    * @param range UTF-16 range the actions apply to
    * @return the offers; empty for an empty range
    */
-  def extractionOffers(file: ScalaFile, range: TextRange): Seq[Extract.Offer] =
+  def extractionOffers(file: ScalaFile | PsiJavaFile, range: TextRange): Seq[Extract.Offer] =
     if (range.isEmpty) Seq.empty
     else
       try Extract.offers(file, range)

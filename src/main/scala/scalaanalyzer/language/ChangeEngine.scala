@@ -4,6 +4,9 @@ import com.intellij.codeInsight.intention.impl.preview.IntentionPreviewEditor
 import com.intellij.codeInsight.intention.preview.IntentionPreviewUtils
 import com.intellij.diff.comparison.{ByCharRt, ByWordRt, CancellationChecker, ComparisonPolicy}
 import com.intellij.lang.java.JavaLanguage
+import com.intellij.modcommand.{
+  ModCommand, ModCommandExecutor, ModDisplayMessage, ModHighlight, ModNavigate, ModStartRename, ModUpdateFileText
+}
 import com.intellij.openapi.editor.Editor
 import com.intellij.openapi.progress.ProgressManager
 import com.intellij.openapi.util.{Computable, TextRange}
@@ -152,6 +155,31 @@ object ChangeEngine {
       resources(listenTo(copy))
       copy
     case _ => null
+  }
+
+  /**
+   * Applies the text updates of a ModCommand to a preview copy, for a command that also starts a rename, which
+   * `executeForFileCopy` refuses and a copy cannot take.
+   *
+   * The command's navigation, highlights and messages change no text and are left out. Call it where the command was
+   * built if that took a ModCommand update (see [[copyForModCommand]]).
+   *
+   * @param command a command built for the preview copy's original file
+   * @param copy the preview copy of that file, whose text is the command's old text
+   * @return the rename the command asks the editor to start; none when it asks for none
+   * @throws IllegalStateException when the command does something else, which a preview does not support
+   */
+  private[scalaanalyzer] def applyModCommand(command: ModCommand, copy: PsiFile): Option[ModStartRename] = {
+    var rename = Option.empty[ModStartRename]
+
+    command.unpack.asScala.foreach {
+      case update: ModUpdateFileText => ModCommandExecutor.getInstance.executeForFileCopy(update, copy)
+      case start: ModStartRename => rename = Some(start)
+      case _: ModNavigate | _: ModHighlight | _: ModDisplayMessage => ()
+      case other => throw new IllegalStateException(s"a preview cannot apply the command $other")
+    }
+
+    rename
   }
 
   /** `modify` on `copy`, its postponed formatting done and its document committed. */

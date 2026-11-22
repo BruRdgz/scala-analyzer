@@ -233,6 +233,11 @@ import com.intellij.psi.stubs.{
   BinaryFileStubBuilders, CoreStubTreeLoader, ObjectStubTree, StubElementRegistryServiceImpl, StubTreeLoader
 }
 import com.intellij.psi.util.{CachedValuesManager, JavaClassSupers, PsiVersioningService}
+import com.intellij.refactoring.JavaRefactoringSettings
+import com.intellij.refactoring.introduceVariable.{
+  JavaIntroduceVariableModCommandService, JavaIntroduceVariableModCommandServiceImpl
+}
+import com.intellij.refactoring.util.{CommonJavaInlineUtil, InlineUtil}
 import com.intellij.task.ProjectTaskManager
 import com.intellij.testIntegration.{JavaTestFinder, TestFinder, TestFramework}
 import com.intellij.util.{
@@ -1263,6 +1268,14 @@ private[scalaanalyzer] object HostBootstrap {
       // The batch executor applies textual mod commands to preview copies without the desktop executor.
       appServices.register(classOf[ModCommandExecutor])(new HostModCommandExecutor)
       appServices.register(classOf[ModCommandService])(new ModCommandServiceImpl)
+      // Extract variable on Java sources: the Java plugin's own service, which its descriptor registers, and the
+      // refactoring options it reads, which are plain state with the IDE's defaults (the host loads no saved state).
+      appServices.register(classOf[JavaIntroduceVariableModCommandService])(
+        new JavaIntroduceVariableModCommandServiceImpl)
+      appServices.register(classOf[JavaRefactoringSettings])(new JavaRefactoringSettings)
+      // Inline variable on Java sources replaces the usages through this service, which java-backend's descriptor
+      // registers with the Java plugin's InlineUtil.
+      appServices.register(classOf[CommonJavaInlineUtil])(newPrivate(classOf[InlineUtil]))
       // Interpolation references give completion its Scala prefix inside plain strings; file paths and URL providers
       // need IDE navigation.
       appServices.register(classOf[PsiReferenceService])(new PsiReferenceServiceImpl)
@@ -1891,7 +1904,16 @@ private[scalaanalyzer] object HostBootstrap {
       projectServices.register(classOf[ProjectBytecodeAnalysis])(new HostProjectBytecodeAnalysis(project))
       // Nullability annotations of library Java types: the host configures none (the IDE's defaults come from
       // settings).
+      lazy val noNullabilityAnnotations = {
+        // The holder's type is protected to the manager: an empty one is made by its own factory.
+        val holder = Class.forName("com.intellij.codeInsight.NullableNotNullManager$NullabilityAnnotationDataHolder")
+        val fromMap = holder.getMethod("fromMap", classOf[java.util.Map[?, ?]])
+        fromMap.setAccessible(true)
+        fromMap.invoke(null, java.util.Map.of())
+      }
       projectServices.register(classOf[NullableNotNullManager])(new Host_NullableNotNullManager(project, dispatch {
+        // The annotations it recognizes, which Java's Extract variable asks while choosing the variable's type.
+        case ("NullableNotNullManager.getAllNullabilityAnnotationsWithNickNames", _) => noNullabilityAnnotations
         case ("NullableNotNullManager.getNullityDefault", _) => ContextNullabilityInfo.EMPTY
         case ("NullableNotNullManager.findEffectiveNullabilityInfo", _) => null
         // Asked of a type's annotations while substituting generics (the plugin's isInheritor on a class file).

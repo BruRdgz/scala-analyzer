@@ -1363,6 +1363,184 @@ class EditingTest extends munit.FunSuite {
     } finally host.closeSource(file)
   }
 
+  private def javaFile(name: String, text: String): PsiJavaFile =
+    host.openFile(Path.of(s"/editing/$name.java"), text, module) match {
+      case f: PsiJavaFile => f
+      case other => fail(s"not Java: $other")
+    }
+
+  // The oracle is the Java plugin's own services and defaults, which this test cannot restate for names: the new
+  // variable's and the new method's name are what the IDE suggests, so the texts have `$v` where the name goes and the
+  // name is read back from the position the result gives. The layout (a declaration before the statement, a private
+  // method after the enclosing one, a blank line between) is the IDE's, from the plugin's introduceVariable and
+  // extractMethod test data.
+  test("Java extractions are computed on a copy and say where the new name is") {
+    final case class JavaExtractCase(
+      name: String, marked: String, offered: Seq[String], title: String, expected: String)
+
+    val twoOccurrences =
+      """class Two {
+        |    int f(int a) {
+        |        int x = <start>a * 2<end>;
+        |        return x + a * 2;
+        |    }
+        |}
+        |""".stripMargin
+    val both = Seq("Extract variable: Replace this occurrence only", "Extract variable: Replace all 2 occurrences")
+    val cases = Seq(
+      JavaExtractCase("an expression with one occurrence",
+        """class One {
+          |    int f(int a) {
+          |        int b = <start>a * 2<end>;
+          |        return b;
+          |    }
+          |}
+          |""".stripMargin,
+        Seq("Extract variable"), "Extract variable",
+        """class One {
+          |    int f(int a) {
+          |        int <name>$v = a * 2;
+          |        int b = $v;
+          |        return b;
+          |    }
+          |}
+          |""".stripMargin),
+      JavaExtractCase("this occurrence of an expression", twoOccurrences, both, both.head,
+        """class Two {
+          |    int f(int a) {
+          |        int <name>$v = a * 2;
+          |        int x = $v;
+          |        return x + a * 2;
+          |    }
+          |}
+          |""".stripMargin),
+      JavaExtractCase("every occurrence of an expression", twoOccurrences, both, both(1),
+        """class Two {
+          |    int f(int a) {
+          |        int <name>$v = a * 2;
+          |        int x = $v;
+          |        return x + $v;
+          |    }
+          |}
+          |""".stripMargin),
+    )
+    val refused = Seq(
+      "only white space" -> "class Blank { int f() {<start> <end>return 1; } }",
+      "only a comment" -> "class Comment { int f() { <start>// note<end>\n return 1; } }",
+    )
+    def selected(marked: String): (PsiJavaFile, String, TextRange) = {
+      val original = marked.replace("<start>", "").replace("<end>", "")
+
+      (javaFile("Extracted", original), original,
+        new TextRange(marked.indexOf("<start>"), marked.indexOf("<end>") - "<start>".length))
+    }
+    def stampOf(file: PsiJavaFile): Long = host.read(file.getViewProvider.getDocument.getModificationStamp)
+
+    for (testCase <- cases) {
+      val (file, original, selection) = selected(testCase.marked)
+      try {
+        val offers = host.codeActions(file, selection).extractions
+
+        assertEquals(offers.map(_.title), testCase.offered, testCase.name)
+        val chosen = offers.find(_.title == testCase.title).getOrElse(fail(offers.toString)).refactoring
+        val result = host.extract(file, selection, stampOf(file), chosen).getOrElse(fail(s"refused: ${testCase.name}"))
+        val changed = applyEdits(original, result.edits)
+        val offset = new DocumentImpl(changed, true).getLineStartOffset(result.name.line) + result.name.column
+        val name = changed.drop(offset).takeWhile(Character.isJavaIdentifierPart)
+
+        assert(name.nonEmpty, s"no name at the position: ${testCase.name}")
+        assertEquals(changed.patch(offset, "<name>", 0), testCase.expected.replace("$v", name), testCase.name)
+        assertEquals(host.read(file.getText), original, s"unchanged: ${testCase.name}")
+      } finally host.closeSource(file)
+    }
+    for ((name, marked) <- refused) {
+      val (file, original, selection) = selected(marked)
+      try {
+        assertEquals(host.codeActions(file, selection).extractions, Seq.empty, name)
+        assertEquals(host.read(file.getText), original, name)
+      } finally host.closeSource(file)
+    }
+
+    val (file, original, selection) = selected(cases.head.marked)
+    try {
+      intercept[ProcessCanceledException](
+        host.extract(file, selection, stampOf(file) - 1, Extract.Refactoring.IntroduceChoice(0)))
+      // A Scala refactoring has nothing to do for a Java file.
+      assertEquals(host.extract(file, selection, stampOf(file), Extract.Refactoring.IntroduceAll), None)
+      assertEquals(host.read(file.getText), original)
+    } finally host.closeSource(file)
+  }
+
+  // The oracle is the Java plugin's InlineLocalHandler, whose choices are those of its chooser: all usages and the
+  // variable's removal, and the usage under the caret only, when the caret is on a usage of a variable with others.
+  test("Java inline actions replace the usages of a local variable on a copy, as the IDE's chooser offers") {
+    final case class JavaInlineCase(name: String, offered: Seq[String], title: String, marked: String, expected: String)
+
+    val shared =
+      """class Inlined {
+        |    int f() {
+        |        int r = 33;
+        |        return r + <caret>r;
+        |    }
+        |}
+        |""".stripMargin
+    val declared = shared.replace("int r", "int <caret>r").replace("+ <caret>r", "+ r")
+    val all = "Inline variable: All 2 references and remove the variable"
+    val cases = Seq(
+      JavaInlineCase("every usage, from the declaration", Seq("Inline variable"), "Inline variable", declared,
+        """class Inlined {
+          |    int f() {
+          |        return 33 + 33;
+          |    }
+          |}
+          |""".stripMargin),
+      JavaInlineCase("every usage, from a usage", Seq(all, "Inline variable: This reference only"), all, shared,
+        """class Inlined {
+          |    int f() {
+          |        return 33 + 33;
+          |    }
+          |}
+          |""".stripMargin),
+      JavaInlineCase("the usage under the caret only", Seq(all, "Inline variable: This reference only"),
+        "Inline variable: This reference only", shared,
+        """class Inlined {
+          |    int f() {
+          |        int r = 33;
+          |        return r + 33;
+          |    }
+          |}
+          |""".stripMargin),
+    )
+    // The plugin answers with an error for a variable nothing uses, and a field is not a local variable.
+    val refused = Seq(
+      "a variable that is never used" -> "class Unused { void f() { int <caret>r = 33; } }",
+      "a field" -> "class Field { int <caret>r = 33; int g() { return r + r; } }",
+    )
+    def inlinings(marked: String): (PsiJavaFile, String, Seq[CodeActions.Choice]) = {
+      val original = marked.replace("<caret>", "")
+      val file = javaFile("Inlined", original)
+      val at = marked.indexOf("<caret>")
+
+      (file, original, host.codeActions(file, new TextRange(at, at)).choices.filter(_.kind == "refactor.inline"))
+    }
+
+    for (testCase <- cases) {
+      val (file, original, actions) = inlinings(testCase.marked)
+      try {
+        assertEquals(actions.map(_.title), testCase.offered, testCase.name)
+        val chosen = actions.find(_.title == testCase.title).getOrElse(fail(actions.toString))
+        assertEquals(chosen.disabled, None)
+        assertEquals(applyEdits(original, chosen.edits), testCase.expected, testCase.name)
+        assertEquals(host.read(file.getText), original)
+      } finally host.closeSource(file)
+    }
+    for ((name, marked) <- refused) {
+      val (file, _, actions) = inlinings(marked)
+      try assertEquals(actions, Seq.empty, name)
+      finally host.closeSource(file)
+    }
+  }
+
   // The oracle is the plugin's ImplementMembersQuickFixTest (`testProperDefaultValueForVariousMemberTypes`): the quick
   // fix of a class that must implement members, and the same members as an action for an abstract class, which has no
   // problem to fix.
