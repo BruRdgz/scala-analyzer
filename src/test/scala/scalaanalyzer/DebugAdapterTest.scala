@@ -332,6 +332,25 @@ class DebugAdapterTest extends munit.FunSuite {
     }
   }
 
+  test("run without debugging: breakpoints are not set, and the program runs to its end") {
+    val session = ProjectSession.open(TestHost.host, fixture)
+    try {
+      val uri = session.startMainDebugSession(fixture.toFile.toURI.toString + "#app/Compile", "app.Debugged", Seq.empty,
+        DebugAdapter.LaunchOptions.Empty, _ => ())
+      Using.resource(new DapClient(uri)) { client =>
+        val launched = client.start(noDebug = true)
+        assertEquals(client.setBreakpoints(debugged, Seq(sourceBreakpoint(loopLine))).map(_.isVerified), Seq(false))
+        client.breakOnExceptions("caught")
+        client.run(launched)
+        assertEquals(client.nextStopOrEnd().map(_ => "ended"), Right("ended"))
+        assert(client.output.contains("total 45, 6, 2"), client.output)
+      }
+    } finally {
+      session.close()
+      releaseModules()
+    }
+  }
+
   test("exception breakpoints: a caught exception, then an uncaught one, with what was thrown") {
     debuggingDebugged("throw")(_.breakOnExceptions("caught", "uncaught")) { client =>
       def exception(stop: StoppedEventArguments): (String, String) = {

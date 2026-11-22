@@ -71,9 +71,10 @@ final class DapClient(uri: URI) extends munit.Assertions with AutoCloseable {
    * Initializes the adapter and sends `launch`, then waits until the adapter accepts breakpoints. The adapter answers
    * `launch` once it has attached to the program, which waits for [[run]].
    *
+   * @param noDebug launches as Run Without Debugging does
    * @return the response to `launch`, which [[run]] waits for
    */
-  def start(): CompletableFuture[Void] = begin(server.launch(java.util.Map.of("noDebug", false)))
+  def start(noDebug: Boolean = false): CompletableFuture[Void] = begin(server.launch(java.util.Map.of("noDebug", Boolean.box(noDebug))))
 
   /**
    * As [[start]], for a program that already runs: sends `attach` to its JDWP agent, as an editor does.

@@ -290,6 +290,11 @@ object DebugProxy {
     private val nextReference = new AtomicInteger(FirstProxyReference)
     /** The targets of the last `stepInTargets` answer, by id. */
     @volatile private var issuedTargets = Map.empty[Int, DebugAdapter.StepTarget]
+    /**
+     * Whether the client launched without debugging (VS Code's Run Without Debugging): the adapter attaches all the
+     * same, as the program waits for it, so the proxy keeps the program from stopping by setting no breakpoint.
+     */
+    @volatile private var noDebug = false
     /** The thread a Smart Step Into is stepping, whose stops and resumes the client does not see. */
     @volatile private var stepping: Option[Int] = None
     private val steppingStops = new LinkedBlockingQueue[JsonObject]
@@ -332,6 +337,30 @@ object DebugProxy {
       client.write(response)
     }
 
+    /**
+     * The answer to a breakpoint request of a session without debugging, which the adapter never sees: every source
+     * or function breakpoint is reported as not set, so that the editor shows them disabled.
+     */
+    private def withoutBreakpoints(request: JsonObject, command: String): JsonObject = {
+      val response = responseTo(request)
+      val requested = request.obj("arguments").fold(Seq.empty[JsonObject])(arguments => command match {
+        case "setExceptionBreakpoints" => Seq.empty
+        case _ => arguments.objects("breakpoints")
+      })
+      val breakpoints = new JsonArray
+      requested.foreach { _ =>
+        val breakpoint = new JsonObject
+        breakpoint.addProperty("verified", false)
+        breakpoint.addProperty("message", "Run Without Debugging")
+        breakpoints.add(breakpoint)
+      }
+      val body = new JsonObject
+      if (command != "setExceptionBreakpoints") body.add("breakpoints", breakpoints)
+      response.addProperty("success", true)
+      response.add("body", body)
+      response
+    }
+
     /** The response to a client's request, without its outcome. */
     private def responseTo(request: JsonObject): JsonObject = {
       val response = new JsonObject
@@ -365,6 +394,12 @@ object DebugProxy {
           }
           initializeArguments.addProperty("supportsVariableType", true)
           forward(request)
+        case Some("launch") =>
+          noDebug = arguments.exists(_.bool("noDebug"))
+          forward(request)
+        case Some(command @ ("setBreakpoints" | "setFunctionBreakpoints" | "setExceptionBreakpoints" | "setDataBreakpoints"))
+            if noDebug =>
+          client.write(withoutBreakpoints(request, command))
         case Some("stepInTargets") => answerAsync(request)(stepInTargets(arguments))
         case Some("stepIn") =>
           val chosen = for {
