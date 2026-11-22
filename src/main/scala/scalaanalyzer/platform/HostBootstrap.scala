@@ -594,6 +594,8 @@ private[scalaanalyzer] object HostBootstrap {
       Rearranger.EXTENSION.addExplicitExtension(JavaLanguage.INSTANCE, new JavaRearranger)
       // The generated methods are created by the language's element factory, as java-backend's descriptor registers it.
       registerJavaLanguageExtension("com.intellij.generation.topLevelFactory", new JavaFactoryProvider)
+      // Surround With on a Java expression adds the surrounders of this point to its own; the Java plugin registers none.
+      declare("com.intellij.javaExpressionSurrounder")
       // Import fixes ask whether an extension keeps a file from being changed silently; the host has none.
       declare("com.intellij.silentChangeVetoer")
       // Import fixes also read the names the user keeps out of auto-import: the defaults, as the host persists none.
@@ -2217,7 +2219,9 @@ private[scalaanalyzer] object HostBootstrap {
           Descriptors.scalaExtensions(config.scalaPluginJars, "com.intellij.intentionAction") ++ PlatformListIntentions,
           javaIntentions(),
           Descriptors.scalaExtensions(config.scalaPluginJars, "com.intellij.lang.surroundDescriptor"),
-          Descriptors.scalaExtensions(config.scalaPluginJars, "com.intellij.lang.unwrapDescriptor")),
+          Descriptors.scalaExtensions(config.scalaPluginJars, "com.intellij.lang.unwrapDescriptor"),
+          javaBackendExtensions("com.intellij.lang.surroundDescriptor"),
+          javaBackendExtensions("com.intellij.lang.unwrapDescriptor")),
         new Inspections(Descriptors.scalaExtensionBeans(config.scalaPluginJars, "com.intellij.localInspection"),
           Descriptors.javaLocalInspections))
     }
@@ -2235,6 +2239,16 @@ private[scalaanalyzer] object HostBootstrap {
     Descriptors.scalaExtensionBeans(Seq(javaImplJar), "com.intellij.intentionAction")
       .filter(_.children.get("language").contains(JavaLanguage.INSTANCE.getID)).map(_.implementation)
   }
+
+  /**
+   * The implementations java-backend's descriptor registers for Java in a language extension point.
+   *
+   * @param name the extension point's qualified name
+   * @return the implementation class names, in the descriptor's order
+   */
+  private def javaBackendExtensions(name: String): Seq[String] =
+    Descriptors.scalaExtensionBeans(Seq(Descriptors.javaBackendJar), name)
+      .filter(_.attributes.get("language").contains(JavaLanguage.INSTANCE.getID)).map(_.implementation)
 
   /** Invokes the declared constructor of `cls` that takes `args.size` parameters, ignoring its visibility. */
   private def newPrivate[T](cls: Class[T], args: AnyRef*): T = {

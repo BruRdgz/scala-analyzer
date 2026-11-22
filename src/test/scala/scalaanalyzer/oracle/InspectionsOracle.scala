@@ -330,7 +330,7 @@ object InspectionsOracle {
         case Step.HasNoErrors(_) => Option.when(found.nonEmpty)(s"highlights at $found")
         // ScalaQuickFixTestFixture.testQuickFix: the first fix titled `hint` of the matching highlights.
         case Step.Fix(_, expected, hint) =>
-          val actions = new CodeActions(Seq.empty, Seq.empty, Seq.empty, Seq.empty)
+          val actions = new CodeActions(Seq.empty, Seq.empty, Seq.empty, Seq.empty, Seq.empty, Seq.empty)
           val offered = matching.flatMap(problem => host.read(actions.collect(file, problem.range, Seq(problem))))
           require(host.read(file.getText) == source, "code actions changed the source")
           offered.find(_.title == hint) match {

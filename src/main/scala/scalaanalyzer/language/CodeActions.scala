@@ -125,11 +125,14 @@ object CodeActions {
  *                              act through the plugin's extensions; offered in Scala files
  * @param javaIntentionClasses Java intention implementation names from the Java plugin's descriptors; offered in Java
  *                             files
- * @param descriptorClasses surround-descriptor implementation names from plugin descriptors
- * @param unwrapClasses unwrap-descriptor implementation names from plugin descriptors
+ * @param descriptorClasses surround-descriptor implementation names from the Scala plugin's descriptors
+ * @param unwrapClasses unwrap-descriptor implementation names from the Scala plugin's descriptors
+ * @param javaDescriptorClasses the Java plugin's surround descriptors for Java
+ * @param javaUnwrapClasses the Java plugin's unwrap descriptors for Java
  */
 final class CodeActions(scalaIntentionClasses: Seq[String], javaIntentionClasses: Seq[String],
-    descriptorClasses: Seq[String], unwrapClasses: Seq[String]) {
+    descriptorClasses: Seq[String], unwrapClasses: Seq[String], javaDescriptorClasses: Seq[String],
+    javaUnwrapClasses: Seq[String]) {
   import CodeActions.{Candidate, Choice, ImplementMembers}
 
   /**
@@ -180,7 +183,8 @@ final class CodeActions(scalaIntentionClasses: Seq[String], javaIntentionClasses
           case javaFile: PsiJavaFile =>
             val fixes = javaFixCandidates(javaFile, range, editor, problems)
             merged(intentionChoices(file, range, editor, fixes ++ intentionCandidates(file))) ++
-              inlinings(javaFile, range)
+              surrounded(javaFile, range, javaDescriptorClasses) ++
+              unwrapped(javaFile, range, editor, javaUnwrapClasses) ++ inlinings(javaFile, range)
           case _ => intentionChoices(file, range, editor, intentionCandidates(file)).distinct
         }
     }
@@ -204,39 +208,11 @@ final class CodeActions(scalaIntentionClasses: Seq[String], javaIntentionClasses
   /** The annotator fixes, intentions, import candidates, surround actions, unwrappers and inlinings of a Scala file. */
   private def collectScala(file: ScalaFile, range: TextRange, problems: Seq[Diagnostic], editor: Editor)
       : Seq[Choice] = {
-    val project = file.getProject
     val fixes = fixCandidates(range, problems).filterNot(isImplementMembersFix)
     val choices = intentionChoices(file, range, editor, fixes ++ intentionCandidates(file))
 
-    val surrounded = if (range.isEmpty) Seq.empty else descriptorClasses.flatMap { name =>
-      // `descriptorClasses` holds the surround-descriptor implementations registered in the plugin descriptors.
-      val descriptor = Class.forName(name).getConstructor().newInstance().asInstanceOf[SurroundDescriptor]
-      val elements = descriptor.getElementsToSurround(file, range.getStartOffset, range.getEndOffset)
-      if (elements.isEmpty) Seq.empty else descriptor.getSurrounders.toSeq.flatMap { surrounder =>
-        try {
-          if (!surrounder.isApplicable(elements)) None
-          else {
-            val (result, _) = preview(file) { copy =>
-              val selected = descriptor.getElementsToSurround(copy, range.getStartOffset, range.getEndOffset)
-              val previewEditor = IntentionPreviewUtils.getPreviewEditor
-              previewEditor.getCaretModel.moveToOffset(range.getStartOffset)
-              previewEditor.getSelectionModel.setSelection(range.getStartOffset, range.getEndOffset)
-              surrounder.surroundElements(project, previewEditor, selected)
-            }
-            Some(Choice(surrounder.getTemplateDescription, "refactor.rewrite", result.edits, None))
-          }
-        } catch {
-          case e: ProcessCanceledException => throw e
-          case e @ (NonFatal(_) | _: LinkageError) =>
-            HostLog.warn(s"surround action ${surrounder.getClass.getName} could not be previewed", e)
-            Some(Choice(surrounder.getTemplateDescription, "refactor.rewrite", Seq.empty,
-              Some("This action is unavailable in the headless host.")))
-        }
-      }
-    }
-
-    (typeImports(file, range, problems) ++ choices ++ surrounded ++ unwrapped(file, range, editor) ++
-      inlinings(file, range)).distinct
+    (typeImports(file, range, problems) ++ choices ++ surrounded(file, range, descriptorClasses) ++
+      unwrapped(file, range, editor, unwrapClasses) ++ inlinings(file, range)).distinct
   }
 
   /** The registered intentions of the file's language, as candidates; none for a file of another language. */
@@ -352,6 +328,43 @@ final class CodeActions(scalaIntentionClasses: Seq[String], javaIntentionClasses
   private def isImplementMembersFix(candidate: Candidate): Boolean =
     Set(classOf[ImplementMembersQuickFix], classOf[ImplementMethodsFix]).exists(_.getName == candidate.name)
 
+  /**
+   * Offers each surrounder that the descriptors find applicable to the selection, as the IDE's Surround With popup
+   * lists them, previewed on a copy.
+   *
+   * @param classes surround-descriptor implementations of the file's language
+   */
+  private def surrounded(file: PsiFile, range: TextRange, classes: Seq[String]): Seq[Choice] = {
+    val project = file.getProject
+
+    if (range.isEmpty) Seq.empty else classes.flatMap { name =>
+      // `classes` holds surround-descriptor implementations registered in the plugins' descriptors.
+      val descriptor = Class.forName(name).getConstructor().newInstance().asInstanceOf[SurroundDescriptor]
+      val elements = descriptor.getElementsToSurround(file, range.getStartOffset, range.getEndOffset)
+      if (elements.isEmpty) Seq.empty else descriptor.getSurrounders.toSeq.flatMap { surrounder =>
+        try {
+          if (!surrounder.isApplicable(elements)) None
+          else {
+            val (result, _) = previewFile(file) { copy =>
+              val selected = descriptor.getElementsToSurround(copy, range.getStartOffset, range.getEndOffset)
+              val previewEditor = IntentionPreviewUtils.getPreviewEditor
+              previewEditor.getCaretModel.moveToOffset(range.getStartOffset)
+              previewEditor.getSelectionModel.setSelection(range.getStartOffset, range.getEndOffset)
+              surrounder.surroundElements(project, previewEditor, selected)
+            }
+            Some(Choice(surrounder.getTemplateDescription, "refactor.rewrite", result.edits, None))
+          }
+        } catch {
+          case e: ProcessCanceledException => throw e
+          case e @ (NonFatal(_) | _: LinkageError) =>
+            HostLog.warn(s"surround action ${surrounder.getClass.getName} could not be previewed", e)
+            Some(Choice(surrounder.getTemplateDescription, "refactor.rewrite", Seq.empty,
+              Some("This action is unavailable in the headless host.")))
+        }
+      }
+    }
+  }
+
   /** Creates a registered intention; a ModCommand action is wrapped as the intention the platform registers it as. */
   private def newIntention(name: String): IntentionAction =
     // `intentionClasses` holds intention implementations: IntentionActions or ModCommandActions.
@@ -367,17 +380,17 @@ final class CodeActions(scalaIntentionClasses: Seq[String], javaIntentionClasses
    * An unwrapper is applied to a copy, found there by its position in the descriptor's list: the copy has the same
    * text, so the list is the same.
    */
-  private def unwrapped(file: ScalaFile, range: TextRange, editor: Editor): Seq[Choice] = {
+  private def unwrapped(file: PsiFile, range: TextRange, editor: Editor, classes: Seq[String]): Seq[Choice] = {
     val project = file.getProject
 
-    unwrapClasses.flatMap { name =>
-      // `unwrapClasses` holds the unwrap-descriptor implementations registered in the plugin descriptors.
+    classes.flatMap { name =>
+      // `classes` holds unwrap-descriptor implementations registered in the plugins' descriptors.
       val descriptor = Class.forName(name).getConstructor().newInstance().asInstanceOf[UnwrapDescriptor]
 
       descriptor.collectUnwrappers(project, editor, file).asScala.toSeq.zipWithIndex.map { case (found, index) =>
         val title = found.getSecond.getDescription(found.getFirst)
         try {
-          val (result, _) = preview(file) { copy =>
+          val (result, _) = previewFile(file) { copy =>
             val previewEditor = IntentionPreviewUtils.getPreviewEditor
             previewEditor.getCaretModel.moveToOffset(range.getStartOffset)
             val copied = descriptor.collectUnwrappers(project, previewEditor, copy).get(index)
@@ -555,6 +568,10 @@ final class CodeActions(scalaIntentionClasses: Seq[String], javaIntentionClasses
 
   /** Previews a transformation of a Scala file copy, checking that it logged no error (see [[withoutLoggedErrors]]). */
   private def preview[A](file: ScalaFile)(modify: ScalaFile => A): (ChangeEngine.Result, A) =
+    withoutLoggedErrors(ChangeEngine.run(file)(modify))
+
+  /** Previews a change on a copy of a Scala or Java file, as [[preview]] does for a Scala file. */
+  private def previewFile[A](file: PsiFile)(modify: PsiFile => A): (ChangeEngine.Result, A) =
     withoutLoggedErrors(ChangeEngine.run(file)(modify))
 
   /**

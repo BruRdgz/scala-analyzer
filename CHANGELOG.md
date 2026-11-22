@@ -69,6 +69,8 @@
   methods, nested classes by their binary name.
 - Java completion runs the Java plugin's other completion contributors: names for a new variable from its type,
   javadoc tags and references, the qualifier as an argument, `main`'s `args`, loggers.
+- Java files have the surround (`if`, `for`, `try`..., on selected statements or an expression) and unwrap/remove
+  actions of the Java plugin's descriptors, previewed on a copy.
 - Type Info (the VS Code command and MCP's `type_of`) works in Java files: the type of the selected expression, or of
   the innermost one at the caret.
 - A rename of a Java element to a Java keyword is refused, and Java references, rename and navigation decide the

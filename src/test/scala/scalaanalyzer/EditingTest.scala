@@ -973,14 +973,14 @@ class EditingTest extends munit.FunSuite {
         host.read(actions.collect(file, new TextRange(caret, caret), Seq.empty)).map(_.title)
       }
       // Control: the Java intention is offered in the Java file when it is registered for Java.
-      assert(offered(new CodeActions(Seq.empty, Seq(flip), Seq.empty, Seq.empty), javaFile, javaText, "<").nonEmpty)
-      assertEquals(offered(new CodeActions(Seq.empty, Seq(flip), Seq.empty, Seq.empty), scalaSource, scalaText, "<"),
+      assert(offered(new CodeActions(Seq.empty, Seq(flip), Seq.empty, Seq.empty, Seq.empty, Seq.empty), javaFile, javaText, "<").nonEmpty)
+      assertEquals(offered(new CodeActions(Seq.empty, Seq(flip), Seq.empty, Seq.empty, Seq.empty, Seq.empty), scalaSource, scalaText, "<"),
         Seq.empty)
-      assertEquals(offered(new CodeActions(Seq(flip), Seq.empty, Seq.empty, Seq.empty), javaFile, javaText, "<"),
+      assertEquals(offered(new CodeActions(Seq(flip), Seq.empty, Seq.empty, Seq.empty, Seq.empty, Seq.empty), javaFile, javaText, "<"),
         Seq.empty)
       // The modifier popup is excluded however it is registered; this checks its absence, not that it would apply here.
       assertEquals(
-        offered(new CodeActions(Seq.empty, Seq(changeModifier), Seq.empty, Seq.empty), javaFile, javaText, "Flip"),
+        offered(new CodeActions(Seq.empty, Seq(changeModifier), Seq.empty, Seq.empty, Seq.empty, Seq.empty), javaFile, javaText, "Flip"),
         Seq.empty)
     } finally {
       host.closeSource(javaFile)
@@ -1065,6 +1065,43 @@ class EditingTest extends munit.FunSuite {
         assertEquals(host.read(file.getText), original)
       } finally host.closeSource(file)
     }
+  }
+
+  // The oracle is the Java plugin's unwrap and surround descriptors, as the IDE's Unwrap/Remove and Surround With
+  // popups list them: the surrounded statement is found in the `if` that the surrounder writes, whatever condition it
+  // leaves for the user to type.
+  test("Java unwrap and surround actions apply the Java plugin's descriptors on a copy and keep the source") {
+    def javaFile(name: String, text: String): PsiJavaFile =
+      host.openFile(Path.of(s"/editing/$name.java"), text, module) match {
+        case f: PsiJavaFile => f
+        case other => fail(s"not Java: $other")
+      }
+    val unwrapMarked = "class Unwrap { void f(boolean b) { if (b) { <caret>System.out.println(1); } } }"
+    val unwrapOriginal = unwrapMarked.replace("<caret>", "")
+    val unwrapFile = javaFile("Unwrap", unwrapOriginal)
+    try {
+      val at = unwrapMarked.indexOf("<caret>")
+      val actions = host.codeActions(unwrapFile, new TextRange(at, at)).choices
+      val chosen = actions.find(_.title.startsWith("Unwrap 'if...'")).getOrElse(fail(actions.toString))
+      assertEquals(chosen.disabled, None)
+      assertEquals(applyEdits(unwrapOriginal, chosen.edits).replaceAll("\\s+", " "),
+        "class Unwrap { void f(boolean b) { System.out.println(1); } }")
+      assertEquals(host.read(unwrapFile.getText), unwrapOriginal)
+    } finally host.closeSource(unwrapFile)
+
+    val surroundOriginal = "class Surround { void f() { System.out.println(1); } }"
+    val surroundFile = javaFile("Surround", surroundOriginal)
+    try {
+      val statement = surroundOriginal.indexOf("System")
+      val selection = new TextRange(statement, surroundOriginal.indexOf("}") - 1)
+      val actions = host.codeActions(surroundFile, selection).choices
+      val wrappedInIf = """.*\{ if \([^)]*\) \{ System\.out\.println\(1\); \} \} \}""".r
+      val surrounded = actions.find(action => action.edits.nonEmpty &&
+        wrappedInIf.matches(applyEdits(surroundOriginal, action.edits).replaceAll("\\s+", " ")))
+        .getOrElse(fail(actions.map(a => a.title -> a.disabled).toString))
+      assertEquals(surrounded.kind, "refactor.rewrite")
+      assertEquals(host.read(surroundFile.getText), surroundOriginal)
+    } finally host.closeSource(surroundFile)
   }
 
   // Expected texts follow the plugin's inline tests (testdata/refactoring/inline), moved into a block or a private
